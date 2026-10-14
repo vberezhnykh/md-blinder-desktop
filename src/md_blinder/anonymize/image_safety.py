@@ -13,7 +13,7 @@ from .types import Position
 
 IMAGE_REMOVED_MARKER = "[Изображение удалено при обезличивании]"
 
-_HTML_RE = re.compile(r"""<(img|picture|svg)\b(?:[^>"']|"[^"]*"|'[^']*')*>""", re.I)
+_HTML_RE = re.compile(r"""<(img|picture|svg)(?![A-Za-z0-9_])(?:[^>"']|"[^"]*"|'[^']*')*>""", re.I)
 _DEFINITION_RE = re.compile(r"^ {0,3}\[([^\]\r\n]+)\]:([^\r\n]*)", re.M)
 _DESTINATION_LINE_RE = re.compile(r"\r?\n[ \t]*\S[^\r\n]*")
 _TITLE_LINE_RE = re.compile(r"""\r?\n[ \t]+["'(][^\r\n]*""")

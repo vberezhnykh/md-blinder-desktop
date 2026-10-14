@@ -12,7 +12,7 @@ import re
 from .types import ALL_ENTITY_TYPES, Position
 
 ZW = "​"
-_PLACEHOLDER_RE = re.compile(r"\[(?:" + "|".join(ALL_ENTITY_TYPES) + r")_\d+\]")
+_PLACEHOLDER_RE = re.compile(r"\[(?:" + "|".join(ALL_ENTITY_TYPES) + r")_[0-9]+\]")
 
 
 def find_placeholder_ranges(text: str) -> list[Position]:

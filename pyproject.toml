@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-blinder-desktop"
+version = "0.1.0"
+description = "Настольная версия MD Blinder: DOCX/PDF в Markdown и обезличивание"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "PySide6>=6.8",
+  "pymupdf>=1.25",
+  "mammoth>=1.9",
+  "markdownify>=1.1",
+  "beautifulsoup4>=4.12",
+  "onnxruntime>=1.20",
+  "tokenizers>=0.20",
+  "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4", "pyinstaller>=6.10"]
+
+[project.gui-scripts]
+md-blinder = "md_blinder.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "model: нужен скачанный файл модели GLiNER",
+  "tessdata: нужны языковые файлы Tesseract",
+]

@@ -1,5 +1,7 @@
 """Пункт в меню проводника, разбор командной строки и передача файла открытой программе."""
 
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 
@@ -73,16 +75,26 @@ def test_file_argument_skips_switches(tmp_path):
     assert shell.file_argument(["MD Blinder.exe"]) is None
 
 
+def _launch(path, name):
+    """Второй запуск — отдельный процесс, как при выборе пункта в проводнике."""
+    code = (
+        "import sys; from PySide6.QtCore import QCoreApplication; app = QCoreApplication([]); "
+        "from md_blinder.ui.single_instance import send_to_running; "
+        "sys.exit(0 if send_to_running(sys.argv[1] or None, sys.argv[2], 3000) else 1)"
+    )
+    return subprocess.Popen([sys.executable, "-c", code, path, name])
+
+
 def test_second_launch_hands_path_to_running_instance(qtbot):
     name = f"md-blinder-test-{uuid.uuid4().hex}"
     server = InstanceServer(name)
     assert server.listen()
-    with qtbot.waitSignal(server.received, timeout=3000) as signal:
-        assert send_to_running(r"C:\Документы\договор.pdf", name)
-    assert signal.args == [r"C:\Документы\договор.pdf"]
-    with qtbot.waitSignal(server.received, timeout=3000) as signal:
-        assert send_to_running(None, name)
-    assert signal.args == [""]
+    for path in (r"C:\Документы\договор.pdf", ""):
+        with qtbot.waitSignal(server.received, timeout=15000) as signal:
+            process = _launch(path, name)
+        assert signal.args == [path]
+        qtbot.waitUntil(lambda p=process: p.poll() is not None, timeout=10000)
+        assert process.returncode == 0
 
 
 def test_no_running_instance():

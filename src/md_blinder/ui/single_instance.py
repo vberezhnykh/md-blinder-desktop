@@ -16,6 +16,10 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 
 
+# Сколько новый запуск ждет подтверждения от открытой программы.
+ACK_TIMEOUT_MS = 3000
+
+
 def server_name() -> str:
     try:
         user = getpass.getuser()
@@ -25,7 +29,11 @@ def server_name() -> str:
 
 
 def send_to_running(path: Optional[str], name: Optional[str] = None, timeout_ms: int = 500) -> bool:
-    """Отдает путь открытой программе. False — программа не запущена."""
+    """Отдает путь открытой программе. False — программа не запущена.
+
+    Клиент ждет подтверждения и только потом отключается: в Windows сообщение,
+    оставшееся в именованном канале после отключения клиента, теряется.
+    """
     socket = QLocalSocket()
     socket.connectToServer(name or server_name())
     if not socket.waitForConnected(timeout_ms):
@@ -42,6 +50,8 @@ def send_to_running(path: Optional[str], name: Optional[str] = None, timeout_ms:
     # Сообщение — одна строка JSON с переводом строки в конце.
     socket.write(json.dumps({"path": path}).encode("utf-8") + b"\n")
     socket.waitForBytesWritten(timeout_ms)
+    # Программа занята (например, открыт диалог) — все равно не запускаем вторую копию.
+    socket.waitForReadyRead(ACK_TIMEOUT_MS)
     socket.disconnectFromServer()
     if socket.state() != QLocalSocket.LocalSocketState.UnconnectedState:
         socket.waitForDisconnected(timeout_ms)
@@ -78,6 +88,8 @@ class InstanceServer(QObject):
                 # в деструкторе. Сигналы глушатся, чтобы закрытие сокета при
                 # выходе не вызвало обработчик снова.
                 s.blockSignals(True)
+                s.write(b"ok\n")
+                s.flush()
                 s.disconnectFromServer()
                 line = bytes(buf).split(b"\n", 1)[0]
                 try:

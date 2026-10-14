@@ -112,6 +112,9 @@ class TopBar(QFrame):
         save.addWidget(self.save_label)
         row.addLayout(save)
         row.addStretch(1)
+        self.home_button = QPushButton("На главную")
+        self.home_button.setIcon(icon("home", t.INK, 16, t.ACCENT))
+        self.home_button.setToolTip("Стартовый экран со всеми документами")
         self.new_button = QPushButton("Новый файл")
         self.new_button.setIcon(icon("upload", t.INK, 16, t.ACCENT))
         self.new_button.setToolTip("Или перетащите файл на эту панель")
@@ -127,6 +130,7 @@ class TopBar(QFrame):
         hrow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
         self.history_button.setMinimumWidth(130)
         self.history_button.setMinimumHeight(self.new_button.sizeHint().height())
+        row.addWidget(self.home_button)
         row.addWidget(self.new_button)
         row.addWidget(self.history_button)
         self.history_menu = PopupMenu(self, 340)
@@ -158,6 +162,7 @@ class DocumentPage(QWidget):
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(0)
         self.topbar = TopBar()
+        self.home_button = self.topbar.home_button
         self.new_button = self.topbar.new_button
         self.history_button = self.topbar.history_button
         self.history_menu = self.topbar.history_menu
@@ -306,6 +311,7 @@ class MainWindow(QMainWindow):
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
 
+        p.home_button.clicked.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
         p.retry_save.clicked.connect(self.autosave.flush)
         p.ocr_retry_button.clicked.connect(self.retry_with_ocr)

@@ -109,7 +109,7 @@ def test_unknown_and_legacy_files(qtbot, window, tmp_path):
 def test_history_reopen(qtbot, window, tmp_path):
     open_docx(qtbot, window, tmp_path, para(TEXT))
     doc_id = window.session.doc.id
-    window.show_all_docs()
+    qtbot.mouseClick(window.page.home_button, Qt.MouseButton.LeftButton)
     assert window.stack.currentWidget() is window.start
     window.open_doc(doc_id)
     assert window.session.doc.id == doc_id

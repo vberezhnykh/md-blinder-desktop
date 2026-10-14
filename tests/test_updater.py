@@ -114,4 +114,16 @@ def test_script_replaces_only_exe_and_internal(tmp_path):
     assert f'robocopy "{tmp_path / "new" / "_internal"}" "{tmp_path / "app" / "_internal"}" /MIR' in text
     assert f'copy /Y "{tmp_path / "new" / "MD Blinder.exe"}"' in text
     assert "--updated" in text and "--update-failed" in text
+    # Без конвейера: find, получивший свою консоль, ждал ввода, и обновление висело.
+    assert "|" not in text
     script.unlink()
+
+
+def test_script_runs_in_hidden_console(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    for name, value in (("CREATE_NEW_PROCESS_GROUP", 0x200), ("CREATE_NO_WINDOW", 0x8000000), ("DETACHED_PROCESS", 0x8)):
+        monkeypatch.setattr(updater.subprocess, name, value, raising=False)
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda *args, **kwargs: calls.append(kwargs))
+    updater.launch_script(tmp_path / "update.cmd")
+    assert calls[0]["creationflags"] == 0x200 | 0x8000000

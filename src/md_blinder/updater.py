@@ -188,9 +188,13 @@ def write_script(staged: Path, target: Path, pid: int) -> Path:
         "@echo off",
         "chcp 65001 >nul",
         ":wait",
-        f'tasklist /FI "PID eq {pid}" /NH 2>nul | find /I "{EXE_NAME}" >nul',
-        # timeout не работает без консоли, поэтому пауза через ping.
+        # Список процессов пишется в файл рядом со скриптом и ищется в файле.
+        # Через конвейер tasklist | find нельзя: если find получит свою консоль,
+        # он ждет ввода с клавиатуры, и обновление зависает.
+        f'tasklist /FI "PID eq {pid}" /NH >"%~dpn0.txt" 2>nul',
+        f'findstr /I /C:"{EXE_NAME}" "%~dpn0.txt" >nul',
         "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)",
+        'del "%~dpn0.txt" >nul 2>&1',
         f'robocopy "{staged / "_internal"}" "{target / "_internal"}" /MIR /R:10 /W:1 /NFL /NDL /NJH /NJS /NP >nul',
         "if errorlevel 8 goto fail",
         f'copy /Y "{staged / EXE_NAME}" "{exe}" >nul',
@@ -210,7 +214,10 @@ def write_script(staged: Path, target: Path, pid: int) -> Path:
 def launch_script(script: Path) -> None:
     flags = 0
     if sys.platform == "win32":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        # Скрытая консоль, которую наследуют tasklist, robocopy и ping. С
+        # DETACHED_PROCESS у cmd консоли нет, флаг CREATE_NO_WINDOW игнорируется,
+        # и каждая команда скрипта открывает свое окно.
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     subprocess.Popen(  # noqa: S603 — скрипт создан программой выше
         ["cmd.exe", "/c", str(script)], creationflags=flags, close_fds=True,
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

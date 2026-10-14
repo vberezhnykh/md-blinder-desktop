@@ -4,19 +4,84 @@ from __future__ import annotations
 
 import re
 
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 from markdownify import MarkdownConverter
 
 _CELL_BREAK_RE = re.compile(r"\r?\n\s*\n?")
+# Ограничение на colspan/rowspan: защита от испорченного документа с огромным
+# значением, которое иначе раздует таблицу.
+_MAX_SPAN = 1000
+
+
+def _span(cell: Tag, attr: str, fallback: int) -> int:
+    raw = str(cell.get(attr) or "").strip()
+    if not raw.isdigit():
+        return 1
+    value = int(raw)
+    # rowspan="0" по стандарту тянется до конца таблицы.
+    return fallback if value == 0 else min(value, _MAX_SPAN)
+
+
+def _own_rows(table: Tag) -> list[Tag]:
+    return [tr for tr in table.find_all("tr") if tr.find_parent("table") is table]
+
+
+def _own_cells(row: Tag) -> list[Tag]:
+    return row.find_all(["td", "th"], recursive=False)
+
+
+def _expand_spans(soup: BeautifulSoup, table: Tag) -> None:
+    """Раскладывает объединенные ячейки в полную сетку.
+
+    В таблице Markdown нет объединенных ячеек. Значение остается в первой ячейке
+    объединения, покрытые ею места заполняются пустыми ячейками. Без этого строка
+    под ячейкой с rowspan теряет столбец, и ее значения сдвигаются влево.
+    Короткие строки дополняются до ширины таблицы.
+    """
+    rows = _own_rows(table)
+    # occupied[r] — столбцы строки r, занятые ячейками с rowspan из строк выше.
+    occupied: list[set[int]] = [set() for _ in rows]
+    for r, row in enumerate(rows):
+        col = 0
+
+        def fill(before: Tag | None, tag: str) -> None:
+            nonlocal col
+            while col in occupied[r]:
+                empty = soup.new_tag(tag)
+                if before is None:
+                    row.append(empty)
+                else:
+                    before.insert_before(empty)
+                col += 1
+
+        for cell in _own_cells(row):
+            fill(cell, cell.name)
+            colspan = _span(cell, "colspan", 1)
+            rowspan = min(_span(cell, "rowspan", len(rows) - r), len(rows) - r)
+            del cell["colspan"], cell["rowspan"]
+            for dr in range(1, rowspan):
+                occupied[r + dr].update(range(col, col + colspan))
+            for _ in range(1, colspan):
+                cell.insert_after(soup.new_tag(cell.name))
+            col += colspan
+        cells = _own_cells(row)
+        fill(None, cells[-1].name if cells else "td")
+    width = max((len(_own_cells(row)) for row in rows), default=0)
+    for row in rows:
+        cells = _own_cells(row)
+        tag = cells[-1].name if cells else "td"
+        for _ in range(len(cells), width):
+            row.append(soup.new_tag(tag))
 
 
 def preprocess_table_html(html: str) -> str:
-    """Делает первую строку таблицы без <thead> заголовком из <th>.
+    """Раскладывает объединенные ячейки и делает первую строку без <thead> заголовком из <th>.
 
     mammoth не выдает <thead>; без него строка заголовка таблицы получается пустой.
     """
     soup = BeautifulSoup(html, "html.parser")
     for table in soup.find_all("table"):
+        _expand_spans(soup, table)
         if table.find("thead"):
             continue
         first_row = table.find("tr")
@@ -47,11 +112,7 @@ class _Converter(MarkdownConverter):
         finally:
             el.name = name
         value = _CELL_BREAK_RE.sub("<br>", content.strip()).replace("|", "\\|")
-        colspan = 1
-        raw = el.attrs.get("colspan")
-        if raw and str(raw).isdigit():
-            colspan = max(1, min(1000, int(raw)))
-        return " " + value + " |" * colspan
+        return " " + value + " |"
 
     def convert_td(self, el, text, parent_tags):
         return self._cell(el, parent_tags)

@@ -230,6 +230,8 @@ class ProcessingJob(QObject):
 
 
 def start_job(job: ProcessingJob) -> QThread:
+    # Сборщик мусора в рабочем потоке выключен (ui/gc_guard.py): иначе он мог бы
+    # удалить здесь Qt-объекты интерфейса, а это падение на Windows.
     thread = QThread()
     job.moveToThread(thread)
     thread.started.connect(job.run)

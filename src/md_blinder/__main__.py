@@ -80,6 +80,9 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     register_fonts()
+    from .ui.gc_guard import install as install_gc
+
+    install_gc(app)
     app.setApplicationName("MD Blinder")
     app.setOrganizationName("md-blinder")
     app.setStyle("Fusion")

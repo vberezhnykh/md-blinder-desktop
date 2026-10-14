@@ -17,6 +17,7 @@ dependencies = [
   "tokenizers>=0.20",
   "numpy>=2.0",
   "regex>=2024.1",
+  "truststore>=0.9",
 ]
 
 [project.optional-dependencies]

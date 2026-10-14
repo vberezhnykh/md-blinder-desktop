@@ -3,14 +3,17 @@
 Только CPU (CPUExecutionProvider), веса fp16 — как в браузере. int8/q4f16 не
 используются: на них настоящие русские имена получали ~0.16 вместо ~0.92.
 
-Уровень оптимизации графа. В браузере (onnxruntime-web, WASM) уровень 'all'
-падал в SimplifiedLayerNormFusion на этом fp16-графе (onnxruntime #26717), поэтому
-там стоит 'layout'. В нативном onnxruntime 1.31 на CPU ORT_ENABLE_ALL создает
-сессию, проходит калибровку и дает те же 18 эталонных спанов бенчмарка, что и
-BASIC/EXTENDED, при этом самый быстрый (замеры — в отчете порта и в
-tests/test_ner_model.py). Если будущая версия ORT снова сломает граф, load_model
-откатывается на следующий уровень из GRAPH_OPTIMIZATION_FALLBACKS — каждый уровень
-обязан пройти калибровку.
+Оптимизация графа. В браузере (onnxruntime-web, WASM) уровень 'all' падал в
+SimplifiedLayerNormFusion на этом fp16-графе (onnxruntime #26717), поэтому там
+стоит 'layout'. В нативном onnxruntime 1.31 на CPU все уровни (disabled, basic,
+extended, layout, all) создают сессию, проходят калибровку и дают одни и те же
+спаны. Выбран ORT_ENABLE_ALL с отключенной только SimplifiedLayerNormFusion:
+по скорости он неотличим от полного 'all' (в пределах шума замеров, ~15–20%
+быстрее basic/extended/layout), но оценки отличаются от неоптимизированного графа
+не более чем на ~0.001, тогда как с этой фьюжн — до 0.026 (ООО «Альфа»), то есть
+заметно ближе к браузерному 'layout'. Если будущая версия ORT сломает граф,
+engine.load_model перебирает GRAPH_OPTIMIZATION_FALLBACKS — каждый вариант обязан
+пройти калибровку.
 """
 
 from __future__ import annotations
@@ -30,8 +33,24 @@ SEP_ID = 2
 ENT_ID = 250103
 PROMPT_SEP_ID = 250104
 
-# Порядок важен: первым — самый быстрый уровень, прошедший калибровку.
-GRAPH_OPTIMIZATION_FALLBACKS: tuple[str, ...] = ("all", "extended", "basic")
+SIMPLIFIED_LAYER_NORM_FUSION = "SimplifiedLayerNormFusion"
+
+
+@dataclass(frozen=True)
+class OptimizationConfig:
+    level: str
+    disabled_optimizers: tuple[str, ...] = ()
+
+    def __str__(self) -> str:
+        return self.level + "".join(f" -{name}" for name in self.disabled_optimizers)
+
+
+# Порядок важен: первым — выбранный вариант, дальше — запасные, более консервативные.
+GRAPH_OPTIMIZATION_FALLBACKS: tuple[OptimizationConfig, ...] = (
+    OptimizationConfig("all", (SIMPLIFIED_LAYER_NORM_FUSION,)),
+    OptimizationConfig("basic"),
+    OptimizationConfig("disabled"),
+)
 _LEVELS = {
     "disabled": ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
     "basic": ort.GraphOptimizationLevel.ORT_ENABLE_BASIC,
@@ -68,9 +87,8 @@ class GlinerModel:
         self,
         model_dir: Path | str,
         *,
-        optimization: str = GRAPH_OPTIMIZATION_FALLBACKS[0],
+        optimization: OptimizationConfig = GRAPH_OPTIMIZATION_FALLBACKS[0],
         intra_op_threads: int = 0,
-        disabled_optimizers: Optional[Sequence[str]] = None,
         tokenizer: Optional[_WordTokenizer] = None,
     ) -> None:
         model_dir = Path(model_dir)
@@ -78,11 +96,11 @@ class GlinerModel:
         self.optimization = optimization
         self.tokenizer = tokenizer or load_tokenizer(model_dir)
         options = ort.SessionOptions()
-        options.graph_optimization_level = _LEVELS[optimization]
+        options.graph_optimization_level = _LEVELS[optimization.level]
         options.log_severity_level = 3  # шум оптимизатора («Could not find a CPU kernel…») не ошибка
         if intra_op_threads:
             options.intra_op_num_threads = intra_op_threads
-        kwargs = {"disabled_optimizers": list(disabled_optimizers)} if disabled_optimizers else {}
+        kwargs = {"disabled_optimizers": list(optimization.disabled_optimizers)} if optimization.disabled_optimizers else {}
         try:
             # Путь, а не байты: 580 МБ не дублируются в памяти Python.
             self._session: Optional[ort.InferenceSession] = ort.InferenceSession(

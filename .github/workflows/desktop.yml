@@ -18,6 +18,9 @@ permissions:
 
 jobs:
   test:
+    # contents: write нужен только шагу публикации релиза (см. ниже).
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -69,3 +72,24 @@ jobs:
           name: md-blinder-windows
           path: desktop/dist/MD Blinder
           retention-days: 14
+
+      # Новая версия в md_blinder/__init__.py выпускается автоматически: если
+      # релиза desktop-v<версия> еще нет, он создается из этого коммита.
+      # Настольная программа находит его через API релизов и предлагает обновиться.
+      - name: Publish release for a new version
+        if: runner.os == 'Windows' && github.event_name == 'push'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = python -c "import md_blinder; print(md_blinder.__version__)"
+          $tag = "desktop-v$version"
+          gh release view $tag --repo "${{ github.repository }}" *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Host "Релиз $tag уже есть"; exit 0 }
+          Compress-Archive -Path "dist\MD Blinder\*" -DestinationPath "md-blinder-windows.zip"
+          $hash = (Get-FileHash "md-blinder-windows.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "md-blinder-windows.zip.sha256" -Value "$hash  md-blinder-windows.zip" -NoNewline -Encoding ascii
+          $notes = "Настольная версия MD Blinder $version для Windows. Обновление ставится из программы; первая установка — распаковать архив в свою папку и запустить MD Blinder.exe."
+          gh release create $tag md-blinder-windows.zip md-blinder-windows.zip.sha256 `
+            --repo "${{ github.repository }}" --target "${{ github.sha }}" `
+            --title "MD Blinder Desktop $version" --notes "$notes"

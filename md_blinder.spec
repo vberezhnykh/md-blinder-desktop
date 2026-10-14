@@ -14,11 +14,12 @@ datas = [
 ]
 
 # Модули Qt, которые программа не использует: без них папка сборки заметно меньше.
+# QtNetwork нужен: через QLocalServer новый запуск передает файл открытой программе.
 excludes = [
     "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick", "PySide6.QtQml",
     "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
-    "PySide6.QtBluetooth", "PySide6.QtNetwork", "PySide6.QtSql", "PySide6.QtTest",
+    "PySide6.QtBluetooth", "PySide6.QtSql", "PySide6.QtTest",
     "tkinter", "matplotlib", "pytest",
 ]
 

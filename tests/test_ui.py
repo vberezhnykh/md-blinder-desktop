@@ -212,3 +212,26 @@ def test_drag_handle_changes_span_as_one_command(qtbot, window, tmp_path):
     window.session.undo_stack.undo()
     restored = next(e for e in window.session.entities if e.id == entity.id)
     assert restored.positions == [Position(span.start, span.end)]
+
+
+def test_open_external_processes_file_or_waits_for_running_job(qtbot, window, tmp_path, monkeypatch):
+    opened = []
+    monkeypatch.setattr(window, "process_file", lambda path, force_ocr=False: opened.append(path))
+    window.open_external(str(tmp_path / "a.pdf"))
+    assert opened == [tmp_path / "a.pdf"]
+    window.job = object()
+    window.open_external(str(tmp_path / "b.pdf"))
+    assert opened == [tmp_path / "a.pdf"]
+    window.job = None
+    window.open_external("")
+    assert opened == [tmp_path / "a.pdf"]
+
+def test_select_shows_every_entity_type_without_scrolling(qtbot):
+    from md_blinder.anonymize.types import ALL_ENTITY_TYPES
+    from md_blinder.ui.widgets import Select
+
+    box = Select()
+    qtbot.addWidget(box)
+    box.addItems(list(ALL_ENTITY_TYPES))
+    assert box.maxVisibleItems() >= len(ALL_ENTITY_TYPES)
+

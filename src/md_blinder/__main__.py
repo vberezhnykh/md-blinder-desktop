@@ -90,12 +90,21 @@ def main() -> int:
     if "--self-check" in sys.argv:
         return self_check()
 
+    from PySide6.QtCore import QTimer
     from PySide6.QtWidgets import QApplication
 
+    from .shell import file_argument
     from .ui.main_window import MainWindow
+    from .ui.single_instance import InstanceServer, send_to_running
     from .ui.theme import STYLESHEET, register_fonts
 
     app = QApplication(sys.argv)
+    file_path = file_argument(sys.argv)
+    # Программа уже открыта: файл из меню проводника уходит в ее окно.
+    if send_to_running(str(file_path) if file_path else None):
+        return 0
+    instance = InstanceServer()
+    instance.listen()
     register_fonts()
     from .ui.gc_guard import install as install_gc
 
@@ -107,6 +116,9 @@ def main() -> int:
     window = MainWindow()
     window.show()
     window.show_startup_notice(sys.argv)
+    instance.received.connect(window.open_external)
+    if file_path:
+        QTimer.singleShot(0, lambda: window.open_external(str(file_path)))
     window.updates.startup()
     return app.exec()
 

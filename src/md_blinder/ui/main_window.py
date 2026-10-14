@@ -45,6 +45,7 @@ from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
+from .. import shell
 from ..paths import history_db_path
 from ..storage.history import HistoryDoc, HistoryStore, merge_docs, now_ms, parse_history, serialize_history
 from ..editing import replace_position
@@ -61,6 +62,8 @@ from .start_screen import StartScreen, dropped_file
 from .theme import add_shadow
 from .update_ui import UpdateBar, UpdateController, version_footer
 from .widgets import Notice, PopupMenu, StatusStrip, Toast
+
+SETTING_EXPLORER_MENU = "explorerMenu"
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -294,7 +297,11 @@ class MainWindow(QMainWindow):
         self.updates = UpdateController(self.update_bar, self.settings, self)
         self.updates.toast.connect(lambda text, tone: self.toast.show_message(text, 5000, tone=tone))
         self.updates.restart_requested.connect(self._restart_for_update)
-        self.start.add_footer(version_footer(self.updates))
+        footer = version_footer(self.updates)
+        if shell.available():
+            footer.layout().insertWidget(footer.layout().count() - 1, self._explorer_menu_box())
+            self._sync_explorer_menu(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
+        self.start.add_footer(footer)
 
         self._wire()
         self._refresh_history()
@@ -892,6 +899,41 @@ class MainWindow(QMainWindow):
             self.toast.show_message(f"Не удалось запустить обновление: {exc}", 8000, tone="error")
             return
         self.close()
+
+    def _explorer_menu_box(self) -> QCheckBox:
+        box = QCheckBox("Пункт в меню проводника")
+        box.setChecked(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
+        box.setToolTip(
+            f"«{shell.LABEL}» в меню файлов .docx и .pdf по правой кнопке мыши. "
+            "В Windows 11 — в разделе «Показать дополнительные параметры»."
+        )
+        box.toggled.connect(self._explorer_menu_toggled)
+        return box
+
+    def _explorer_menu_toggled(self, enabled: bool) -> None:
+        self.settings.setValue(SETTING_EXPLORER_MENU, enabled)
+        self._sync_explorer_menu(enabled)
+
+    def _sync_explorer_menu(self, enabled: bool) -> None:
+        error = shell.sync(enabled)
+        if error:
+            self.toast.show_message(error, 8000, tone="error")
+
+    def open_external(self, path: str) -> None:
+        """Файл из меню проводника или из повторного запуска программы."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if not path:
+            return
+        if self.job is not None:
+            self.toast.show_message(
+                f"Сейчас обрабатывается другой файл. Откройте «{Path(path).name}» после окончания обработки.",
+                8000, tone="warn",
+            )
+            return
+        self.process_file(Path(path))
 
     def show_startup_notice(self, argv: list[str]) -> None:
         from .. import __version__

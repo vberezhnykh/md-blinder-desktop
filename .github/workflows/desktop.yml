@@ -54,6 +54,14 @@ jobs:
         if: runner.os == 'Windows'
         run: pyinstaller --noconfirm --clean md_blinder.spec
 
+      - name: Self-check of the built app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\MD Blinder\MD Blinder.exe" -ArgumentList "--self-check" -Wait -PassThru
+          Get-Content "$env:LOCALAPPDATA\md-blinder\self-check.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
       - name: Upload build
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v6

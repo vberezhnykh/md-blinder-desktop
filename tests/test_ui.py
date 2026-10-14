@@ -110,3 +110,27 @@ def test_history_reopen(qtbot, window, tmp_path):
     window.open_doc(doc_id)
     assert window.session.doc.id == doc_id
     assert window.stack.currentWidget() is window.page
+
+
+def test_full_pipeline_with_real_model(qtbot, tmp_path, monkeypatch):
+    """Сквозной прогон с настоящей моделью: имена и компании находит NER."""
+    from md_blinder.components import model_asset
+
+    if not model_asset.is_model_present():
+        pytest.skip("модель NER не скачана")
+    store = HistoryStore(tmp_path / "h.sqlite")
+    w = MainWindow(store)
+    qtbot.addWidget(w)
+    monkeypatch.setattr(w, "_job_ask", lambda kind, payload: w.job.answer(SKIP))
+    path = make_docx(tmp_path / "c.docx", para(
+        "Иван Петров подписал договор с ООО «Альфа». Олена Коваленко працює у ТОВ «Весна». "
+        "Позже Петров И. направил письмо на ivan@example.com."
+    ))
+    w.process_file(path)
+    qtbot.waitUntil(lambda: w.job is None, timeout=180000)
+    assert not w.page.ner_notice.isVisible()
+    types = {e.type for e in w.session.entities if e.anonymize}
+    assert {"PERSON", "COMPANY", "EMAIL"} <= types
+    for name in ("Иван Петров", "Олена Коваленко"):
+        assert name not in w.anonymized_text
+    w.close()

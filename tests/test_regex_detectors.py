@@ -614,3 +614,25 @@ def test_masks_image_contents_at_unchanged_offsets_before_structural_scans() -> 
 
 def test_excludes_the_removal_notice_from_structural_detection() -> None:
     assert detect_structural(f"Before {IMAGE_REMOVED_MARKER} After") == []
+
+
+# Не из TS: семантика JS, которую _js_regex воспроизводит поверх модуля regex.
+# Ожидания сняты с TS-версии detectStructural.
+@pytest.mark.parametrize("text, expected", [
+    # /i без u: «İ», «ı», «ſ», «K» не совпадают с ASCII-буквами.
+    ("\u0130BAN: 12345678 xx", []),
+    ("acc\u0131unt 12345678", []),
+    ("\u017fWIFT: DEUTDEFFXXX", []),
+    ("Ac\u212a 12345678", []),
+    ("Tele\u212aom tel 0612345678", [("PHONE", "0612345678", 12, 22)]),
+    # С флагами iu JS отождествляет «ſ» с «s»: метка паспорта срабатывает.
+    ("Pa\u017f\u017fport 4506 123456", [("ID_DOC", "4506 123456", 9, 20), ("PHONE", "4506 12345", 9, 19)]),
+    ("https://\u0130stanbul.example.com/x", [("URL", "https://\u0130stanbul.example.com/x", 0, 30)]),
+    # \s и trim() как в JS: \ufeff — пробел, \x85 — нет.
+    ("Address:\ufeff12 Baker Street, London", [("ADDRESS", "12 Baker Street, London", 9, 32)]),
+    ("Address:\x8512 Baker Street, London", [("ADDRESS", "\x8512 Baker Street, London", 8, 32)]),
+    # $ — только конец строки, а не позиция перед завершающим \n.
+    ("IBAN: GB82 WEST 1234 5698 7654 32\n", [("IBAN", "GB82 WEST 1234 5698 7654 32", 6, 33)]),
+])
+def test_javascript_regex_semantics(text: str, expected: list[tuple[str, str, int, int]]) -> None:
+    assert [(m.type, m.value, m.start, m.end) for m in detect_structural(text)] == expected

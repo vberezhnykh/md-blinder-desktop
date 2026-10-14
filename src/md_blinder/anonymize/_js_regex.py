@@ -21,20 +21,24 @@
 
 from __future__ import annotations
 
-from typing import Iterator, Optional, Union
+from typing import Any, Iterator, Optional, Union
 
 import regex
 
 JS_WHITESPACE = (
-    "\t\n\x0b\x0c\r \xa0 "
+    "\t\n\x0b\x0c\r \xa0\u1680"
     + "".join(chr(c) for c in range(0x2000, 0x200B))
-    + "    　﻿"
+    + "\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
 
-_WS = r"\t\n\x0b\x0c\r \xa0  -     　﻿"
+_WS = r"\t\n\x0b\x0c\r \xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 _WORD = "A-Za-z0-9_"
 _DIGIT = "0-9"
-_BOUNDARY = f"(?:(?<=[{_WORD}])(?![{_WORD}])|(?<![{_WORD}])(?=[{_WORD}]))"
+# Встроенная ASCII-граница regex быстрее lookaround и совпадает с \b из JS, кроме
+# «İ», «ı», «ſ», «K» под IGNORECASE. В шаблонах с i их убирает замена (см. ниже);
+# с флагами iu JS считает «ſ» и «K» буквами слова, поэтому там нужна эмуляция.
+_BOUNDARY = r"(?a:\b)"
+_BOUNDARY_IU = f"(?:(?<=[{_WORD}])(?![{_WORD}])|(?<![{_WORD}])(?=[{_WORD}]))"
 _CLASSES = {"d": _DIGIT, "w": _WORD, "s": _WS}
 
 # Буква без регистра (Lo): входит в \p{L}, но не совпадает ни с одной буквой шаблонов.
@@ -51,8 +55,9 @@ def js_trim_start(s: str) -> str:
     return s.lstrip(JS_WHITESPACE)
 
 
-def translate(source: str) -> str:
+def translate(source: str, unicode_ignore_case: bool = False) -> str:
     """Исходник регулярного выражения JS -> шаблон модуля regex."""
+    boundary = _BOUNDARY_IU if unicode_ignore_case else _BOUNDARY
     out: list[str] = []
     in_class = False
     i = 0
@@ -70,7 +75,7 @@ def translate(source: str) -> str:
             elif nxt in "bB":
                 if in_class or nxt == "B":
                     raise ValueError(f"\\{nxt} is not supported here: {source}")
-                out.append(_BOUNDARY)
+                out.append(boundary)
             else:
                 out.append(ch + nxt)
             i += 2
@@ -94,7 +99,7 @@ def translate(source: str) -> str:
         elif ch == "$":
             out.append(r"\Z")
         elif ch == ".":
-            out.append(r"[^\n\r  ]")
+            out.append(r"[^\n\r\u2028\u2029]")
         else:
             out.append(ch)
         i += 1
@@ -119,11 +124,12 @@ class JsMatch:
     def span(self, group: int = 0) -> tuple[int, int]:
         return self._m.span(group)
 
-    def group(self, group: int = 0) -> Optional[str]:
+    # Как у regex.Match: str | Any, для неучаствовавшей группы None.
+    def group(self, group: int = 0) -> str | Any:
         start, end = self._m.span(group)
         return None if start < 0 else self._text[start:end]
 
-    def __getitem__(self, group: int) -> Optional[str]:
+    def __getitem__(self, group: int) -> str | Any:
         return self.group(group)
 
 
@@ -136,7 +142,8 @@ class JsRegex:
     def __init__(self, source: str, flags: str = "") -> None:
         self.source = source
         ignore_case = "i" in flags
-        self._pattern = regex.compile(translate(source), regex.V0 | (regex.IGNORECASE if ignore_case else 0))
+        pattern = translate(source, ignore_case and "u" in flags)
+        self._pattern = regex.compile(pattern, regex.V0 | (regex.IGNORECASE if ignore_case else 0))
         self._fold: Optional[dict[int, int]] = None
         if ignore_case:
             self._fold = _FOLD_IU if "u" in flags else _FOLD_I

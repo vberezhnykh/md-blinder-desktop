@@ -123,9 +123,9 @@ IBAN_LENGTHS: dict[str, int] = {
 }
 
 _IBAN_START_RE = JsRegex(r"(?<![\p{L}\p{N}])[A-Z]{2}\d{2}", "giu")
-_IBAN_GAP = " \t  "
+_IBAN_GAP = " \t\xa0\u202f"
 _LETTER_OR_NUMBER_RE = JsRegex(r"[\p{L}\p{N}]", "u")
-_GAP_THEN_DIGIT_RE = JsRegex(r"^[ \t  ]+\d")
+_GAP_THEN_DIGIT_RE = JsRegex(r"^[ \t\xa0\u202f]+\d")
 
 
 def _detect_iban(text: str) -> list[RawMatch]:
@@ -326,7 +326,7 @@ def _detect_phone(text: str) -> list[RawMatch]:
 
 _ACCOUNT_LABEL_RE = JsRegex(r"\b(?:account|acct|a\/c|iban)\s*(?:no\.?|number|#)?\s*[:.-]?\s*", "gi")
 _ACCOUNT_TOKEN_RE = JsRegex(r"[A-Z0-9]+", "giy")
-_ACCOUNT_GAP = " \t  -"
+_ACCOUNT_GAP = " \t\xa0\u202f-"
 
 
 def _detect_account(text: str) -> list[RawMatch]:

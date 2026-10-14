@@ -2,7 +2,8 @@
 
 Порт src/lib/pdfStructure.ts. Модуль чистый: на вход нормализованные
 текстовые элементы (PdfTextItem) в системе координат pdf.js (y растет вверх),
-на выход строка Markdown.
+на выход строка Markdown. В отличие от веб-версии, элемент может быть
+готовой таблицей (HTML), найденной pdf_tables.
 """
 
 from __future__ import annotations
@@ -11,6 +12,8 @@ import math
 import re
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence, TypeVar
+
+from .pdf_tables import join_tables, table_to_markdown
 
 
 @dataclass
@@ -22,6 +25,9 @@ class PdfTextItem:
     fontSize: float
     fontName: str = ""
     hasEOL: bool = False
+    # Таблица, найденная на странице (только десктоп): HTML вместо текста, str пустая.
+    table_html: Optional[str] = None
+    table_cols: int = 0
 
 
 @dataclass
@@ -38,6 +44,9 @@ class _Line:
     fontSize: float
     x0: float
     yTop: float
+    # Для таблицы text — ее HTML.
+    is_table: bool = False
+    table_cols: int = 0
 
 
 PAGE_NUMBER_RE = re.compile(r"^[\s\-–—]*(\d{1,4})[\s\-–—]*$")
@@ -77,11 +86,15 @@ def _build_lines(items: Sequence[PdfTextItem], body_size: float) -> list[_Line]:
     raw_lines: list[list[PdfTextItem]] = []
     prev: Optional[PdfTextItem] = None
     for item in items:
+        if item.table_html is not None:
+            raw_lines.append([item])
+            prev = item
+            continue
         if not item.str:
             continue
         break_line = (
             not raw_lines
-            or (prev is not None and prev.hasEOL)
+            or (prev is not None and (prev.hasEOL or prev.table_html is not None))
             or (prev is not None and prev.y - item.y > 0.6 * max(body_size, item.fontSize))
         )
         if break_line:
@@ -92,6 +105,10 @@ def _build_lines(items: Sequence[PdfTextItem], body_size: float) -> list[_Line]:
 
     lines: list[_Line] = []
     for line_items in raw_lines:
+        head = line_items[0]
+        if head.table_html is not None:
+            lines.append(_Line(head.table_html, body_size, head.x, head.y, is_table=True, table_cols=head.table_cols))
+            continue
         text = ""
         max_font = 0.0
         x0 = math.inf
@@ -210,6 +227,9 @@ def _lines_to_blocks(pages_lines: list[list[_Line]], body_size: float) -> list[s
     blocks: list[str] = []
     buffer: list[str] = []
     buffer_last: Optional[_Line] = None
+    # Таблицы копятся как HTML (номер блока -> HTML и число столбцов), чтобы
+    # продолжение со следующей страницы можно было дописать в конец.
+    tables: dict[int, tuple[str, int]] = {}
 
     def flush() -> None:
         nonlocal buffer, buffer_last
@@ -219,8 +239,20 @@ def _lines_to_blocks(pages_lines: list[list[_Line]], body_size: float) -> list[s
             buffer_last = None
 
     for lines in pages_lines:
-        for line in lines:
+        # Таблица, которой закончилась предыдущая страница: продолжение на этой
+        # странице, если она с нее начинается и столбцов столько же.
+        carry = len(blocks) - 1 if blocks and len(blocks) - 1 in tables else None
+        for position, line in enumerate(lines):
             text = line.text
+            if line.is_table:
+                flush()
+                previous = tables.get(carry) if position == 0 and carry is not None else None
+                if previous is not None and previous[1] == line.table_cols:
+                    tables[carry] = (join_tables(previous[0], text), previous[1])
+                else:
+                    tables[len(blocks)] = (text, line.table_cols)
+                    blocks.append("")
+                continue
             is_big_heading = line.fontSize >= body_size * 1.15
             if is_big_heading or _is_all_caps_short(text):
                 flush()
@@ -274,6 +306,8 @@ def _lines_to_blocks(pages_lines: list[list[_Line]], body_size: float) -> list[s
         # Абзацы не переносятся через границу страницы.
         flush()
     flush()
+    for index, (html, _) in tables.items():
+        blocks[index] = table_to_markdown(html)
     return blocks
 
 
@@ -281,7 +315,8 @@ def items_to_markdown(
     pages: Sequence[Sequence[PdfTextItem]], layouts: Optional[Sequence[PdfPageLayout]] = None
 ) -> str:
     body_size = detect_body_size(pages)
-    if body_size == 0:
+    # Без текста вне таблиц размер шрифта не определить, но таблицы терять нельзя.
+    if body_size == 0 and not any(item.table_html is not None for items in pages for item in items):
         return ""
     pages_lines = [_build_lines(items, body_size) for items in pages]
     _strip_headers_footers(pages_lines, layouts)

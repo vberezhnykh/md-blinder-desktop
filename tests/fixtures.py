@@ -30,6 +30,24 @@ def make_pdf(path: Path, pages: list[dict]) -> Path:
     return path
 
 
+def draw_table(page, x0, y0, widths, texts, row_height=24, merged_below=()):
+    """Таблица с рамками. merged_below — ячейки (строка, столбец) без нижней линии: объединение по вертикали."""
+    xs = [x0]
+    for width in widths:
+        xs.append(xs[-1] + width)
+    for r, row in enumerate(texts):
+        top, bottom = y0 + r * row_height, y0 + (r + 1) * row_height
+        for c, text in enumerate(row):
+            if r == 0:
+                page.draw_line((xs[c], top), (xs[c + 1], top), width=0.7)
+            if (r, c) not in merged_below:
+                page.draw_line((xs[c], bottom), (xs[c + 1], bottom), width=0.7)
+            page.draw_line((xs[c], top), (xs[c], bottom), width=0.7)
+            page.draw_line((xs[c + 1], top), (xs[c + 1], bottom), width=0.7)
+            if text:
+                page.insert_text((xs[c] + 4, top + 16), text, fontsize=10, fontname="helv")
+
+
 def make_docx(path: Path, body_xml: str) -> Path:
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'

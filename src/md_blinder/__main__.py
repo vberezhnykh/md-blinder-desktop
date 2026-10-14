@@ -1,6 +1,6 @@
 """Точка входа: python -m md_blinder.
 
-Ключ --self-check запускает проверку без окна: импорт зависимостей, OCR
+Ключ --self-check запускает проверку без окна: импорт зависимостей, поиск таблиц в PDF, OCR
 (если языковые файлы скачаны) и калибровку модели (если она скачана).
 Результат пишется в self-check.txt в каталоге данных, код возврата 0 — все в порядке.
 """
@@ -25,6 +25,23 @@ def self_check() -> int:
         from PySide6 import QtWidgets  # noqa: F401
 
         lines.append(f"onnxruntime {onnxruntime.__version__}, PyMuPDF {pymupdf.VersionBind}: OK")
+        from .convert.pdf_tables import find_page_tables, layout_available
+
+        ok &= layout_available()
+        table_doc = pymupdf.open()
+        table_page = table_doc.new_page()
+        for row in range(3):
+            for col in range(2):
+                cell = pymupdf.Rect(50 + col * 150, 100 + row * 30, 200 + col * 150, 130 + row * 30)
+                table_page.draw_rect(cell, color=(0, 0, 0), width=0.7)
+                table_page.insert_text((cell.x0 + 5, cell.y1 - 10), f"Cell {row}{col}", fontsize=10)
+        spans = [(w[4], pymupdf.Rect(w[:4])) for w in table_page.get_text("words")]
+        tables_ok = len(find_page_tables(table_page, spans)) == 1
+        ok &= tables_ok
+        lines.append(
+            "Поиск таблиц в PDF: " + ("OK" if tables_ok else "тестовая таблица не найдена")
+            + ("" if layout_available() else ", модель разметки pymupdf_layout не загрузилась")
+        )
         from .ui.theme import FONTS_DIR
 
         fonts = len(list(FONTS_DIR.glob("*.ttf")))

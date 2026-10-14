@@ -13,7 +13,6 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -30,7 +29,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import icon_label, set_prop
+from .widgets import Select, icon_label, set_prop
 
 
 def _min_start(e: Entity) -> int:
@@ -267,7 +266,7 @@ class ReviewPanel(QWidget):
         type_label = QLabel("Тип")
         type_label.setObjectName("fieldLabel")
         type_row.addWidget(type_label)
-        type_box = QComboBox()
+        type_box = Select()
         type_box.setObjectName("mono")
         type_box.addItems(list(ALL_ENTITY_TYPES))
         type_box.setCurrentText(current.type)
@@ -608,10 +607,10 @@ class FoundPanel(QWidget):
         rows.addLayout(row)
         others = [x for x in same_type if x.id != entity.id]
         if self._merging == entity.id:
-            target = QComboBox()
+            target = Select()
             target.setObjectName("compact")
             target.setMinimumContentsLength(8)
-            target.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            target.setSizeAdjustPolicy(Select.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
             target.addItem("объединить с…", "")
             for x in others:
                 target.addItem(f"{x.placeholder} · {_truncate(entity_current_value(self._text, x), 24)}", x.id)
@@ -642,7 +641,7 @@ class FoundPanel(QWidget):
         label = QLabel("Тип")
         label.setObjectName("fieldLabel")
         row.addWidget(label)
-        type_box = QComboBox()
+        type_box = Select()
         type_box.setObjectName("mono")
         type_box.addItems(list(ALL_ENTITY_TYPES))
         type_box.setCurrentText(entity.type)

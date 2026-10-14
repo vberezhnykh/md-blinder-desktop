@@ -7,11 +7,13 @@ from typing import Callable, Optional
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import (
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QSizePolicy,
+    QStyledItemDelegate,
     QVBoxLayout,
     QWidget,
 )
@@ -44,6 +46,54 @@ def replaced_summary(values: int, places: int) -> str:
         f"Заменено {plural(values, ('значение', 'значения', 'значений'))} "
         f"в {plural(places, ('месте', 'местах', 'местах'))}"
     )
+
+
+class Select(QComboBox):
+    """Выпадающий список в стиле меню программы.
+
+    У QComboBox в стиле Fusion список открывается поверх поля, со стрелками
+    прокрутки и системной рамкой. Здесь список раскрывается под полем как
+    PopupMenu: та же рамка, скругление и подсветка пункта. Пункты рисует
+    QStyledItemDelegate, иначе таблица стилей к ним не применяется.
+    """
+
+    # Все типы сущностей помещаются без прокрутки.
+    MAX_VISIBLE = 16
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setMaxVisibleItems(self.MAX_VISIBLE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        view = self.view()
+        view.setObjectName("selectList")
+        view.setVerticalScrollMode(view.ScrollMode.ScrollPerPixel)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        popup = view.window()
+        popup.setWindowFlags(popup.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        # Рамку рисует сам список (QListView#selectList в теме): контейнер — внутренний
+        # класс Qt и рамку из таблицы стилей не рисует.
+        if popup.layout() is not None:
+            popup.layout().setContentsMargins(0, 0, 0, 0)
+
+    def showPopup(self) -> None:  # noqa: N802
+        super().showPopup()
+        # Список встает под полем, а не поверх него, и не уже поля.
+        popup = self.view().window()
+        width = max(self.width(), self.view().sizeHintForColumn(0) + 28)
+        popup.resize(width, popup.height())
+        popup.move(self.mapToGlobal(QPoint(0, self.height() + 4)))
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        arrow = pixmap("chevron-down", t.INK_3 if self.isEnabled() else t.LINE_2, 14)
+        size = arrow.deviceIndependentSize()
+        x = self.width() - size.width() - 8
+        y = (self.height() - size.height()) / 2
+        painter.drawPixmap(QPoint(round(x), round(y)), arrow)
+        painter.end()
 
 
 class PopupMenu(QFrame):

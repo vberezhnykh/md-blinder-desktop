@@ -173,11 +173,27 @@ QFrame#viewToggleBox {{ border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; 
 
 QComboBox {{
   font-size: 14px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
-  border-radius: {RADIUS_SM}px; padding: 5px 8px;
+  border-radius: {RADIUS_SM}px; padding: 5px 28px 5px 8px; combobox-popup: 0;
 }}
-QComboBox#mono {{ font-family: "{MONO}"; font-size: 12px; padding: 3px 6px; }}
-QComboBox#compact {{ font-size: 12px; padding: 2px 6px; }}
-QComboBox QAbstractItemView {{ background: {SURFACE}; border: 1px solid {LINE}; selection-background-color: {ACCENT_WASH}; selection-color: {INK}; }}
+QComboBox:hover {{ border-color: {INK_3}; }}
+QComboBox:focus {{ border-color: {ACCENT}; }}
+QComboBox:disabled {{ color: {INK_3}; border-color: {LINE}; }}
+QComboBox#mono {{ font-family: "{MONO}"; font-size: 12px; padding: 3px 26px 3px 6px; }}
+QComboBox#compact {{ font-size: 12px; padding: 2px 24px 2px 6px; }}
+/* Стрелку рисует Select.paintEvent значком chevron-down. */
+QComboBox::drop-down {{ border: none; width: 24px; }}
+QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
+QComboBoxPrivateContainer {{ background: {SURFACE}; border: none; }}
+QListView#selectList {{
+  background: {SURFACE}; border: 1px solid {LINE_2}; outline: 0; padding: 4px; color: {INK};
+}}
+QListView#selectList::item {{ padding: 6px 10px; border-radius: {RADIUS_XS}px; border: none; }}
+QListView#selectList::item:hover {{ background: {SUNK}; }}
+QListView#selectList::item:selected {{ background: {ACCENT_WASH}; color: {INK}; }}
+QListView#selectList QScrollBar:vertical {{ background: transparent; width: 8px; margin: 2px; }}
+QListView#selectList QScrollBar::handle:vertical {{ background: {LINE_2}; border-radius: 3px; min-height: 24px; }}
+QListView#selectList QScrollBar::add-line:vertical, QListView#selectList QScrollBar::sub-line:vertical {{ height: 0; }}
+QListView#selectList QScrollBar::add-page:vertical, QListView#selectList QScrollBar::sub-page:vertical {{ background: transparent; }}
 QCheckBox {{ font-size: 13px; spacing: 8px; }}
 QCheckBox::indicator {{ width: 15px; height: 15px; }}
 

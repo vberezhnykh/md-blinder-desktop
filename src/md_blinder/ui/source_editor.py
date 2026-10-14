@@ -28,7 +28,6 @@ from PySide6.QtGui import (
     QTextFormat,
 )
 from PySide6.QtWidgets import (
-    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -43,6 +42,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from ..editing import TextChange, active_span_at, drag_span, hovered_entity_at, replace_position
 from ..storage.offsets import OffsetMap
 from . import theme as t
+from .widgets import Select
 
 _TABLE_LINE = re.compile(r"^\s*\|")
 LINE_HEIGHT = 130  # процентов от высоты строки шрифта: так выходит line-height 1.7 из веб-версии
@@ -94,13 +94,13 @@ class AddEntityPopup(QFrame):
         row = QHBoxLayout(self)
         row.setContentsMargins(6, 5, 6, 5)
         row.setSpacing(6)
-        self.type_box = QComboBox()
+        self.type_box = Select()
         self.type_box.setObjectName("compact")
         self.type_box.addItems(list(ALL_ENTITY_TYPES))
-        self.target_box = QComboBox()
+        self.target_box = Select()
         self.target_box.setObjectName("compact")
         self.target_box.setMinimumContentsLength(13)
-        self.target_box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.target_box.setSizeAdjustPolicy(Select.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.add_button = QPushButton("Добавить")
         self.add_button.setObjectName("primary")
         self.add_button.setStyleSheet("font-size: 12px; padding: 2px 8px;")
@@ -168,7 +168,7 @@ class MergePopup(QFrame):
         self.open_button = QPushButton("↦ Объединить")
         self.open_button.setObjectName("mergeOpen")
         self.open_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.select = QComboBox()
+        self.select = Select()
         self.select.setObjectName("compact")
         self.select.setMaximumWidth(220)
         row.addWidget(self.open_button)

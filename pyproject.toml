@@ -29,6 +29,9 @@ md-blinder = "md_blinder.__main__:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+md_blinder = ["ui/assets/fonts/*", "anonymize/*.LICENSE"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

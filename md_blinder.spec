@@ -4,6 +4,8 @@
 
 datas = [
     ("src/md_blinder/anonymize/presidio.LICENSE", "md_blinder/anonymize"),
+    # Шрифты IBM Plex (OFL) — как в веб-версии, без загрузки со сторонних серверов.
+    ("src/md_blinder/ui/assets/fonts", "md_blinder/ui/assets/fonts"),
 ]
 
 # Модули Qt, которые программа не использует: без них папка сборки заметно меньше.

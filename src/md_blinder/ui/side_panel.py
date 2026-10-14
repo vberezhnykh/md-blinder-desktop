@@ -1,27 +1,26 @@
-"""Боковая панель: очередь проверки и найденные данные.
+"""Боковая панель: очередь проверки и найденные данные (CandidateReview.tsx, EntityList.tsx).
 
-Порт CandidateReview.tsx и EntityList.tsx. Панель ничего не меняет сама: она
-сообщает о решениях сигналами, а MainWindow превращает их в команды сессии.
+Панель ничего не меняет сама: она сообщает о решениях сигналами, а MainWindow
+превращает их в команды сессии.
 """
 
 from __future__ import annotations
 
 import html
-from typing import Optional
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QBrush, QKeyEvent
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
     QScrollArea,
-    QTabWidget,
-    QToolButton,
-    QTreeWidget,
-    QTreeWidgetItem,
+    QSizePolicy,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -29,7 +28,9 @@ from PySide6.QtWidgets import (
 from ..anonymize.apply import candidate_reason, entity_current_value, pending_candidates
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
-from .theme import entity_solid
+from . import theme as t
+from .icons import icon, pixmap
+from .widgets import icon_label, set_prop
 
 
 def _min_start(e: Entity) -> int:
@@ -45,9 +46,43 @@ def _clear(layout) -> None:
         item = layout.takeAt(0)
         widget = item.widget()
         if widget is not None:
+            widget.hide()
             widget.deleteLater()
         elif item.layout() is not None:
             _clear(item.layout())
+
+
+def _transparent_labels(widget: QWidget) -> None:
+    for child in widget.findChildren(QLabel):
+        child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+
+def _kbd_button(text: str, key: str, primary: bool) -> QPushButton:
+    """Кнопка с подписью клавиши в рамке, как <kbd> в карточке кандидата."""
+    button = QPushButton()
+    if primary:
+        button.setObjectName("primary")
+    row = QHBoxLayout(button)
+    row.setContentsMargins(13, 7, 13, 7)
+    row.setSpacing(8)
+    row.addStretch(1)
+    color = t.ACCENT_INK if primary else t.INK
+    label = QLabel(text)
+    label.setStyleSheet(f"color: {color}; font-size: 14px; font-weight: 500; background: transparent;")
+    kbd = QLabel(key)
+    kbd.setStyleSheet(
+        f"color: {color}; border: 1px solid {color}; border-radius: 4px; padding: 0 5px; font-size: 11px;"
+        " background: transparent;"
+    )
+    kbd.setGraphicsEffect(None)
+    row.addWidget(label)
+    row.addWidget(kbd)
+    row.addStretch(1)
+    _transparent_labels(button)
+    button.setMinimumHeight(36)
+    # QPushButton считает размер по своему тексту, а не по вложенной раскладке.
+    button.setMinimumWidth(row.sizeHint().width())
+    return button
 
 
 class CandidateCard(QFrame):
@@ -61,6 +96,14 @@ class CandidateCard(QFrame):
         super().__init__()
         self.setObjectName("candidateCard")
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        set_prop(self, "focused", "true")
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        set_prop(self, "focused", "false")
+        super().focusOutEvent(event)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:  # noqa: N802
         key = event.key()
@@ -76,7 +119,21 @@ class CandidateCard(QFrame):
             super().keyPressEvent(event)
 
 
-class ReviewPanel(QScrollArea):
+def _scroll_area() -> tuple[QScrollArea, QVBoxLayout]:
+    area = QScrollArea()
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    body = QWidget()
+    body.setObjectName("panelBody")
+    layout = QVBoxLayout(body)
+    layout.setContentsMargins(16, 14, 16, 14)
+    layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+    area.setWidget(body)
+    return area, layout
+
+
+class ReviewPanel(QWidget):
     activate = Signal(object)  # id кандидата или None
     accept = Signal(str)
     reject = Signal(str)
@@ -87,12 +144,11 @@ class ReviewPanel(QScrollArea):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWidgetResizable(True)
-        self.setFrameShape(QFrame.Shape.NoFrame)
-        body = QWidget()
-        self.layout_ = QVBoxLayout(body)
-        self.layout_.setAlignment(Qt.AlignmentFlag.AlignTop)
-        self.setWidget(body)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.area, self.layout_ = _scroll_area()
+        self.layout_.setSpacing(16)
+        outer.addWidget(self.area)
         self._entities: list[Entity] = []
         self._text = ""
         self.active_id: Optional[str] = None
@@ -108,6 +164,7 @@ class ReviewPanel(QScrollArea):
     def render(self, entities: list[Entity], text: str) -> None:
         self._entities = entities
         self._text = text
+        scroll = self.area.verticalScrollBar().value()
         _clear(self.layout_)
         self._card = None
         pending = pending_candidates(entities)
@@ -116,17 +173,29 @@ class ReviewPanel(QScrollArea):
 
         if current is None:
             done = QFrame()
-            done.setObjectName("card")
+            done.setObjectName("reviewDone")
             box = QVBoxLayout(done)
-            title = QLabel("<b>✓ Все кандидаты разобраны</b>")
-            box.addWidget(title)
-            box.addWidget(QLabel("В результате не осталось непроверенных фрагментов."))
+            box.setContentsMargins(16, 14, 16, 14)
+            box.setSpacing(8)
+            title_row = QHBoxLayout()
+            title_row.setSpacing(8)
+            title_row.addWidget(icon_label("check", t.READY, 16))
+            title = QLabel("Все кандидаты разобраны")
+            title.setObjectName("doneTitle")
+            title_row.addWidget(title)
+            title_row.addStretch(1)
+            box.addLayout(title_row)
+            note = QLabel("В результате не осталось непроверенных фрагментов.")
+            note.setStyleSheet(f"color: {t.INK_2}; font-size: 13.5px; background: transparent;")
+            box.addWidget(note)
             export = QPushButton("Экспортировать .md")
             export.setObjectName("primary")
+            export.setIcon(icon("download", t.ACCENT_INK))
             export.clicked.connect(self.export)
             box.addWidget(export, 0, Qt.AlignmentFlag.AlignLeft)
             self.layout_.addWidget(done)
             self._add_dismissed(dismissed)
+            self.area.verticalScrollBar().setValue(scroll)
             return
 
         index = pending.index(current)
@@ -152,57 +221,68 @@ class ReviewPanel(QScrollArea):
         card.reject.connect(lambda: decide(self.reject))
         card.step.connect(step)
         box = QVBoxLayout(card)
+        box.setContentsMargins(14, 12, 14, 14)
+        box.setSpacing(10)
         head = QHBoxLayout()
-        head.addWidget(QLabel(f"Кандидат {index + 1} из {len(pending)}"))
+        count = QLabel(f"Кандидат {index + 1} из {len(pending)}")
+        count.setObjectName("cardCount")
+        head.addWidget(count)
         head.addStretch(1)
         if len(pending) > 1:
-            for label, delta, tip in (("▲", -1, "Предыдущий кандидат"), ("▼", 1, "Следующий кандидат")):
-                b = QToolButton()
-                b.setText(label)
+            for name, delta, tip in (("chevron-up", -1, "Предыдущий кандидат"), ("chevron-down", 1, "Следующий кандидат")):
+                b = QPushButton()
+                b.setObjectName("iconButton")
+                b.setIcon(icon(name, t.INK_3, 16))
                 b.setToolTip(tip)
+                b.setCursor(Qt.CursorShape.PointingHandCursor)
                 b.clicked.connect(lambda _=False, d=delta: step(d))
                 head.addWidget(b)
         box.addLayout(head)
 
-        value = entity_current_value(text, current)
-        value_label = QLabel(f"<span style='font-size:13pt;font-weight:600'>{html.escape(value)}</span>")
-        value_label.setWordWrap(True)
-        box.addWidget(value_label)
+        value = QLabel(entity_current_value(text, current))
+        value.setObjectName("cardValue")
+        value.setWordWrap(True)
+        box.addWidget(value)
         position = current.positions[0] if current.positions else None
         if position is not None:
             ctx = candidate_context(text, position.start, position.end)
             snippet = (
                 ("…" if ctx.cut_before else "") + html.escape(ctx.before)
-                + f"<span style='background:#ffe9a8'>{html.escape(ctx.match)}</span>"
+                + f"<span style='background:{t.MARK}; color:{t.INK}'>{html.escape(ctx.match)}</span>"
                 + html.escape(ctx.after) + ("…" if ctx.cut_after else "")
             )
-            context_label = QLabel(snippet.replace("\n", "<br>"))
-            context_label.setWordWrap(True)
-            context_label.setObjectName("muted")
-            box.addWidget(context_label)
+            context = QLabel(snippet.replace("\n", "<br>"))
+            context.setObjectName("cardContext")
+            context.setWordWrap(True)
+            context.setTextFormat(Qt.TextFormat.RichText)
+            box.addWidget(context)
         reason = candidate_reason(entities, current)
         if reason:
             r = QLabel(reason)
-            r.setObjectName("muted")
+            r.setObjectName("cardReason")
+            r.setWordWrap(True)
             box.addWidget(r)
         type_row = QHBoxLayout()
-        type_row.addWidget(QLabel("Тип"))
+        type_row.setSpacing(10)
+        type_label = QLabel("Тип")
+        type_label.setObjectName("fieldLabel")
+        type_row.addWidget(type_label)
         type_box = QComboBox()
+        type_box.setObjectName("mono")
         type_box.addItems(list(ALL_ENTITY_TYPES))
         type_box.setCurrentText(current.type)
-        type_box.currentTextChanged.connect(lambda t: self.change_type.emit(current.id, t))
+        type_box.currentTextChanged.connect(lambda tp: self.change_type.emit(current.id, tp))
         type_row.addWidget(type_box)
         type_row.addStretch(1)
         box.addLayout(type_row)
         actions = QHBoxLayout()
-        accept = QPushButton("Принять  Enter")
-        accept.setObjectName("primary")
+        actions.setSpacing(8)
+        accept = _kbd_button("Принять", "Enter", True)
         accept.clicked.connect(lambda: decide(self.accept))
-        reject = QPushButton("Отклонить  ⌫")
+        reject = _kbd_button("Отклонить", "⌫", False)
         reject.clicked.connect(lambda: decide(self.reject))
-        actions.addWidget(accept)
-        actions.addWidget(reject)
-        actions.addStretch(1)
+        actions.addWidget(accept, 1)
+        actions.addWidget(reject, 1)
         box.addLayout(actions)
 
         siblings = [e for e in pending if current.related_to and e.related_to == current.related_to]
@@ -210,6 +290,7 @@ class ReviewPanel(QScrollArea):
         if len(siblings) > 1 and target is not None and not target.candidate and not target.dismissed:
             all_button = QPushButton(f"Принять все похожие на {target.placeholder} ({len(siblings)})")
             all_button.setObjectName("link")
+            all_button.setCursor(Qt.CursorShape.PointingHandCursor)
 
             def accept_all() -> None:
                 self._keep_focus = True
@@ -221,22 +302,20 @@ class ReviewPanel(QScrollArea):
             box.addWidget(all_button, 0, Qt.AlignmentFlag.AlignLeft)
         self.layout_.addWidget(card)
 
-        heading = QLabel("<b>Все кандидаты</b>")
-        self.layout_.addWidget(heading)
+        section = QVBoxLayout()
+        section.setSpacing(2)
+        heading = QLabel("ВСЕ КАНДИДАТЫ")
+        heading.setObjectName("sectionHead")
+        heading.setContentsMargins(4, 0, 0, 4)
+        section.addWidget(heading)
         for i, e in enumerate(pending):
-            row = QHBoxLayout()
-            label = QLabel(
-                f"{i + 1}. <b>{html.escape(_truncate(entity_current_value(text, e), 60))}</b><br>"
-                f"<span style='color:#5b6474'>"
-                f"{'Проверяется сейчас' if e.id == current.id else html.escape(candidate_reason(entities, e) or '')}</span>"
-            )
-            label.setWordWrap(True)
-            row.addWidget(label, 1)
-            if e.id != current.id:
-                open_button = QPushButton("Открыть")
-                open_button.clicked.connect(lambda _=False, eid=e.id: self.activate.emit(eid))
-                row.addWidget(open_button)
-            self.layout_.addLayout(row)
+            is_current = e.id == current.id
+            reason_text = "Проверяется сейчас" if is_current else (candidate_reason(entities, e) or "")
+            section.addWidget(self._item(
+                str(i + 1), entity_current_value(text, e), reason_text, is_current,
+                None if is_current else ("Открыть", lambda _=False, eid=e.id: self.activate.emit(eid)),
+            ))
+        self.layout_.addLayout(section)
 
         self._add_dismissed(dismissed)
         hint = QLabel(
@@ -244,11 +323,46 @@ class ReviewPanel(QScrollArea):
             "Backspace отклоняет, стрелки ↑ ↓ переходят к соседнему кандидату."
         )
         hint.setWordWrap(True)
-        hint.setObjectName("muted")
+        hint.setStyleSheet(f"color: {t.INK_3}; font-size: 12.5px; background: transparent;")
+        hint.setContentsMargins(4, 0, 4, 0)
         self.layout_.addWidget(hint)
+        self.area.verticalScrollBar().setValue(scroll)
         if self._keep_focus:
             self._keep_focus = False
             card.setFocus()
+
+    def _item(
+        self, num: Optional[str], value: str, reason: str, current: bool,
+        action: Optional[tuple[str, Callable]],
+    ) -> QFrame:
+        item = QFrame()
+        item.setObjectName("candidateItem")
+        item.setProperty("current", "true" if current else "false")
+        row = QHBoxLayout(item)
+        row.setContentsMargins(6, 7, 6, 7)
+        row.setSpacing(10)
+        if num is not None:
+            n = QLabel(num)
+            n.setObjectName("itemNum")
+            n.setFixedSize(22, 22)
+            n.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            row.addWidget(n)
+        col = QVBoxLayout()
+        col.setSpacing(0)
+        v = QLabel(_truncate(value.replace("\n", " "), 60))
+        v.setObjectName("itemValue")
+        r = QLabel(reason)
+        r.setObjectName("itemReasonCurrent" if current else "itemReason")
+        r.setWordWrap(True)
+        col.addWidget(v)
+        col.addWidget(r)
+        row.addLayout(col, 1)
+        if action is not None:
+            b = QPushButton(action[0])
+            b.setObjectName("small")
+            b.clicked.connect(action[1])
+            row.addWidget(b)
+        return item
 
     def focus_card(self) -> None:
         if self._card is not None:
@@ -257,34 +371,70 @@ class ReviewPanel(QScrollArea):
     def _add_dismissed(self, dismissed: list[Entity]) -> None:
         if not dismissed:
             return
-        toggle = QToolButton()
-        toggle.setText(f"{'▾' if self._dismissed_open else '▸'} Отклоненные ({len(dismissed)})")
-        toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        toggle.setAutoRaise(True)
-        self.layout_.addWidget(toggle)
+        wrap = QVBoxLayout()
+        wrap.setSpacing(2)
+        toggle = QPushButton()
+        toggle.setObjectName("disclosure")
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        wrap.addWidget(toggle, 0, Qt.AlignmentFlag.AlignLeft)
         container = QWidget()
         box = QVBoxLayout(container)
-        box.setContentsMargins(12, 0, 0, 0)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(2)
         for e in dismissed:
-            row = QHBoxLayout()
-            label = QLabel(
-                f"<b>{html.escape(_truncate(entity_current_value(self._text, e), 60))}</b><br>"
-                "<span style='color:#5b6474'>Остается в тексте как есть</span>"
-            )
-            row.addWidget(label, 1)
-            back = QPushButton("Вернуть")
-            back.clicked.connect(lambda _=False, eid=e.id: self.restore.emit(eid))
-            row.addWidget(back)
-            box.addLayout(row)
-        container.setVisible(self._dismissed_open)
-        self.layout_.addWidget(container)
+            box.addWidget(self._item(
+                None, entity_current_value(self._text, e), "Остается в тексте как есть", False,
+                ("Вернуть", lambda _=False, eid=e.id: self.restore.emit(eid)),
+            ))
+        wrap.addWidget(container)
+        self.layout_.addLayout(wrap)
+
+        def sync() -> None:
+            container.setVisible(self._dismissed_open)
+            toggle.setText(f"{'▾' if self._dismissed_open else '▸'}  Отклоненные ({len(dismissed)})")
 
         def flip() -> None:
             self._dismissed_open = not self._dismissed_open
-            container.setVisible(self._dismissed_open)
-            toggle.setText(f"{'▾' if self._dismissed_open else '▸'} Отклоненные ({len(dismissed)})")
+            sync()
 
         toggle.clicked.connect(flip)
+        sync()
+
+
+class _EntityRow(QFrame):
+    hovered = Signal(object)
+
+    def __init__(self, entity_id: str) -> None:
+        super().__init__()
+        self.entity_id = entity_id
+        self.setObjectName("entityRow")
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        self.hovered.emit(self.entity_id)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self.hovered.emit(None)
+        super().leaveEvent(event)
+
+
+class _Clickable(QWidget):
+    clicked = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("clickable")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+
+    def enterEvent(self, event) -> None:  # noqa: N802
+        set_prop(self, "hover", "true")
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        set_prop(self, "hover", "false")
 
 
 class FoundPanel(QWidget):
@@ -295,62 +445,23 @@ class FoundPanel(QWidget):
     change_type = Signal(str, str)
     merge = Signal(str, str)  # источник, цель
     delete = Signal(str)
+    row_hovered = Signal(object)
 
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        self.empty = QLabel("Ничего не найдено. Выделите текст в редакторе, чтобы добавить замену вручную.")
-        self.empty.setWordWrap(True)
-        self.empty.setObjectName("muted")
-        layout.addWidget(self.empty)
-        self.tree = QTreeWidget()
-        self.tree.setColumnCount(3)
-        self.tree.setHeaderLabels(["Значение", "Замена", "×"])
-        self.tree.setRootIsDecorated(True)
-        self.tree.setUniformRowHeights(True)
-        self.tree.header().setStretchLastSection(False)
-        self.tree.header().setSectionResizeMode(0, self.tree.header().ResizeMode.Stretch)
-        self.tree.header().setSectionResizeMode(1, self.tree.header().ResizeMode.ResizeToContents)
-        self.tree.header().setSectionResizeMode(2, self.tree.header().ResizeMode.ResizeToContents)
-        layout.addWidget(self.tree, 1)
-
-        self.actions = QFrame()
-        self.actions.setObjectName("card")
-        actions = QVBoxLayout(self.actions)
-        self.selected_label = QLabel()
-        self.selected_label.setWordWrap(True)
-        actions.addWidget(self.selected_label)
-        row = QHBoxLayout()
-        row.addWidget(QLabel("Тип"))
-        self.type_box = QComboBox()
-        self.type_box.addItems(list(ALL_ENTITY_TYPES))
-        row.addWidget(self.type_box)
-        row.addStretch(1)
-        self.delete_button = QPushButton("Удалить")
-        row.addWidget(self.delete_button)
-        actions.addLayout(row)
-        merge_row = QHBoxLayout()
-        self.merge_box = QComboBox()
-        self.merge_button = QPushButton("Объединить")
-        merge_row.addWidget(self.merge_box, 1)
-        merge_row.addWidget(self.merge_button)
-        actions.addLayout(merge_row)
-        layout.addWidget(self.actions)
-        self.actions.hide()
-
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self.area, self.layout_ = _scroll_area()
+        self.layout_.setSpacing(0)
+        outer.addWidget(self.area)
         self._entities: list[Entity] = []
         self._text = ""
         self._selected: Optional[str] = None
-        self._updating = False
+        self._merging: Optional[str] = None
         self._collapsed: set[str] = set()
-        self.tree.itemChanged.connect(self._on_item_changed)
-        self.tree.itemClicked.connect(self._on_item_clicked)
-        self.tree.itemCollapsed.connect(lambda item: self._collapsed.add(item.data(0, Qt.ItemDataRole.UserRole + 1)))
-        self.tree.itemExpanded.connect(lambda item: self._collapsed.discard(item.data(0, Qt.ItemDataRole.UserRole + 1)))
-        self.type_box.currentTextChanged.connect(self._on_type)
-        self.delete_button.clicked.connect(self._on_delete)
-        self.merge_button.clicked.connect(self._on_merge)
+        self._highlighted: Optional[str] = None
+        self._rows: dict[str, _EntityRow] = {}
+        self._group_headers: dict[str, QFrame] = {}
 
     def confirmed(self, entities: list[Entity]) -> list[Entity]:
         return [e for e in entities if not e.dismissed and not e.candidate]
@@ -358,151 +469,343 @@ class FoundPanel(QWidget):
     def render(self, entities: list[Entity], text: str) -> None:
         self._entities = entities
         self._text = text
+        if self._selected and not any(e.id == self._selected for e in self.confirmed(entities)):
+            self._selected = None
+            self._merging = None
+        scroll = self.area.verticalScrollBar().value()
+        _clear(self.layout_)
+        self._rows = {}
+        self._group_headers = {}
         confirmed = self.confirmed(entities)
-        self.empty.setVisible(not confirmed)
-        self.tree.setVisible(bool(confirmed))
+        if not confirmed:
+            empty = QLabel("Ничего не найдено. Выделите текст в редакторе, чтобы добавить замену вручную.")
+            empty.setWordWrap(True)
+            empty.setObjectName("muted")
+            self.layout_.addWidget(empty)
+            return
         by_type: dict[str, list[Entity]] = {}
         for e in confirmed:
             by_type.setdefault(e.type, []).append(e)
-        self._updating = True
-        scroll = self.tree.verticalScrollBar().value()
-        self.tree.clear()
-        selected_item = None
-        for type_ in ALL_ENTITY_TYPES:
-            items = sorted(by_type.get(type_, []), key=_min_start)
-            if not items:
-                continue
-            active = sum(1 for e in items if e.anonymize)
-            group = QTreeWidgetItem(self.tree)
-            group.setText(0, type_)
-            group.setText(2, str(len(items)) if active == len(items) else f"{active} из {len(items)}")
-            group.setForeground(0, QBrush(entity_solid(type_)))
-            font = group.font(0)
-            font.setBold(True)
-            group.setFont(0, font)
-            group.setData(0, Qt.ItemDataRole.UserRole + 1, type_)
-            group.setFlags(group.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            group.setCheckState(0, Qt.CheckState.Checked if active == len(items)
-                                else Qt.CheckState.Unchecked if active == 0 else Qt.CheckState.PartiallyChecked)
-            group.setToolTip(0, "Заменять все значения этого типа")
-            for e in items:
-                child = QTreeWidgetItem(group)
-                child.setText(0, _truncate(entity_current_value(text, e).replace("\n", " "), 80))
-                child.setText(1, e.placeholder)
-                child.setText(2, str(len(e.positions)))
-                child.setToolTip(0, "Показать в тексте")
-                child.setData(0, Qt.ItemDataRole.UserRole, e.id)
-                child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-                child.setCheckState(0, Qt.CheckState.Checked if e.anonymize else Qt.CheckState.Unchecked)
-                if e.id == self._selected:
-                    selected_item = child
-            group.setExpanded(type_ not in self._collapsed)
-        self._updating = False
-        self.tree.verticalScrollBar().setValue(scroll)
-        if selected_item is not None:
-            self.tree.setCurrentItem(selected_item)
-            self._show_actions(self._selected)
-        else:
-            self._selected = None
-            self.actions.hide()
+        groups = [(tp, sorted(by_type[tp], key=_min_start)) for tp in ALL_ENTITY_TYPES if tp in by_type]
+        for gi, (type_, items) in enumerate(groups):
+            if gi > 0:
+                sep = QFrame()
+                sep.setObjectName("groupSep")
+                sep.setFixedHeight(1)
+                self.layout_.addWidget(sep)
+            self.layout_.addWidget(self._group_header(type_, items))
+            if type_ not in self._collapsed:
+                for e in items:
+                    self.layout_.addWidget(self._row(e, by_type[type_]))
+                self.layout_.addSpacing(6)
+        self.area.verticalScrollBar().setValue(scroll)
+        self.set_highlighted(self._highlighted)
 
-    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
-        if self._updating or column != 0:
-            return
-        entity_id = item.data(0, Qt.ItemDataRole.UserRole)
-        checked = item.checkState(0) == Qt.CheckState.Checked
-        if entity_id:
-            self.set_anonymize.emit([entity_id], checked)
-            return
-        type_ = item.data(0, Qt.ItemDataRole.UserRole + 1)
-        items = [e for e in self.confirmed(self._entities) if e.type == type_]
+    def _group_header(self, type_: str, items: list[Entity]) -> QFrame:
         active = sum(1 for e in items if e.anonymize)
-        # Как в браузерной версии: если включены не все, включаем все; иначе выключаем.
-        self.set_anonymize.emit([e.id for e in items], active < len(items))
+        header = QFrame()
+        header.setObjectName("groupHeader")
+        header.setMinimumHeight(40)
+        row = QHBoxLayout(header)
+        row.setContentsMargins(6, 0, 2, 0)
+        row.setSpacing(10)
+        box = QCheckBox()
+        box.setTristate(True)
+        box.setCheckState(
+            Qt.CheckState.Checked if active == len(items)
+            else Qt.CheckState.Unchecked if active == 0 else Qt.CheckState.PartiallyChecked
+        )
+        box.setToolTip("Заменять все значения этого типа")
+        # Как в вебе: если включены не все, включаем все; иначе выключаем.
+        box.clicked.connect(lambda _=False, ids=[e.id for e in items], value=active < len(items):
+                            self.set_anonymize.emit(ids, value))
+        row.addWidget(box)
+        dot = QLabel()
+        dot.setFixedSize(10, 10)
+        dot.setStyleSheet(
+            f"background: {t.entity_solid(type_).name()}; border-radius: 5px; border: 1px solid rgba(0,0,0,30);"
+        )
+        row.addWidget(dot)
+        toggle = _Clickable()
+        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        trow = QHBoxLayout(toggle)
+        trow.setContentsMargins(0, 8, 4, 8)
+        trow.setSpacing(8)
+        name = QLabel(type_)
+        name.setObjectName("groupName")
+        count = QLabel(str(len(items)) if active == len(items) else f"{active} из {len(items)}")
+        count.setObjectName("groupCount")
+        chevron = QLabel()
+        chevron.setPixmap(pixmap("chevron-down" if type_ not in self._collapsed else "chevron-up", t.INK_3, 16))
+        trow.addWidget(name)
+        trow.addWidget(count)
+        trow.addStretch(1)
+        trow.addWidget(chevron)
+        _transparent_labels(toggle)
+        toggle.clicked.connect(lambda tp=type_: self._toggle_group(tp))
+        row.addWidget(toggle, 1)
+        self._group_headers[type_] = header
+        return header
 
-    def _on_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
-        entity_id = item.data(0, Qt.ItemDataRole.UserRole)
-        if not entity_id:
-            return
+    def _toggle_group(self, type_: str) -> None:
+        if type_ in self._collapsed:
+            self._collapsed.discard(type_)
+        else:
+            self._collapsed.add(type_)
+        self.render(self._entities, self._text)
+
+    def _row(self, entity: Entity, same_type: list[Entity]) -> _EntityRow:
+        value = entity_current_value(self._text, entity)
+        selected = entity.id == self._selected
+        row = _EntityRow(entity.id)
+        row.setProperty("selected", "true" if selected else "false")
+        row.hovered.connect(self.row_hovered)
+        box = QVBoxLayout(row)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(0)
+        line = QHBoxLayout()
+        line.setContentsMargins(6, 0, 0, 0)
+        line.setSpacing(8)
+        check = QCheckBox()
+        check.setChecked(entity.anonymize)
+        check.setToolTip("Заменять в итоговом тексте")
+        check.clicked.connect(lambda checked, eid=entity.id: self.set_anonymize.emit([eid], checked))
+        line.addWidget(check)
+        button = _Clickable()
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip("Показать в тексте")
+        brow = QHBoxLayout(button)
+        brow.setContentsMargins(6, 7, 6, 7)
+        brow.setSpacing(8)
+        cell = QLabel(_truncate(value.replace("\n", " "), 80))
+        cell.setObjectName("cellValue" if entity.anonymize else "cellValueOff")
+        cell.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        placeholder = QLabel(entity.placeholder)
+        placeholder.setObjectName("cellPlaceholder")
+        cnt = QLabel(f"×{len(entity.positions)}")
+        cnt.setObjectName("cellCount")
+        cnt.setMinimumWidth(22)
+        cnt.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        brow.addWidget(cell, 1)
+        brow.addWidget(placeholder)
+        brow.addWidget(cnt)
+        _transparent_labels(button)
+        button.clicked.connect(lambda eid=entity.id: self._click(eid))
+        line.addWidget(button, 1)
+        box.addLayout(line)
+        if selected:
+            box.addWidget(self._actions(entity, same_type))
+        self._rows[entity.id] = row
+        return row
+
+    def _actions(self, entity: Entity, same_type: list[Entity]) -> QWidget:
+        area = QWidget()
+        rows = QVBoxLayout(area)
+        rows.setContentsMargins(36, 2, 8, 10)
+        rows.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        rows.addLayout(row)
+        others = [x for x in same_type if x.id != entity.id]
+        if self._merging == entity.id:
+            target = QComboBox()
+            target.setObjectName("compact")
+            target.setMinimumContentsLength(8)
+            target.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            target.addItem("объединить с…", "")
+            for x in others:
+                target.addItem(f"{x.placeholder} · {_truncate(entity_current_value(self._text, x), 24)}", x.id)
+            ok = QPushButton("Объединить")
+            ok.setObjectName("primary")
+            ok.setStyleSheet("padding: 3px 10px; font-size: 13px;")
+            ok.setEnabled(False)
+            target.currentIndexChanged.connect(lambda _i: ok.setEnabled(bool(target.currentData())))
+            cancel = QPushButton("Отмена")
+            cancel.setObjectName("small")
+
+            def do_merge() -> None:
+                if target.currentData():
+                    self._merging = None
+                    self._selected = None
+                    self.merge.emit(entity.id, target.currentData())
+
+            def do_cancel() -> None:
+                self._merging = None
+                self.render(self._entities, self._text)
+
+            ok.clicked.connect(do_merge)
+            cancel.clicked.connect(do_cancel)
+            row.addWidget(target, 1)
+            row.addWidget(ok)
+            row.addWidget(cancel)
+            return area
+        label = QLabel("Тип")
+        label.setObjectName("fieldLabel")
+        row.addWidget(label)
+        type_box = QComboBox()
+        type_box.setObjectName("mono")
+        type_box.addItems(list(ALL_ENTITY_TYPES))
+        type_box.setCurrentText(entity.type)
+        type_box.currentTextChanged.connect(lambda tp, eid=entity.id: self.change_type.emit(eid, tp))
+        row.addWidget(type_box)
+        if others:
+            merge = QPushButton("Объединить…")
+            merge.setObjectName("small")
+            merge.setToolTip("Объединить с другой заменой того же типа")
+
+            def start_merge() -> None:
+                self._merging = entity.id
+                self.render(self._entities, self._text)
+
+            merge.clicked.connect(start_merge)
+            row.addWidget(merge)
+        row.addStretch(1)
+        delete = QPushButton("Удалить")
+        delete.setObjectName("danger")
+
+        def do_delete() -> None:
+            self._selected = None
+            self.delete.emit(entity.id)
+
+        delete.clicked.connect(do_delete)
+        rows.addWidget(delete, 0, Qt.AlignmentFlag.AlignLeft)
+        return area
+
+    def _click(self, entity_id: str) -> None:
+        self._merging = None
         if self._selected == entity_id:
             self._selected = None
-            self.actions.hide()
-            self.tree.clearSelection()
+            self.render(self._entities, self._text)
             return
         self._selected = entity_id
-        self._show_actions(entity_id)
+        self.render(self._entities, self._text)
         self.select.emit(entity_id)
 
     def select_entity(self, entity_id: str) -> None:
-        for i in range(self.tree.topLevelItemCount()):
-            group = self.tree.topLevelItem(i)
-            for j in range(group.childCount()):
-                child = group.child(j)
-                if child.data(0, Qt.ItemDataRole.UserRole) == entity_id:
-                    group.setExpanded(True)
-                    self.tree.setCurrentItem(child)
-                    self.tree.scrollToItem(child)
-                    self._selected = entity_id
-                    self._show_actions(entity_id)
-                    return
-
-    def _show_actions(self, entity_id: Optional[str]) -> None:
         entity = next((e for e in self._entities if e.id == entity_id), None)
         if entity is None:
-            self.actions.hide()
             return
-        self.selected_label.setText(
-            f"<b>{html.escape(_truncate(entity_current_value(self._text, entity), 80))}</b> → {entity.placeholder}"
+        self._collapsed.discard(entity.type)
+        self._selected = entity_id
+        self._merging = None
+        self.render(self._entities, self._text)
+        row = self._rows.get(entity_id)
+        if row is not None:
+            self.area.ensureWidgetVisible(row, 0, 40)
+
+    def set_highlighted(self, entity_id: Optional[str]) -> None:
+        """Подсветка строки сущности, на которую навели в редакторе."""
+        previous = self._rows.get(self._highlighted) if self._highlighted else None
+        if previous is not None:
+            set_prop(previous, "highlighted", "false")
+        for header in self._group_headers.values():
+            set_prop(header, "highlighted", "false")
+        self._highlighted = entity_id
+        if not entity_id:
+            return
+        row = self._rows.get(entity_id)
+        if row is not None:
+            set_prop(row, "highlighted", "true")
+            self.area.ensureWidgetVisible(row, 0, 40)
+            return
+        entity = next((e for e in self._entities if e.id == entity_id), None)
+        if entity is not None and entity.type in self._group_headers:
+            header = self._group_headers[entity.type]
+            set_prop(header, "highlighted", "true")
+            self.area.ensureWidgetVisible(header, 0, 40)
+
+
+class _Tab(QPushButton):
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self.setObjectName("sideTab")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(4, 0, 4, 0)
+        row.setSpacing(6)
+        row.addStretch(1)
+        self.title = QLabel(title)
+        self.title.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
+        self.badge = QLabel()
+        self.badge.setObjectName("badge")
+        self.badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        row.addWidget(self.title, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.badge, 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        _transparent_labels(self)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setFixedHeight(44)
+        self._row = row
+
+    def _fit(self) -> None:
+        self.setMinimumWidth(self._row.sizeHint().width())
+
+    def set_selected(self, selected: bool) -> None:
+        set_prop(self, "selected", "true" if selected else "false")
+        self.title.setStyleSheet(
+            f"background: transparent; font-size: 13.5px; color: {t.INK if selected else t.INK_3};"
+            f" font-weight: {600 if selected else 400};"
         )
-        self.type_box.blockSignals(True)
-        self.type_box.setCurrentText(entity.type)
-        self.type_box.blockSignals(False)
-        same = [e for e in self.confirmed(self._entities) if e.type == entity.type and e.id != entity.id]
-        self.merge_box.clear()
-        self.merge_box.addItem("объединить с…", "")
-        for t in same:
-            self.merge_box.addItem(f"{t.placeholder} · {_truncate(entity_current_value(self._text, t), 24)}", t.id)
-        self.merge_box.setEnabled(bool(same))
-        self.merge_button.setEnabled(bool(same))
-        self.actions.show()
+        self._fit()
 
-    def _on_type(self, type_: str) -> None:
-        if self._selected:
-            self.change_type.emit(self._selected, type_)
-
-    def _on_delete(self) -> None:
-        if self._selected:
-            entity_id = self._selected
-            self._selected = None
-            self.actions.hide()
-            self.delete.emit(entity_id)
-
-    def _on_merge(self) -> None:
-        target = self.merge_box.currentData()
-        if self._selected and target:
-            source = self._selected
-            self._selected = None
-            self.merge.emit(source, target)
+    def set_badge(self, text: str, kind: str = "badge") -> None:
+        self.badge.setText(text)
+        self.badge.setObjectName(kind)
+        self.badge.style().unpolish(self.badge)
+        self.badge.style().polish(self.badge)
+        self._fit()
 
 
-class SidePanel(QTabWidget):
+class SidePanel(QFrame):
+    """Карточка боковой панели: вкладки «Проверка» и «Найденные данные»."""
+
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("entityPane")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        tabs = QFrame()
+        tabs.setObjectName("sideTabs")
+        tab_row = QHBoxLayout(tabs)
+        tab_row.setContentsMargins(8, 0, 8, 0)
+        tab_row.setSpacing(0)
+        self.tab_review = _Tab("Проверка")
+        self.tab_found = _Tab("Найденные данные")
+        tab_row.addWidget(self.tab_review)
+        tab_row.addWidget(self.tab_found)
+        layout.addWidget(tabs)
+        self.stack = QStackedWidget()
         self.review = ReviewPanel()
         self.found = FoundPanel()
-        self.addTab(self.review, "Проверка")
-        self.addTab(self.found, "Найденные данные")
+        self.stack.addWidget(self.review)
+        self.stack.addWidget(self.found)
+        layout.addWidget(self.stack, 1)
         self.user_tab: Optional[int] = None  # None — вкладка выбирается автоматически
-        self.tabBarClicked.connect(self._remember)
+        self.tab_review.clicked.connect(lambda: self._choose(0))
+        self.tab_found.clicked.connect(lambda: self._choose(1))
+        self.setCurrentIndex(0)
 
-    def _remember(self, index: int) -> None:
+    def _choose(self, index: int) -> None:
         self.user_tab = index
+        self.setCurrentIndex(index)
+
+    def currentIndex(self) -> int:  # noqa: N802
+        return self.stack.currentIndex()
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802
+        self.stack.setCurrentIndex(index)
+        self.tab_review.set_selected(index == 0)
+        self.tab_found.set_selected(index == 1)
 
     def render(self, entities: list[Entity], text: str) -> None:
         pending = len(pending_candidates(entities))
         confirmed = len(self.found.confirmed(entities))
-        self.setTabText(0, f"Проверка ({pending})" if pending else "Проверка ✓")
-        self.setTabText(1, f"Найденные данные ({confirmed})")
+        if pending:
+            self.tab_review.set_badge(str(pending), "badgePending")
+        else:
+            self.tab_review.set_badge("✓", "badgeDone")
+        self.tab_found.set_badge(str(confirmed), "badge")
         self.review.render(entities, text)
         self.found.render(entities, text)
         target = self.user_tab if self.user_tab is not None else (0 if pending else 1)

@@ -15,6 +15,10 @@ TEXT = "Договор между ООО «Альфа» и Иван Петров
 @pytest.fixture
 def window(qtbot, tmp_path, monkeypatch):
     monkeypatch.setenv("MD_BLINDER_DATA_DIR", str(tmp_path / "data"))
+    # Модель, загруженная другим тестом, живет в общем ModelHolder; здесь окно работает без NER.
+    import md_blinder.jobs as jobs
+
+    monkeypatch.setattr(jobs, "MODEL", jobs.ModelHolder())
     store = HistoryStore(tmp_path / "h.sqlite")
     w = MainWindow(store)
     w.settings.clear()
@@ -134,3 +138,77 @@ def test_full_pipeline_with_real_model(qtbot, tmp_path, monkeypatch):
     for name in ("Иван Петров", "Олена Коваленко"):
         assert name not in w.anonymized_text
     w.close()
+
+
+def test_fonts_registered():
+    from PySide6.QtGui import QFontDatabase
+
+    families = QFontDatabase.families()
+    for family in ("IBM Plex Sans", "IBM Plex Serif", "IBM Plex Mono"):
+        assert family in families
+
+
+def _two_people(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para("Иван Петров подписал, Анна Смирнова согласовала."))
+    text = window.session.text
+    for name in ("Иван Петров", "Анна Смирнова"):
+        s = text.index(name)
+        window._add_entity(s, s + len(name), "PERSON")
+    return text
+
+
+def test_hover_sync_both_ways(qtbot, window, tmp_path):
+    text = _two_people(qtbot, window, tmp_path)
+    editor = window.page.editor
+    found = window.page.side.found
+    window.page.side.setCurrentIndex(1)
+    person = next(e for e in window.session.entities if e.type == "PERSON")
+    # Указатель над сущностью в редакторе подсвечивает ее строку в списке.
+    rect = editor.range_rects(person.positions[0].start, person.positions[0].end)[0]
+    qtbot.mouseMove(editor.viewport(), rect.center().toPoint())
+    qtbot.waitUntil(lambda: found._highlighted == person.id, timeout=2000)
+    assert found._rows[person.id].property("highlighted") == "true"
+    # Наведение на строку списка обводит вхождения в редакторе.
+    found.row_hovered.emit(person.id)
+    assert editor._outlined == person.id
+    del text
+
+
+def test_merge_from_editor(qtbot, window, tmp_path):
+    _two_people(qtbot, window, tmp_path)
+    people = [e for e in window.session.entities if e.type == "PERSON"]
+    assert len(people) == 2
+    window.page.editor.merge_requested.emit(people[1].id, people[0].id)
+    merged = [e for e in window.session.entities if e.type == "PERSON"]
+    assert len(merged) == 1 and len(merged[0].positions) == 2
+    assert window.anonymized_text.count("[PERSON_1]") == 2
+    window.session.undo_stack.undo()
+    assert len([e for e in window.session.entities if e.type == "PERSON"]) == 2
+
+
+def test_drag_handle_changes_span_as_one_command(qtbot, window, tmp_path):
+    from md_blinder.anonymize.types import Position
+
+    open_docx(qtbot, window, tmp_path, para("Директор Иван Петров подписал договор."))
+    text = window.session.text
+    s = text.index("Иван")
+    window._add_entity(s, s + 4, "PERSON")
+    editor = window.page.editor
+    entity = next(e for e in window.session.entities if e.type == "PERSON")
+    span = entity.positions[0]
+    # Щелчок внутри вхождения показывает ручки по краям.
+    rect = editor.range_rects(span.start, span.end)[0]
+    qtbot.mouseClick(editor.viewport(), Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+    assert editor._active == (entity.id, span)
+    handles = dict(editor._handle_points())
+    target = editor.range_rects(text.index("Петров") + 5, text.index("Петров") + 6)[0]
+    before = window.session.undo_stack.count()
+    qtbot.mousePress(editor.viewport(), Qt.MouseButton.LeftButton, pos=handles["right"].toPoint())
+    qtbot.mouseMove(editor.viewport(), target.center().toPoint())
+    qtbot.mouseRelease(editor.viewport(), Qt.MouseButton.LeftButton, pos=target.center().toPoint())
+    moved = next(e for e in window.session.entities if e.id == entity.id)
+    assert text[moved.positions[0].start:moved.positions[0].end] == "Иван Петров"
+    assert window.session.undo_stack.count() == before + 1
+    window.session.undo_stack.undo()
+    restored = next(e for e in window.session.entities if e.id == entity.id)
+    assert restored.positions == [Position(span.start, span.end)]

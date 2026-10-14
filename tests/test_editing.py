@@ -41,3 +41,56 @@ def test_map_pos_before_and_after():
     c = TextChange(10, "abc", "z")
     assert map_pos(3, c, 1) == 3
     assert map_pos(20, c, -1) == 18
+
+
+from md_blinder.editing import active_span_at, drag_span, hovered_entity_at, replace_position  # noqa: E402
+
+
+def two_entities():
+    text = "Директор Иван Петров и бухгалтер Анна Смирнова."
+    a = text.index("Иван Петров")
+    b = text.index("Анна Смирнова")
+    e1 = Entity(id="a", type="PERSON", value="", placeholder="[PERSON_1]", positions=[Position(a, a + 4)])
+    e2 = Entity(id="b", type="PERSON", value="", placeholder="[PERSON_2]", positions=[Position(b, b + 13)])
+    return text, e1, e2
+
+
+def test_drag_right_snaps_to_word_end():
+    text, e1, e2 = two_entities()
+    span = e1.positions[0]
+    # Ручку отпускают ближе к концу «Петров»: край привязывается к ближайшей границе слова.
+    new = drag_span([e1, e2], "a", span, span, "right", text.index("Петров") + 4, text)
+    assert text[new.start:new.end] == "Иван Петров"
+
+
+def test_drag_left_keeps_opposite_edge():
+    text, e1, e2 = two_entities()
+    span = e2.positions[0]
+    new = drag_span([e1, e2], "b", span, span, "left", text.index("бухгалтер") + 3, text)
+    assert new.end == span.end
+    assert text[new.start:new.end] == "бухгалтер Анна Смирнова"
+
+
+def test_drag_does_not_cross_neighbour():
+    text, e1, e2 = two_entities()
+    span = e1.positions[0]
+    new = drag_span([e1, e2], "a", span, span, "right", len(text), text)
+    assert new.end <= e2.positions[0].start
+
+
+def test_drag_cannot_collapse():
+    text, e1, e2 = two_entities()
+    span = e1.positions[0]
+    new = drag_span([e1, e2], "a", span, span, "right", 0, text)
+    assert new is not None and new.end > new.start
+
+
+def test_replace_position_and_lookup():
+    text, e1, e2 = two_entities()
+    old = e1.positions[0]
+    moved = replace_position([e1, e2], "a", old, Position(old.start, old.end + 7))
+    assert moved[0].positions == [Position(old.start, old.end + 7)]
+    assert moved[1] is e2
+    assert active_span_at([e1, e2], old.start + 1) == ("a", old)
+    assert active_span_at([e1, e2], 0) is None
+    assert hovered_entity_at([e1, e2], e2.positions[0].start + 2) == "b"

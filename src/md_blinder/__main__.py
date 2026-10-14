@@ -25,6 +25,11 @@ def self_check() -> int:
         from PySide6 import QtWidgets  # noqa: F401
 
         lines.append(f"onnxruntime {onnxruntime.__version__}, PyMuPDF {pymupdf.VersionBind}: OK")
+        from .ui.theme import FONTS_DIR
+
+        fonts = len(list(FONTS_DIR.glob("*.ttf")))
+        ok &= fonts >= 11
+        lines.append(f"Шрифты IBM Plex: {'OK' if fonts >= 11 else 'не найдены'} ({fonts})")
         from .components import model_asset, tessdata
 
         if tessdata.is_tessdata_present():
@@ -57,7 +62,8 @@ def self_check() -> int:
     try:
         target = data_dir()
         target.mkdir(parents=True, exist_ok=True)
-        (target / "self-check.txt").write_text(report + "\n", encoding="utf-8")
+        # BOM нужен Windows PowerShell 5.1: без него Get-Content читает файл как ANSI.
+        (target / "self-check.txt").write_text(report + "\n", encoding="utf-8-sig")
     except OSError:
         pass
     return 0 if ok else 1
@@ -70,9 +76,10 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     from .ui.main_window import MainWindow
-    from .ui.theme import STYLESHEET
+    from .ui.theme import STYLESHEET, register_fonts
 
     app = QApplication(sys.argv)
+    register_fonts()
     app.setApplicationName("MD Blinder")
     app.setOrganizationName("md-blinder")
     app.setStyle("Fusion")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import time
 import uuid
 from dataclasses import replace
@@ -14,15 +15,14 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMenu,
     QMessageBox,
     QPushButton,
-    QSplitter,
+    QSizePolicy,
     QStackedWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -46,15 +46,19 @@ from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
 from ..paths import history_db_path
 from ..storage.history import HistoryDoc, HistoryStore, merge_docs, now_ms, parse_history, serialize_history
+from ..editing import replace_position
 from ..text_utils import plural
+from . import theme as t
 from .autosave import Autosave
+from .icons import icon, pixmap
 from .progress_label import UiProgress, status_hint, status_label
-from .result_preview import ResultPreview
+from .result_preview import ResultPane
 from .session import DocumentSession
 from .side_panel import SidePanel
-from .source_editor import SourceEditor
+from .source_editor import EditorPane
 from .start_screen import StartScreen, dropped_file
-from .widgets import Notice, StatusStrip, Toast
+from .theme import add_shadow
+from .widgets import Notice, PopupMenu, StatusStrip, Toast
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -69,34 +73,95 @@ def shorten(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+class TopBar(QFrame):
+    """Верхняя панель экрана документа (TopBar.tsx)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("topbar")
+        self.setAcceptDrops(True)
+        add_shadow(self)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(14, 8, 10, 8)
+        row.setSpacing(14)
+        brand = QHBoxLayout()
+        brand.setSpacing(8)
+        mark = QLabel()
+        mark.setPixmap(pixmap("mark", t.INK, 20))
+        brand.addWidget(mark)
+        name = QLabel("MD Blinder")
+        name.setStyleSheet("font-size: 15px; font-weight: 600; background: transparent;")
+        brand.addWidget(name)
+        row.addLayout(brand)
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFixedSize(1, 22)
+        row.addWidget(divider)
+        self.file_label = QLabel()
+        self.file_label.setStyleSheet("font-size: 15px; font-weight: 500; background: transparent;")
+        self.file_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        row.addWidget(self.file_label)
+        self.save_icon = QLabel()
+        self.save_icon.setFixedSize(14, 14)
+        self.save_label = QLabel()
+        save = QHBoxLayout()
+        save.setSpacing(5)
+        save.addWidget(self.save_icon)
+        save.addWidget(self.save_label)
+        row.addLayout(save)
+        row.addStretch(1)
+        self.new_button = QPushButton("Новый файл")
+        self.new_button.setIcon(icon("upload", t.INK, 16, t.ACCENT))
+        self.new_button.setToolTip("Или перетащите файл на эту панель")
+        self.history_button = QPushButton()
+        hrow = QHBoxLayout(self.history_button)
+        hrow.setContentsMargins(13, 0, 11, 0)
+        hrow.setSpacing(7)
+        for widget in (QLabel(), QLabel("История"), QLabel()):
+            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            widget.setStyleSheet("background: transparent; color: inherit; font-size: 14px; font-weight: 500;")
+            hrow.addWidget(widget)
+        hrow.itemAt(0).widget().setPixmap(pixmap("clock", t.INK, 16))
+        hrow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
+        self.history_button.setMinimumWidth(130)
+        self.history_button.setMinimumHeight(self.new_button.sizeHint().height())
+        row.addWidget(self.new_button)
+        row.addWidget(self.history_button)
+        self.history_menu = PopupMenu(self, 340)
+        self.set_save_state("saved")
+
+    def set_save_state(self, state: str) -> None:
+        if state == "error":
+            self.save_icon.setPixmap(pixmap("alert", t.DANGER, 14))
+            self.save_icon.show()
+            text, color = "Ошибка сохранения", t.DANGER
+        elif state == "saving":
+            self.save_icon.hide()
+            text, color = "Сохранение…", t.INK_3
+        else:
+            self.save_icon.setPixmap(pixmap("check", t.GOOD, 14))
+            self.save_icon.show()
+            text, color = "Сохранено на компьютере", t.GOOD
+        self.save_label.setText(text)
+        self.save_label.setStyleSheet(f"font-size: 12.5px; color: {color}; background: transparent;")
+
+
 class DocumentPage(QWidget):
-    """Экран документа: верхняя панель, статус, уведомления, редактор, результат и боковая панель."""
+    """Экран документа: верхняя панель, статус, уведомления, исходник, результат и боковая панель."""
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("page")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 8)
-        layout.setSpacing(8)
-
-        top = QHBoxLayout()
-        brand = QLabel("<b>MD Blinder</b>")
-        self.file_label = QLabel()
-        self.save_label = QLabel()
-        self.save_label.setObjectName("muted")
-        self.new_button = QPushButton("Новый файл")
-        self.history_button = QToolButton()
-        self.history_button.setText("История")
-        self.history_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.history_menu = QMenu(self.history_button)
-        self.history_button.setMenu(self.history_menu)
-        top.addWidget(brand)
-        top.addSpacing(12)
-        top.addWidget(self.file_label, 1)
-        top.addWidget(self.save_label)
-        top.addWidget(self.new_button)
-        top.addWidget(self.history_button)
-        layout.addLayout(top)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(0)
+        self.topbar = TopBar()
+        self.new_button = self.topbar.new_button
+        self.history_button = self.topbar.history_button
+        self.history_menu = self.topbar.history_menu
+        self.file_label = self.topbar.file_label
+        layout.addWidget(self.topbar)
+        layout.addSpacing(16)
 
         self.save_error = Notice(error=True)
         self.retry_save = self.save_error.add_button("Повторить сохранение", lambda: None)
@@ -107,11 +172,17 @@ class DocumentPage(QWidget):
         layout.addWidget(self.status)
 
         self.notices = QVBoxLayout()
+        self.notices.setContentsMargins(0, 0, 0, 0)
+        self.notices.setSpacing(0)
         layout.addLayout(self.notices)
-        self.ocr_retry = Notice("Текст выглядит битым или с ошибками? Все страницы PDF будут распознаны как "
-                                "изображения. Прежняя версия останется в истории.")
+        self.ocr_retry = Notice(plain=True)
+        self.ocr_retry.label.setText("Текст выглядит битым или с ошибками?")
+        self.ocr_retry.layout().setStretch(0, 0)
         self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None, link=True)
-        self.ner_notice = Notice(error=True)
+        retry_hint = QLabel("Все страницы PDF будут распознаны как изображения. Прежняя версия останется в истории.")
+        retry_hint.setObjectName("muted")
+        self.ocr_retry.layout().addWidget(retry_hint, 1)
+        self.ner_notice = Notice()
         self.ocr_notice = Notice()
         self.image_notice = Notice()
         self.collision_notice = Notice(
@@ -119,36 +190,51 @@ class DocumentPage(QWidget):
             "такие фрагменты экранируются, чтобы их нельзя было спутать."
         )
         for notice in (self.ocr_retry, self.ner_notice, self.ocr_notice, self.image_notice, self.collision_notice):
+            slot = QWidget()
+            wrap = QVBoxLayout(slot)
+            wrap.setContentsMargins(0, 12, 0, 0)
+            wrap.addWidget(notice)
+            notice.slot = slot
             notice.hide()
-            self.notices.addWidget(notice)
+            self.notices.addWidget(slot)
 
         toolbar = QHBoxLayout()
+        toolbar.setContentsMargins(0, 16, 0, 6)
+        toolbar.setSpacing(12)
+        self.view_box = QFrame()
+        self.view_box.setObjectName("viewToggleBox")
+        view_row = QHBoxLayout(self.view_box)
+        view_row.setContentsMargins(0, 0, 0, 0)
+        view_row.setSpacing(0)
         self.source_button = QPushButton("Исходник")
         self.result_button = QPushButton("Результат")
         for b in (self.source_button, self.result_button):
+            b.setObjectName("viewToggle")
             b.setCheckable(True)
-            toolbar.addWidget(b)
+            view_row.addWidget(b)
+        toolbar.addWidget(self.view_box)
         self.side_hint = QLabel("Правки в исходнике сразу видны в результате справа")
         self.side_hint.setObjectName("muted")
         toolbar.addWidget(self.side_hint)
         toolbar.addStretch(1)
         self.side_by_side_box = QCheckBox("Результат рядом")
+        self.side_by_side_box.setStyleSheet("font-size: 13.5px;")
         toolbar.addWidget(self.side_by_side_box)
         layout.addLayout(toolbar)
 
-        self.editor = SourceEditor()
-        self.preview = ResultPreview()
-        self.docs = QSplitter(Qt.Orientation.Horizontal)
-        self.docs.addWidget(self.editor)
-        self.docs.addWidget(self.preview)
+        work = QHBoxLayout()
+        work.setContentsMargins(0, 6, 0, 0)
+        work.setSpacing(16)
+        self.editor_pane = EditorPane()
+        self.result_pane = ResultPane()
+        self.editor = self.editor_pane.editor
+        self.preview = self.result_pane.preview
+        work.addWidget(self.editor_pane, 1)
+        work.addWidget(self.result_pane, 1)
         self.side = SidePanel()
-        self.main = QSplitter(Qt.Orientation.Horizontal)
-        self.main.addWidget(self.docs)
-        self.main.addWidget(self.side)
-        self.main.setStretchFactor(0, 3)
-        self.main.setStretchFactor(1, 1)
-        self.main.setSizes([900, 380])
-        layout.addWidget(self.main, 1)
+        self.side.setFixedWidth(440)
+        work.addWidget(self.side)
+        layout.addLayout(work, 1)
 
 
 class MainWindow(QMainWindow):
@@ -214,7 +300,7 @@ class MainWindow(QMainWindow):
         p.result_button.clicked.connect(lambda: self.set_view("result"))
         p.side_by_side_box.setChecked(self.settings.value("sideBySide", True, type=bool))
         p.side_by_side_box.toggled.connect(self._side_by_side_changed)
-        p.history_menu.aboutToShow.connect(self._fill_history_menu)
+        p.history_button.clicked.connect(self._open_history_menu)
 
         p.status.show_candidates.connect(self.show_candidates)
         p.status.export_md.connect(self.export_md)
@@ -227,6 +313,12 @@ class MainWindow(QMainWindow):
         p.editor.add_requested.connect(self._add_entity)
         p.editor.attach_requested.connect(self._attach_entity)
         p.editor.entity_clicked.connect(self._entity_clicked)
+        p.editor.merge_requested.connect(
+            lambda a, b: self._update(lambda es: compact_placeholder_numbers(merge_entities(es, a, b)), "Объединить")
+        )
+        p.editor.span_changed.connect(self._span_changed)
+        p.editor.hovered.connect(p.side.found.set_highlighted)
+        p.side.found.row_hovered.connect(p.editor.set_outlined)
 
         review, found = p.side.review, p.side.found
         review.activate.connect(self.activate_candidate)
@@ -484,6 +576,9 @@ class MainWindow(QMainWindow):
         text = self.session.text
         self._update(lambda es: add_occurrence_to_entity(es, text, start, end, entity_id), "Добавить вхождение")
 
+    def _span_changed(self, entity_id: str, old, new) -> None:
+        self._update(lambda es: replace_position(es, entity_id, old, new), "Изменить границы")
+
     def _entity_clicked(self, entity_id: str) -> None:
         entity = next((e for e in self.session.entities if e.id == entity_id), None)
         if entity is None:
@@ -540,12 +635,15 @@ class MainWindow(QMainWindow):
         side_by_side = wide and p.side_by_side_box.isChecked()
         p.side_by_side_box.setVisible(wide)
         p.side_hint.setVisible(side_by_side)
-        for b in (p.source_button, p.result_button):
-            b.setVisible(not side_by_side)
+        p.view_box.setVisible(not side_by_side)
         p.source_button.setChecked(self.view == "source")
         p.result_button.setChecked(self.view == "result")
-        p.editor.setVisible(side_by_side or self.view == "source")
-        p.preview.setVisible(side_by_side or self.view == "result")
+        p.editor_pane.setVisible(side_by_side or self.view == "source")
+        p.result_pane.setVisible(side_by_side or self.view == "result")
+        # В одной колонке вид уже назван переключателем, заголовок колонки не нужен.
+        p.editor_pane.title.setVisible(side_by_side)
+        p.result_pane.title.setVisible(side_by_side)
+        p.side.setFixedWidth(360 if side_by_side else 440)
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -622,17 +720,28 @@ class MainWindow(QMainWindow):
         self.start.history.render(docs, current)
         self.history_meta = docs
 
-    def _fill_history_menu(self) -> None:
+    def _open_history_menu(self) -> None:
         menu = self.page.history_menu
         menu.clear()
         current = self.session.doc.id if self.session.doc else None
-        for meta in getattr(self, "history_meta", [])[:5]:
-            action = menu.addAction(("✓ " if meta.id == current else "") + shorten(meta.name, 50))
-            action.triggered.connect(lambda _=False, i=meta.id: self.open_doc(i))
-        menu.addSeparator()
-        menu.addAction("Все документы", self.show_all_docs)
-        menu.addAction("Экспортировать историю", self.export_history)
-        menu.addAction("Импортировать историю", self.import_history)
+        recent = getattr(self, "history_meta", [])[:5]
+        if not recent:
+            menu.add_note("История пуста.")
+        for meta in recent:
+            is_current = meta.id == current
+            when = dt.datetime.fromtimestamp(meta.updated_at / 1000).strftime("%d.%m.%Y, %H:%M")
+            hint = "Открыт сейчас" if is_current else (
+                f"{when} · {plural(meta.entity_count, ('находка', 'находки', 'находок'))}"
+            )
+            menu.add_item(shorten(meta.name, 44), lambda i=meta.id: self.open_doc(i), hint, current=is_current)
+        menu.add_separator()
+        menu.add_note("История хранится на этом компьютере вместе с исходным текстом, без шифрования.", warn=True)
+        menu.add_row([
+            ("Все документы", self.show_all_docs, True),
+            ("Экспорт", self.export_history, bool(recent)),
+            ("Импорт", self.import_history, True),
+        ])
+        menu.show_under(self.page.history_button)
 
     def show_all_docs(self) -> None:
         if not self.autosave.flush():
@@ -736,11 +845,11 @@ class MainWindow(QMainWindow):
     def _save_state_changed(self) -> None:
         p = self.page
         if self.autosave.error:
-            p.save_label.setText("Ошибка сохранения")
+            p.topbar.set_save_state("error")
             self._show_save_error()
         else:
             p.save_error.hide()
-            p.save_label.setText("Сохраняется…" if self.autosave.saving else "Сохранено")
+            p.topbar.set_save_state("saving" if self.autosave.saving else "saved")
 
     def _show_save_error(self) -> None:
         p = self.page

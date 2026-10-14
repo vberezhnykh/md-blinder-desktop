@@ -89,6 +89,8 @@ def main() -> int:
     app.setStyleSheet(STYLESHEET)
     window = MainWindow()
     window.show()
+    window.show_startup_notice(sys.argv)
+    window.updates.startup()
     return app.exec()
 
 

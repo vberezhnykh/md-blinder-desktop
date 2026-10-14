@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "md-blinder-desktop"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Настольная версия MD Blinder: DOCX/PDF в Markdown и обезличивание"
 requires-python = ">=3.11,<3.15"
 dependencies = [
@@ -28,6 +28,9 @@ md-blinder = "md_blinder.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "md_blinder.__version__"}
 
 [tool.setuptools.package-data]
 md_blinder = ["ui/assets/fonts/*", "anonymize/*.LICENSE"]

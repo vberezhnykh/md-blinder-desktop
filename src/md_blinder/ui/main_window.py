@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import os
 import time
 import uuid
 from dataclasses import replace
@@ -58,6 +59,7 @@ from .side_panel import SidePanel
 from .source_editor import EditorPane
 from .start_screen import StartScreen, dropped_file
 from .theme import add_shadow
+from .update_ui import UpdateBar, UpdateController, version_footer
 from .widgets import Notice, PopupMenu, StatusStrip, Toast
 
 WIDE_WINDOW = 1280
@@ -275,8 +277,19 @@ class MainWindow(QMainWindow):
         self.page = DocumentPage()
         self.stack.addWidget(self.start)
         self.stack.addWidget(self.page)
-        self.setCentralWidget(self.stack)
+        central = QWidget()
+        column = QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        self.update_bar = UpdateBar()
+        column.addWidget(self.update_bar)
+        column.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
         self.toast = Toast(self.stack)
+        self.updates = UpdateController(self.update_bar, self.settings, self)
+        self.updates.toast.connect(lambda text, tone: self.toast.show_message(text, 5000, tone=tone))
+        self.updates.restart_requested.connect(self._restart_for_update)
+        self.start.add_footer(version_footer(self.updates))
 
         self._wire()
         self._refresh_history()
@@ -856,6 +869,34 @@ class MainWindow(QMainWindow):
         p.save_error.label.setText(self.autosave.error or "Не удалось сохранить изменения.")
         p.save_error.show()
         self.start.history.set_error(self.autosave.error)
+
+    def _restart_for_update(self, staged) -> None:
+        from .. import updater
+
+        if self.job is not None:
+            self.toast.show_message("Дождитесь окончания обработки файла или отмените ее.", 5000, tone="warn")
+            return
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        try:
+            script = updater.write_script(Path(staged), updater.install_dir(), os.getpid())
+            updater.launch_script(script)
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось запустить обновление: {exc}", 8000, tone="error")
+            return
+        self.close()
+
+    def show_startup_notice(self, argv: list[str]) -> None:
+        from .. import __version__
+
+        if "--updated" in argv:
+            self.toast.show_message(f"Программа обновлена до версии {__version__}.", 5000)
+        elif "--update-failed" in argv:
+            self.toast.show_message(
+                "Не удалось заменить файлы программы, осталась прежняя версия. Попробуйте обновить еще раз.",
+                10000, tone="error",
+            )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
         if self.job is None and dropped_file(event):

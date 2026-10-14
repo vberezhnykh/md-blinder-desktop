@@ -336,6 +336,10 @@ class StartScreen(QScrollArea):
         self.history = HistoryPanel()
         column.addWidget(self.history)
         column.addStretch(1)
+        self.column = column
+
+    def add_footer(self, widget: QWidget) -> None:
+        self.column.addWidget(widget)
 
     def set_file_name(self, name: str) -> None:
         self.dropzone.file_label.setText(f"Файл: {Path(name).name}" if name else "")

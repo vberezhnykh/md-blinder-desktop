@@ -29,7 +29,7 @@ from .cancel import CancelToken, check
 from .components.downloader import USER_AGENT, DownloadError, download_file, ssl_context
 from .paths import data_dir
 
-REPO = "vberezhnykh/md-blinder"
+REPO = "vberezhnykh/md-blinder-desktop"
 TAG_PREFIX = "desktop-v"
 ASSET_NAME = "md-blinder-windows.zip"
 EXE_NAME = "MD Blinder.exe"

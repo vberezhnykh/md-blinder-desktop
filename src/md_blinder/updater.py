@@ -195,10 +195,22 @@ def write_script(staged: Path, target: Path, pid: int) -> Path:
         f'findstr /I /C:"{EXE_NAME}" "%~dpn0.txt" >nul',
         "if not errorlevel 1 (ping -n 2 127.0.0.1 >nul & goto wait)",
         'del "%~dpn0.txt" >nul 2>&1',
-        f'robocopy "{staged / "_internal"}" "{target / "_internal"}" /MIR /R:10 /W:1 /NFL /NDL /NJH /NJS /NP >nul',
-        "if errorlevel 8 goto fail",
+        # Сначала exe: в нем лежат модули Python, а в _internal их библиотеки
+        # (pymupdf и другие), и версии должны совпадать. Если exe заменить не
+        # удалось, _internal еще не тронута и прежняя версия запускается целой.
+        # Только что закрытый exe бывает еще занят (антивирус, система), поэтому
+        # копирование повторяется до 30 раз с паузой в секунду.
+        "set tries=0",
+        ":copy_exe",
         f'copy /Y "{staged / EXE_NAME}" "{exe}" >nul',
-        "if errorlevel 1 goto fail",
+        "if not errorlevel 1 goto mirror",
+        "set /a tries+=1",
+        "if %tries% geq 30 goto fail",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto copy_exe",
+        ":mirror",
+        f'robocopy "{staged / "_internal"}" "{target / "_internal"}" /MIR /R:30 /W:1 /NFL /NDL /NJH /NJS /NP >nul',
+        "if errorlevel 8 goto fail",
         f'start "" "{exe}" --updated',
         "exit /b 0",
         ":fail",

@@ -114,6 +114,9 @@ def test_script_replaces_only_exe_and_internal(tmp_path):
     assert f'robocopy "{tmp_path / "new" / "_internal"}" "{tmp_path / "app" / "_internal"}" /MIR' in text
     assert f'copy /Y "{tmp_path / "new" / "MD Blinder.exe"}"' in text
     assert "--updated" in text and "--update-failed" in text
+    # exe заменяется раньше _internal: новые библиотеки со старым exe не запускаются.
+    assert text.index("copy /Y") < text.index("robocopy")
+    assert "goto copy_exe" in text
     # Без конвейера: find, получивший свою консоль, ждал ввода, и обновление висело.
     assert "|" not in text
     script.unlink()

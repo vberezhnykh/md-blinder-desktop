@@ -63,12 +63,12 @@ jobs:
           path: dist/MD Blinder
           retention-days: 14
 
-      # Новая версия в md_blinder/__init__.py выпускается автоматически: если
+      # Новая версия в md_blinder/__init__.py выпускается автоматически при пуше в main: если
       # релиза desktop-v<версия> еще нет, он создается из этого коммита. Описание
       # релиза берется из раздела версии в CHANGELOG.md (release_notes.py).
       # Настольная программа находит его через API релизов и предлагает обновиться.
       - name: Publish release for a new version
-        if: runner.os == 'Windows' && github.event_name == 'push'
+        if: runner.os == 'Windows' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}

@@ -176,3 +176,45 @@ def test_store_sanitizes_out_of_range(tmp_path):
     store = HistoryStore(tmp_path / "h.sqlite")
     store.put_doc(doc(source_text="short", entities=[entity(positions=[Position(0, 50)])]))
     assert store.load_doc("doc-1").entities == []
+
+
+def test_batch_id_round_trip_and_absent_for_single_docs():
+    batched, single = parse_history(serialize_history([doc(batch_id="b1"), doc(id="doc-2")]))
+    assert batched.batch_id == "b1"
+    assert single.batch_id is None
+    assert "batchId" not in json.loads(serialize_history([doc()]))["documents"][0]
+
+
+def test_store_keeps_batch_and_loads_it_in_upload_order(tmp_path):
+    store = HistoryStore(tmp_path / "h.sqlite")
+    store.put_doc(doc(id="late", created_at=3000, batch_id="b"))
+    store.put_doc(doc(id="early", created_at=1000, batch_id="b"))
+    store.put_doc(doc(id="other"))
+    assert [d.id for d in store.load_batch("b")] == ["early", "late"]
+    assert {m.id: m.batch_id for m in store.load_metadata()} == {"late": "b", "early": "b", "other": None}
+    store.close()
+
+
+def test_store_upgrades_database_without_batch_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.sqlite"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE documents (id TEXT PRIMARY KEY, name TEXT NOT NULL, format TEXT NOT NULL,"
+        " created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, source_text TEXT NOT NULL, entities TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE document_meta (id TEXT PRIMARY KEY, name TEXT NOT NULL, format TEXT NOT NULL,"
+        " created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, entity_count INTEGER NOT NULL)"
+    )
+    conn.execute("INSERT INTO documents VALUES ('old', 'a.docx', 'docx', 1, 2, 'Hello world', '[]')")
+    conn.execute("INSERT INTO document_meta VALUES ('old', 'a.docx', 'docx', 1, 2, 0)")
+    conn.commit()
+    conn.close()
+    store = HistoryStore(path)
+    assert store.load_doc("old").batch_id is None
+    assert store.load_metadata()[0].batch_id is None
+    store.put_doc(doc(id="new", batch_id="b"))
+    assert [d.id for d in store.load_batch("b")] == ["new"]
+    store.close()

@@ -39,6 +39,8 @@ class HistoryDoc:
     updated_at: int
     source_text: str
     entities: list[Entity] = field(default_factory=list)
+    # Пакет: документы с одним batch_id получают согласованные метки замены.
+    batch_id: Optional[str] = None
 
 
 @dataclass
@@ -49,6 +51,7 @@ class HistoryDocMeta:
     created_at: int
     updated_at: int
     entity_count: int
+    batch_id: Optional[str] = None
 
 
 def sanitize_entities(raw: Any, source_length: Optional[int] = None) -> list[Entity]:
@@ -116,7 +119,7 @@ def _doc_to_export(doc: HistoryDoc) -> dict[str, Any]:
                 {"start": offsets.to_utf16(p.start), "end": offsets.to_utf16(p.end)} for p in e.positions
             ]
         entities.append(data)
-    return {
+    data: dict[str, Any] = {
         "id": doc.id,
         "name": doc.name,
         "format": doc.format,
@@ -125,6 +128,9 @@ def _doc_to_export(doc: HistoryDoc) -> dict[str, Any]:
         "sourceText": doc.source_text,
         "entities": entities,
     }
+    if doc.batch_id is not None:
+        data["batchId"] = doc.batch_id
+    return data
 
 
 def serialize_history(docs: list[HistoryDoc]) -> str:
@@ -175,6 +181,7 @@ def parse_history(text: str) -> list[HistoryDoc]:
             updated_at=int(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else now,
             source_text=source,
             entities=sanitize_entities(raw_entities, len(source)),
+            batch_id=d["batchId"] if isinstance(d.get("batchId"), str) else None,
         ))
     return docs
 
@@ -201,6 +208,10 @@ def merge_docs(existing: list[HistoryDoc], incoming: list[HistoryDoc]) -> list[H
     return list(by_id.values())
 
 
+_DOC_COLUMNS = "id, name, format, created_at, updated_at, source_text, entities, batch_id"
+_META_COLUMNS = "id, name, format, created_at, updated_at, entity_count, batch_id"
+
+
 class HistoryStore:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
@@ -218,6 +229,11 @@ class HistoryStore:
             "CREATE TABLE IF NOT EXISTS document_meta (id TEXT PRIMARY KEY, name TEXT NOT NULL, format TEXT NOT NULL,"
             " created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, entity_count INTEGER NOT NULL)"
         )
+        # Столбец пакета добавлен позже: в базах прежних версий его нет.
+        for table in ("documents", "document_meta"):
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "batch_id" not in columns:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN batch_id TEXT")
         self._conn.commit()
 
     def close(self) -> None:
@@ -228,12 +244,12 @@ class HistoryStore:
         entities = json.dumps(_entities_to_json(doc.entities), ensure_ascii=False)
         with self._lock, self._conn:
             self._conn.execute(
-                "INSERT OR REPLACE INTO documents VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, doc.source_text, entities),
+                f"INSERT OR REPLACE INTO documents ({_DOC_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, doc.source_text, entities, doc.batch_id),
             )
             self._conn.execute(
-                "INSERT OR REPLACE INTO document_meta VALUES (?, ?, ?, ?, ?, ?)",
-                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, len(doc.entities)),
+                f"INSERT OR REPLACE INTO document_meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, len(doc.entities), doc.batch_id),
             )
 
     def delete_doc(self, doc_id: str) -> None:
@@ -242,24 +258,32 @@ class HistoryStore:
             self._conn.execute("DELETE FROM document_meta WHERE id = ?", (doc_id,))
 
     def _row_to_doc(self, row: tuple) -> HistoryDoc:
-        doc_id, name, fmt, created, updated, source, entities = row
+        doc_id, name, fmt, created, updated, source, entities, batch_id = row
         try:
             raw = json.loads(entities)
         except ValueError:
             raw = []
-        return HistoryDoc(doc_id, name, fmt, created, updated, source, sanitize_entities(raw, len(source)))
+        return HistoryDoc(doc_id, name, fmt, created, updated, source, sanitize_entities(raw, len(source)), batch_id)
 
     def load_doc(self, doc_id: str) -> Optional[HistoryDoc]:
         with self._lock:
-            row = self._conn.execute("SELECT * FROM documents WHERE id = ?", (doc_id,)).fetchone()
+            row = self._conn.execute(f"SELECT {_DOC_COLUMNS} FROM documents WHERE id = ?", (doc_id,)).fetchone()
         return self._row_to_doc(row) if row else None
 
     def load_all(self) -> list[HistoryDoc]:
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM documents ORDER BY updated_at DESC").fetchall()
+            rows = self._conn.execute(f"SELECT {_DOC_COLUMNS} FROM documents ORDER BY updated_at DESC").fetchall()
         return [self._row_to_doc(r) for r in rows]
 
     def load_metadata(self) -> list[HistoryDocMeta]:
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM document_meta ORDER BY updated_at DESC").fetchall()
+            rows = self._conn.execute(f"SELECT {_META_COLUMNS} FROM document_meta ORDER BY updated_at DESC").fetchall()
         return [HistoryDocMeta(*r) for r in rows]
+
+    def load_batch(self, batch_id: str) -> list[HistoryDoc]:
+        """Документы пакета в порядке загрузки."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_DOC_COLUMNS} FROM documents WHERE batch_id = ? ORDER BY created_at, id", (batch_id,)
+            ).fetchall()
+        return [self._row_to_doc(r) for r in rows]

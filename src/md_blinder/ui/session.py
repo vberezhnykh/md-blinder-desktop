@@ -99,6 +99,9 @@ class DocumentSession(QObject):
         self.revision = 0
         self.undo_stack = QUndoStack(self)
         self._on_dirty = on_dirty
+        # Вызывается для каждой правки разметки или текста, например чтобы
+        # согласовать метки с остальными документами пакета.
+        self.prepare: Optional[Callable[[list[Entity], str], list[Entity]]] = None
 
     # --- чтение ---
 
@@ -126,7 +129,7 @@ class DocumentSession(QObject):
         if self.doc is None:
             return
         before = list(self.doc.entities)
-        after = fn(before)
+        after = self._prepared(fn(before), self.doc.source_text)
         if after == before:
             return
         self.undo_stack.push(_EntitiesCommand(self, before, list(after), label))
@@ -139,12 +142,15 @@ class DocumentSession(QObject):
         if change is None:
             return
         before = list(self.doc.entities)
-        after = map_entities(before, change)
+        after = self._prepared(map_entities(before, change), new_text)
         self.doc.source_text = new_text
         self.doc.entities = after
         self._touch()
         self.undo_stack.push(_TextCommand(self, change, before, after))
         self.entities_changed.emit()
+
+    def _prepared(self, entities: list[Entity], text: str) -> list[Entity]:
+        return self.prepare(entities, text) if self.prepare else entities
 
     # --- внутреннее: вызывается командами ---
 

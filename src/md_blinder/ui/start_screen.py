@@ -29,17 +29,19 @@ from .widgets import icon_label, set_prop
 MAX_WIDTH = 1320  # .app: max-width 1360px минус поля
 
 
-def dropped_file(event) -> Optional[str]:
+def dropped_files(event) -> list[str]:
     urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
-    for url in urls:
-        if url.isLocalFile():
-            return url.toLocalFile()
-    return None
+    return [url.toLocalFile() for url in urls if url.isLocalFile()]
+
+
+def dropped_file(event) -> Optional[str]:
+    files = dropped_files(event)
+    return files[0] if files else None
 
 
 class DropZone(QFrame):
     clicked = Signal()
-    file_dropped = Signal(str)
+    file_dropped = Signal(list)  # пути файлов
 
     def __init__(self) -> None:
         super().__init__()
@@ -65,6 +67,13 @@ class DropZone(QFrame):
         hint = QLabel("Поддерживаются текстовые и сканированные PDF (распознавание через OCR)")
         hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        batch_hint = QLabel(
+            "Несколько файлов сразу обрабатываются пакетом: одна и та же сторона получает одинаковую метку "
+            "во всех документах"
+        )
+        batch_hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
+        batch_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        batch_hint.setWordWrap(True)
         self.file_label = QLabel()
         self.file_label.setStyleSheet("font-weight: 600; background: transparent;")
         self.file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -72,6 +81,8 @@ class DropZone(QFrame):
         layout.addWidget(title)
         layout.addSpacing(6)
         layout.addWidget(hint)
+        layout.addSpacing(4)
+        layout.addWidget(batch_hint)
         layout.addSpacing(8)
         layout.addWidget(self.file_label)
         self.enabled_ = True
@@ -101,10 +112,10 @@ class DropZone(QFrame):
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         set_prop(self, "dragging", "false")
-        path = dropped_file(event)
-        if self.enabled_ and path:
+        paths = dropped_files(event)
+        if self.enabled_ and paths:
             event.acceptProposedAction()
-            self.file_dropped.emit(path)
+            self.file_dropped.emit(paths)
 
 
 class Spinner(QWidget):
@@ -223,6 +234,10 @@ class HistoryPanel(QWidget):
             empty.setContentsMargins(0, 8, 0, 0)
             self.rows.addWidget(empty)
             return
+        batch_sizes: dict[str, int] = {}
+        for doc in docs:
+            if doc.batch_id:
+                batch_sizes[doc.batch_id] = batch_sizes.get(doc.batch_id, 0) + 1
         for doc in docs:
             row = QFrame()
             row.setObjectName("historyRow")
@@ -234,7 +249,11 @@ class HistoryPanel(QWidget):
             name.setToolTip(doc.name)
             name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
             when = dt.datetime.fromtimestamp(doc.updated_at / 1000).strftime("%d.%m.%Y, %H:%M")
-            meta = QLabel(f"{when} · {plural(doc.entity_count, ('находка', 'находки', 'находок'))} · {doc.format}")
+            details = f"{when} · {plural(doc.entity_count, ('находка', 'находки', 'находок'))} · {doc.format}"
+            if doc.batch_id:
+                size = batch_sizes.get(doc.batch_id, 1)
+                details += f" · пакет из {plural(size, ('документа', 'документов', 'документов'))}"
+            meta = QLabel(details)
             meta.setStyleSheet(f"color: {t.INK_3}; font-size: 12px; background: transparent;")
             line.addWidget(name, 1)
             line.addWidget(meta)
@@ -270,7 +289,7 @@ def _fact(icon_name: str, bold: str, text: str, privacy: bool) -> QFrame:
 
 class StartScreen(QScrollArea):
     pick_file = Signal()
-    file_dropped = Signal(str)
+    file_dropped = Signal(list)  # пути файлов
 
     def __init__(self) -> None:
         super().__init__()
@@ -342,7 +361,9 @@ class StartScreen(QScrollArea):
         self.column.addWidget(widget)
 
     def set_file_name(self, name: str) -> None:
-        self.dropzone.file_label.setText(f"Файл: {Path(name).name}" if name else "")
+        """Имя файла или готовая подпись вроде «3 файла»."""
+        label = f"Файл: {Path(name).name}" if Path(name).suffix else name
+        self.dropzone.file_label.setText(label if name else "")
         self.dropzone.file_label.setVisible(bool(name))
 
     def set_error(self, text: str) -> None:

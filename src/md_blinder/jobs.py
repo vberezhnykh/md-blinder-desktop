@@ -14,10 +14,11 @@ import queue
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from .anonymize.batch import BatchMember, reconcile_batch_placeholders, seed_from_batch
 from .anonymize.pipeline import anonymize_markdown
 from .anonymize.related import find_related_occurrences
 from .anonymize.types import Entity
@@ -86,10 +87,19 @@ class ProcessingJob(QObject):
     failed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, path: Path, force_ocr: bool = False) -> None:
+    def __init__(
+        self, path: Path, force_ocr: bool = False, batch_members: Sequence[BatchMember] = (),
+        skipped: Optional[set[str]] = None,
+    ) -> None:
         super().__init__()
         self.path = Path(path)
         self.force_ocr = force_ocr
+        # Остальные документы пакета: по ним размечаются уже подтвержденные
+        # значения и согласуются метки.
+        self.batch_members = list(batch_members)
+        # Вопросы, на которые пользователь уже ответил «без скачивания» для
+        # предыдущего файла пакета: второй раз они не задаются.
+        self.skipped = skipped if skipped is not None else set()
         self.cancel_token = CancelToken()
         self._answers: "queue.Queue[str]" = queue.Queue()
 
@@ -105,6 +115,8 @@ class ProcessingJob(QObject):
     # --- поток задачи ---
 
     def _ask(self, kind: str, payload: Any = None) -> str:
+        if kind in self.skipped:
+            return SKIP
         self.ask.emit(kind, payload)
         while True:
             check(self.cancel_token)
@@ -113,6 +125,8 @@ class ProcessingJob(QObject):
             except queue.Empty:
                 continue
             check(self.cancel_token)
+            if value == SKIP:
+                self.skipped.add(kind)
             return value
 
     def _emit(self, **kwargs: Any) -> None:
@@ -195,9 +209,11 @@ class ProcessingJob(QObject):
         result = anonymize_markdown(md, ner_detect, cancel)
         check(cancel)
         self._emit(phase="related")
-        related = find_related_occurrences(md, result.entities)
+        seeded = seed_from_batch(md, result.entities, self.batch_members)
+        related = find_related_occurrences(md, seeded)
+        entities = reconcile_batch_placeholders(seeded + related, md, self.batch_members)
         return ProcessingResult(
-            path=self.path, format=kind, markdown=md, entities=result.entities + related,
+            path=self.path, format=kind, markdown=md, entities=entities,
             ner_failed=result.ner_failed, ner_error=result.ner_error, ner_skipped=ner_skipped,
             ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr,
         )

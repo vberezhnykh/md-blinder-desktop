@@ -128,9 +128,13 @@ def _person_forms(value: str) -> list[_Form]:
     return forms
 
 
+def company_core_words(value: str) -> list[str]:
+    """Слова названия компании без ОПФ и кавычек: «ООО «Гамма Плюс»» → ['Гамма', 'Плюс']."""
+    return [w for w in _split_words(value) if _TRAILING_DOT_RE.sub("", w.lower(), count=1) not in LEGAL_FORMS]
+
+
 def _company_forms(value: str) -> list[_Form]:
-    words = _split_words(value)
-    core = [w for w in words if _TRAILING_DOT_RE.sub("", w.lower(), count=1) not in LEGAL_FORMS]
+    core = company_core_words(value)
     forms: list[_Form] = []
     # Полная «ядровая» фраза (без ОПФ и кавычек) первой, чтобы занять спан.
     if len(core) >= 2:

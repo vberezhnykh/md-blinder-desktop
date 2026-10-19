@@ -2,6 +2,7 @@
 
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel
 
 from md_blinder.jobs import SKIP
 from md_blinder.storage.history import HistoryStore
@@ -235,3 +236,62 @@ def test_select_shows_every_entity_type_without_scrolling(qtbot):
     box.addItems(list(ALL_ENTITY_TYPES))
     assert box.maxVisibleItems() >= len(ALL_ENTITY_TYPES)
 
+
+
+def process_all(qtbot, window, paths):
+    window.process_files(paths)
+    qtbot.waitUntil(lambda: window.job is None and window.run is None, timeout=40000)
+
+
+def test_files_opened_together_share_labels_across_the_package(qtbot, window, tmp_path, monkeypatch):
+    first = make_docx(tmp_path / "first.docx", para("Пишите на alice@example.com или bob@example.com."))
+    second = make_docx(tmp_path / "second.docx", para("Копия bob@example.com и carol@example.com."))
+    process_all(qtbot, window, [first, second])
+    assert window.stack.currentWidget() is window.page
+    assert window.session.doc.name == "first.docx"
+    assert "Пишите на [EMAIL_1] или [EMAIL_2]." in window.anonymized_text
+    assert window.page.topbar.batch_label.text() == "Пакет · 2"
+    window._open_batch_menu()
+    menu = window.page.batch_menu
+    titles = [label.text() for label in menu.findChildren(QLabel) if label.objectName() == "menuTitle"]
+    assert titles[:3] == ["1. first.docx", "2. second.docx", "Добавить документы в пакет"]
+    menu.hide()
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    other = next(m for m in window.store.load_metadata() if m.name == "second.docx")
+    window.open_doc(other.id)
+    assert "Копия [EMAIL_2] и [EMAIL_3]." in window.anonymized_text
+
+    out = tmp_path / "package.md"
+    monkeypatch.setattr(window, "_save_path", lambda name, filter_: out)
+    window.export_batch_md()
+    text = out.read_text(encoding="utf-8")
+    assert "# Документ 1\n\nПишите на [EMAIL_1] или [EMAIL_2]." in text
+    assert "# Документ 2\n\nКопия [EMAIL_2] и [EMAIL_3]." in text
+    assert "example.com" not in text and ".docx" not in text
+
+
+def test_package_labels_stay_aligned_after_deleting_a_value(qtbot, window, tmp_path, monkeypatch):
+    first = make_docx(tmp_path / "first.docx", para("Пишите на alice@example.com."))
+    second = make_docx(tmp_path / "second.docx", para("Копия alice@example.com и carol@example.com."))
+    process_all(qtbot, window, [first, second])
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    other = next(m for m in window.store.load_metadata() if m.name == "second.docx")
+    window.open_doc(other.id)
+    alice = next(e for e in window.session.entities if e.placeholder == "[EMAIL_1]")
+    # В одиночном документе carol стала бы [EMAIL_1], но эта метка в пакете у alice.
+    window.page.side.found.delete.emit(alice.id)
+    assert window.anonymized_text.startswith("Копия alice@example.com и [EMAIL_2].")
+
+
+def test_add_files_to_open_document_makes_a_package(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para("Пишите на alice@example.com."))
+    assert window.session.doc.batch_id is None
+    assert window.page.topbar.batch_label.text() == "Пакет"
+    added = make_docx(tmp_path / "added.docx", para("Ответ от alice@example.com и dan@example.com."))
+    window.add_to_batch([added])
+    qtbot.waitUntil(lambda: window.job is None and window.run is None, timeout=20000)
+    assert window.session.doc.name == "added.docx"
+    assert "Ответ от [EMAIL_1] и [EMAIL_2]." in window.anonymized_text
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    batch_ids = {m.batch_id for m in window.store.load_metadata()}
+    assert len(batch_ids) == 1 and None not in batch_ids

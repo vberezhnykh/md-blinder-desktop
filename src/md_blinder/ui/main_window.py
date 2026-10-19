@@ -6,7 +6,7 @@ import datetime as dt
 import os
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
@@ -41,6 +41,7 @@ from ..anonymize.apply import (
     pending_candidates,
     restore_candidate,
 )
+from ..anonymize.batch import align_batch, batch_csv_bytes, batch_to_markdown, reconcile_batch_placeholders
 from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
@@ -58,7 +59,7 @@ from .result_preview import ResultPane
 from .session import DocumentSession
 from .side_panel import SidePanel
 from .source_editor import EditorPane
-from .start_screen import StartScreen, dropped_file
+from .start_screen import StartScreen, dropped_files
 from .theme import add_shadow
 from .update_ui import UpdateBar, UpdateController, version_footer
 from .widgets import Notice, PopupMenu, StatusStrip, Toast
@@ -133,10 +134,26 @@ class TopBar(QFrame):
         hrow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
         self.history_button.setMinimumWidth(130)
         self.history_button.setMinimumHeight(self.new_button.sizeHint().height())
+        self.batch_button = QPushButton()
+        brow = QHBoxLayout(self.batch_button)
+        brow.setContentsMargins(13, 0, 11, 0)
+        brow.setSpacing(7)
+        self.batch_label = QLabel("Пакет")
+        for widget in (QLabel(), self.batch_label, QLabel()):
+            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            widget.setStyleSheet("background: transparent; color: inherit; font-size: 14px; font-weight: 500;")
+            brow.addWidget(widget)
+        brow.itemAt(0).widget().setPixmap(pixmap("layers", t.INK, 16))
+        brow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
+        self.batch_button.setToolTip("Связанные документы с одинаковыми метками сторон")
+        self.batch_button.setMinimumWidth(130)
+        self.batch_button.setMinimumHeight(self.new_button.sizeHint().height())
         row.addWidget(self.home_button)
         row.addWidget(self.new_button)
         row.addWidget(self.history_button)
+        row.addWidget(self.batch_button)
         self.history_menu = PopupMenu(self, 340)
+        self.batch_menu = PopupMenu(self, 340)
         self.set_save_state("saved")
 
     def set_save_state(self, state: str) -> None:
@@ -169,6 +186,8 @@ class DocumentPage(QWidget):
         self.new_button = self.topbar.new_button
         self.history_button = self.topbar.history_button
         self.history_menu = self.topbar.history_menu
+        self.batch_button = self.topbar.batch_button
+        self.batch_menu = self.topbar.batch_menu
         self.file_label = self.topbar.file_label
         layout.addWidget(self.topbar)
         layout.addSpacing(16)
@@ -189,9 +208,9 @@ class DocumentPage(QWidget):
         self.ocr_retry.label.setText("Текст выглядит битым или с ошибками?")
         self.ocr_retry.layout().setStretch(0, 0)
         self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None, link=True)
-        retry_hint = QLabel("Все страницы PDF будут распознаны как изображения. Прежняя версия останется в истории.")
-        retry_hint.setObjectName("muted")
-        self.ocr_retry.layout().addWidget(retry_hint, 1)
+        self.ocr_retry_hint = QLabel()
+        self.ocr_retry_hint.setObjectName("muted")
+        self.ocr_retry.layout().addWidget(self.ocr_retry_hint, 1)
         self.ner_notice = Notice()
         self.ocr_notice = Notice()
         self.image_notice = Notice()
@@ -247,6 +266,23 @@ class DocumentPage(QWidget):
         layout.addLayout(work, 1)
 
 
+@dataclass
+class _Run:
+    """Обработка выбранных файлов: один файл или пакет."""
+
+    paths: list[Path]
+    force_ocr: bool
+    batch_id: Optional[str]
+    members: list[HistoryDoc]  # документы пакета, включая уже обработанные в этом запуске
+    created: list[tuple[HistoryDoc, ProcessingResult]] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    skipped: set[str] = field(default_factory=set)
+
+    @property
+    def index(self) -> int:
+        return len(self.created) + len(self.failures)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Optional[HistoryStore] = None) -> None:
         super().__init__()
@@ -257,6 +293,11 @@ class MainWindow(QMainWindow):
         self.store = store or HistoryStore(history_db_path())
         self.autosave = Autosave(self.store, self)
         self.session = DocumentSession(on_dirty=self.autosave.queue)
+        # Остальные документы пакета открытого документа. Каждая правка согласует
+        # метки с ними: одинаковые значения получают одинаковые метки во всем пакете.
+        self.batch_others: list[HistoryDoc] = []
+        self.session.prepare = self._reconcile_with_batch
+        self.run: Optional[_Run] = None
 
         self.job: Optional[ProcessingJob] = None
         self.thread: Optional[QThread] = None
@@ -311,7 +352,7 @@ class MainWindow(QMainWindow):
     def _wire(self) -> None:
         s, p = self.start, self.page
         s.pick_file.connect(self.pick_file)
-        s.file_dropped.connect(lambda path: self.process_file(Path(path)))
+        s.file_dropped.connect(lambda paths: self.process_files([Path(p) for p in paths]))
         s.loading.cancel.connect(self.cancel_job)
         s.history.open_doc.connect(self.open_doc)
         s.history.delete_doc.connect(self.request_delete)
@@ -327,6 +368,7 @@ class MainWindow(QMainWindow):
         p.side_by_side_box.setChecked(self.settings.value("sideBySide", True, type=bool))
         p.side_by_side_box.toggled.connect(self._side_by_side_changed)
         p.history_button.clicked.connect(self._open_history_menu)
+        p.batch_button.clicked.connect(self._open_batch_menu)
 
         p.status.show_candidates.connect(self.show_candidates)
         p.status.export_md.connect(self.export_md)
@@ -380,36 +422,61 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ обработка файла
 
+    def _pick_paths(self, title: str) -> list[Path]:
+        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, "Документы (*.docx *.pdf);;Все файлы (*)")
+        if paths:
+            self.settings.setValue("lastDir", str(Path(paths[0]).parent))
+        return [Path(p) for p in paths]
+
     def pick_file(self) -> None:
         if self.job is not None:
             return
-        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
-        path, _ = QFileDialog.getOpenFileName(self, "Выберите документ", start_dir, "Документы (*.docx *.pdf);;Все файлы (*)")
-        if path:
-            self.settings.setValue("lastDir", str(Path(path).parent))
-            self.process_file(Path(path))
+        self.process_files(self._pick_paths("Выберите документы"))
 
     def process_file(self, path: Path, force_ocr: bool = False) -> None:
-        if self.job is not None:
+        self.process_files([path], force_ocr=force_ocr)
+
+    def process_files(
+        self, paths: list[Path], force_ocr: bool = False,
+        batch_id: Optional[str] = None, members: Optional[list[HistoryDoc]] = None,
+    ) -> None:
+        """Один файл открывается как отдельный документ. Несколько файлов, а также
+        файлы, добавленные к открытому документу, образуют пакет: одинаковые
+        значения получают одинаковые метки во всех его документах. Файл, который
+        не удалось обработать, пропускается, остальные обрабатываются."""
+        if self.job is not None or not paths:
             return
         if not self.autosave.flush():
             self._show_save_error()
         self.session.replace_doc(None)
         self.stack.setCurrentWidget(self.start)
         self.start.set_error("")
-        self.start.set_file_name(path.name)
+        self.start.set_file_name(paths[0].name if len(paths) == 1 else plural(len(paths), ("файл", "файла", "файлов")))
         self.start.dropzone.set_busy(True)
+        if batch_id is None and len(paths) > 1:
+            batch_id = str(uuid.uuid4())
+        self.run = _Run(list(paths), force_ocr, batch_id, list(members or []))
+        self.job_started = time.monotonic()
+        self.start.loading.show()
+        self.elapsed_timer.start()
+        self._start_next_file()
+
+    def _start_next_file(self) -> None:
+        run = self.run
+        if run is None:
+            return
+        if run.index >= len(run.paths):
+            self._finish_run()
+            return
         self.progress = None
-        self.job = ProcessingJob(path, force_ocr)
+        self.job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped)
         self.job.progress.connect(self._job_progress)
         self.job.ask.connect(self._job_ask)
         self.job.finished.connect(self._job_finished)
         self.job.failed.connect(self._job_failed)
         self.job.cancelled.connect(self._job_cancelled)
-        self.job_started = time.monotonic()
-        self.start.loading.show()
         self._update_loading()
-        self.elapsed_timer.start()
         self.thread = start_job(self.job)
         thread = self.thread
         self._threads.append(thread)
@@ -424,6 +491,7 @@ class MainWindow(QMainWindow):
         self.start.loading.hide()
         self.start.dropzone.set_busy(False)
         self.job = None
+        self.run = None
 
     def _job_progress(self, progress: UiProgress) -> None:
         self.progress = progress
@@ -431,7 +499,11 @@ class MainWindow(QMainWindow):
 
     def _update_loading(self) -> None:
         elapsed = time.monotonic() - self.job_started
-        self.start.loading.set_status(status_label(self.progress, elapsed), status_hint(self.progress))
+        label = status_label(self.progress, elapsed)
+        run = self.run
+        if run is not None and len(run.paths) > 1:
+            label = f"Документ {min(run.index + 1, len(run.paths))} из {len(run.paths)}. {label}"
+        self.start.loading.set_status(label, status_hint(self.progress))
 
     def _job_ask(self, kind: str, payload) -> None:
         job = self.job
@@ -476,21 +548,46 @@ class MainWindow(QMainWindow):
                 job.answer(SKIP)
 
     def _job_failed(self, message: str) -> None:
-        self._job_done()
-        self.start.set_error(message)
+        run = self.run
+        self.job = None
+        if run is None:
+            return
+        name = run.paths[run.index].name
+        run.failures.append(message if len(run.paths) == 1 or name in message else f"«{name}»: {message}")
+        self._start_next_file()
 
     def _job_cancelled(self) -> None:
+        # Документы, обработанные до отмены, уже сохранены в историю.
         self._job_done()
         self.start.set_file_name("")
+        self._refresh_history()
 
     def _job_finished(self, result: ProcessingResult) -> None:
-        self._job_done()
+        run = self.run
+        self.job = None
+        if run is None:
+            return
         now = now_ms()
         doc = HistoryDoc(
             id=str(uuid.uuid4()), name=result.path.name, format=result.format, created_at=now, updated_at=now,
-            source_text=result.markdown, entities=result.entities,
+            source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
         )
-        self.last_pdf = (result.path, doc.id, result.force_ocr) if result.format == "pdf" else None
+        run.created.append((doc, result))
+        run.members.append(doc)
+        self.autosave.queue(replace(doc, entities=list(doc.entities)))
+        self._start_next_file()
+
+    def _finish_run(self) -> None:
+        run = self.run
+        self._job_done()
+        if run is None:
+            return
+        if not run.created:
+            self.start.set_error(" ".join(run.failures))
+            return
+        doc, result = run.created[0]
+        self.batch_others = [d for d in run.members if d.id != doc.id]
+        self.last_pdf = (result.path, doc.id, result.force_ocr) if len(run.paths) == 1 and result.format == "pdf" else None
         self.page.side.user_tab = None
         self.page.side.review.active_id = None
         self.session.replace_doc(doc, dirty=True)
@@ -506,6 +603,14 @@ class MainWindow(QMainWindow):
             self.page.ocr_notice.hide()
         self.set_view("source")
         self.stack.setCurrentWidget(self.page)
+        if run.failures:
+            self.toast.show_message(f"Обработаны не все файлы. {' '.join(run.failures)}", 12000, tone="warn")
+        elif run.batch_id and len(run.members) > 1:
+            self.toast.show_message(
+                f"В пакете {plural(len(run.members), ('документ', 'документа', 'документов'))}: одинаковые значения "
+                "заменены одинаковыми метками во всех. Остальные документы пакета открываются из меню «Пакет».",
+                8000,
+            )
 
     def _set_ner_notice(self, result: Optional[ProcessingResult]) -> None:
         notice = self.page.ner_notice
@@ -526,8 +631,155 @@ class MainWindow(QMainWindow):
             notice.hide()
 
     def retry_with_ocr(self) -> None:
-        if self.last_pdf is not None:
-            self.process_file(self.last_pdf[0], force_ocr=True)
+        if self.last_pdf is None:
+            return
+        doc = self.session.doc
+        if doc is not None and doc.id == self.last_pdf[1] and doc.batch_id:
+            # Прежняя версия остается в истории, а ее место в пакете занимает новая.
+            batch_id, members = doc.batch_id, list(self.batch_others)
+            self.session.replace_doc(replace(doc, batch_id=None, entities=list(doc.entities)), dirty=True)
+            self.process_files([self.last_pdf[0]], force_ocr=True, batch_id=batch_id, members=members)
+            return
+        self.process_file(self.last_pdf[0], force_ocr=True)
+
+    # ------------------------------------------------------------------ пакет
+
+    def _reconcile_with_batch(self, entities: list, text: str) -> list:
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return entities
+        return reconcile_batch_placeholders(entities, text, self.batch_others)
+
+    def _load_batch(self, doc: HistoryDoc) -> tuple[HistoryDoc, list[HistoryDoc]]:
+        """Загружает пакет документа и согласует метки во всех его документах по
+        порядку загрузки. Измененные остальные документы сохраняются сразу; сам
+        документ возвращается вызывающему, чтобы тот открыл или сохранил его."""
+        if not doc.batch_id:
+            return doc, [doc]
+        stored = self.store.load_batch(doc.batch_id)
+        members = [doc if d.id == doc.id else d for d in stored]
+        if not any(d.id == doc.id for d in stored):
+            members.append(doc)
+        aligned = align_batch(members)
+        for before, after in zip(members, aligned):
+            if after is not before and after.id != doc.id:
+                self.store.put_doc(after)
+        current = next(d for d in aligned if d.id == doc.id)
+        return current, aligned
+
+    def _batch_docs(self) -> list[HistoryDoc]:
+        """Документы пакета открытого документа в порядке загрузки."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return []
+        return sorted([*self.batch_others, doc], key=lambda d: (d.created_at, d.id))
+
+    def _update_batch_button(self) -> None:
+        docs = self._batch_docs()
+        self.page.topbar.batch_label.setText(f"Пакет · {len(docs)}" if docs else "Пакет")
+
+    def _open_batch_menu(self) -> None:
+        menu = self.page.batch_menu
+        menu.clear()
+        doc = self.session.doc
+        docs = self._batch_docs()
+        if docs:
+            menu.add_note("Одинаковые значения получают одинаковые метки во всех документах пакета.")
+        else:
+            menu.add_note(
+                "Добавьте связанные документы, например договоры с теми же сторонами, чтобы одинаковые "
+                "значения получили одинаковые метки во всех файлах."
+            )
+        for i, meta in enumerate(docs):
+            is_current = doc is not None and meta.id == doc.id
+            hint = "Открыт сейчас" if is_current else plural(len(meta.entities), ("находка", "находки", "находок"))
+            menu.add_item(
+                shorten(f"{i + 1}. {meta.name}", 44),
+                (lambda: None) if is_current else (lambda i=meta.id: self.open_doc(i)),
+                hint, current=is_current,
+            )
+        menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx и .pdf, можно несколько", "plus")
+        if docs:
+            menu.add_separator()
+            menu.add_item(
+                "Экспортировать пакет одним .md", self.export_batch_md,
+                "Документы под заголовками «Документ 1», «Документ 2» без имен файлов", "download",
+            )
+            menu.add_item(
+                "Таблица замен пакета (.csv)", self.export_batch_csv,
+                "Содержит исходные данные. Не передавайте ее вместе с обезличенным текстом.", "table", sensitive=True,
+            )
+        menu.show_under(self.page.batch_button)
+
+    def add_to_batch(self, paths: Optional[list[Path]] = None) -> None:
+        """Добавляет файлы в пакет открытого документа; одиночный документ при этом
+        становится первым документом нового пакета."""
+        doc = self.session.doc
+        if doc is None or self.job is not None:
+            return
+        if paths is None:
+            paths = self._pick_paths("Добавить документы в пакет")
+        if not paths:
+            return
+        batch_id = doc.batch_id or str(uuid.uuid4())
+        joined = doc if doc.batch_id else replace(doc, batch_id=batch_id, entities=list(doc.entities))
+        if joined is not doc:
+            self.session.replace_doc(joined, dirty=True)
+        members = sorted([*self.batch_others, joined], key=lambda d: d.created_at)
+        self.process_files(paths, batch_id=batch_id, members=members)
+
+    def _collect_batch(self) -> Optional[list[HistoryDoc]]:
+        """Документы пакета с согласованными метками, в порядке загрузки."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return None
+        if not self.autosave.flush():
+            self._show_save_error()
+            return None
+        current, members = self._load_batch(replace(doc, entities=list(doc.entities)))
+        self.batch_others = [d for d in members if d.id != current.id]
+        if current.entities != doc.entities:
+            self.session.update_entities(lambda _: current.entities, "Согласовать метки пакета")
+        return members
+
+    def export_batch_md(self) -> None:
+        members = self._collect_batch()
+        if not members:
+            return
+        path = self._save_path("md-blinder-package.md", "Markdown (*.md)")
+        if path is None:
+            return
+        try:
+            path.write_text(batch_to_markdown(members), encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        pending = sum(len(pending_candidates(d.entities)) for d in members)
+        done = f"Пакет из {plural(len(members), ('документа', 'документов', 'документов'))} сохранен одним файлом."
+        if pending:
+            self.toast.show_message(
+                f"{done} Не проверено: {plural(pending, ('кандидат', 'кандидата', 'кандидатов'))} — "
+                "в тексте они остались без замены.", 8000, tone="warn",
+            )
+        else:
+            self.toast.show_message(done, 4000)
+
+    def export_batch_csv(self) -> None:
+        members = self._collect_batch()
+        if not members:
+            return
+        path = self._save_path("md-blinder-package-replacements.csv", "CSV (*.csv)")
+        if path is None:
+            return
+        try:
+            path.write_bytes(batch_csv_bytes(members))
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        self.toast.show_message(
+            "Таблица замен пакета сохранена. Она содержит исходные данные: не передавайте ее вместе с обезличенным "
+            "текстом.", 6000, tone="warn",
+        )
 
     # ------------------------------------------------------------------ документ
 
@@ -539,6 +791,7 @@ class MainWindow(QMainWindow):
             return
         p.file_label.setText(doc.name)
         p.editor.set_content(doc.source_text, doc.entities)
+        self._update_batch_button()
         self._render_derived()
 
     def _entities_changed(self) -> None:
@@ -572,6 +825,10 @@ class MainWindow(QMainWindow):
         )
         p.image_notice.setVisible(images > 0)
         p.collision_notice.setVisible(has_placeholder_collision(text))
+        p.ocr_retry_hint.setText(
+            "Все страницы PDF будут распознаны как изображения. Прежняя версия останется в истории"
+            + (", а в пакете ее заменит новая." if doc.batch_id else ".")
+        )
         p.ocr_retry.setVisible(
             self.last_pdf is not None and self.last_pdf[1] == doc.id and not self.last_pdf[2] and self.job is None
         )
@@ -745,6 +1002,8 @@ class MainWindow(QMainWindow):
         current = self.session.doc.id if self.session.doc else None
         self.start.history.render(docs, current)
         self.history_meta = docs
+        if self.session.doc is not None:
+            self._update_batch_button()
 
     def _open_history_menu(self) -> None:
         menu = self.page.history_menu
@@ -786,10 +1045,16 @@ class MainWindow(QMainWindow):
         if doc is None:
             self.start.history.set_error("Документ не найден в истории.")
             return
-        doc.entities = dedupe_entity_ids(doc.entities)
+        loaded = replace(doc, entities=dedupe_entity_ids(doc.entities))
+        try:
+            doc, members = self._load_batch(loaded)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось открыть пакет документа: {exc}")
+            return
+        self.batch_others = [d for d in members if d.id != doc.id]
         self.page.side.user_tab = None
         self.page.side.review.active_id = None
-        self.session.replace_doc(doc)
+        self.session.replace_doc(doc, dirty=doc is not loaded)
         self._set_ner_notice(None)
         self.page.ocr_notice.hide()
         self.set_view("source")
@@ -816,6 +1081,7 @@ class MainWindow(QMainWindow):
         self.pending_delete = None
         self.delete_timer.stop()
         self.autosave.discard(doc_id)
+        self.batch_others = [d for d in self.batch_others if d.id != doc_id]
         if self.session.doc and self.session.doc.id == doc_id:
             self.session.replace_doc(None)
         try:
@@ -947,13 +1213,13 @@ class MainWindow(QMainWindow):
             )
 
     def dragEnterEvent(self, event) -> None:  # noqa: N802
-        if self.job is None and dropped_file(event):
+        if self.job is None and dropped_files(event):
             event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:  # noqa: N802
-        path = dropped_file(event)
-        if self.job is None and path:
-            self.process_file(Path(path))
+        paths = dropped_files(event)
+        if self.job is None and paths:
+            self.process_files([Path(p) for p in paths])
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.job is not None:

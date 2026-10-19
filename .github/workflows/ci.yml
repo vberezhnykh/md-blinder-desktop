@@ -64,7 +64,8 @@ jobs:
           retention-days: 14
 
       # Новая версия в md_blinder/__init__.py выпускается автоматически: если
-      # релиза desktop-v<версия> еще нет, он создается из этого коммита.
+      # релиза desktop-v<версия> еще нет, он создается из этого коммита. Описание
+      # релиза берется из раздела версии в CHANGELOG.md (release_notes.py).
       # Настольная программа находит его через API релизов и предлагает обновиться.
       - name: Publish release for a new version
         if: runner.os == 'Windows' && github.event_name == 'push'
@@ -79,7 +80,8 @@ jobs:
           Compress-Archive -Path "dist\MD Blinder\*" -DestinationPath "md-blinder-windows.zip"
           $hash = (Get-FileHash "md-blinder-windows.zip" -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path "md-blinder-windows.zip.sha256" -Value "$hash  md-blinder-windows.zip" -NoNewline -Encoding ascii
-          $notes = "Настольная версия MD Blinder $version для Windows. Обновление ставится из программы; первая установка — распаковать архив в свою папку и запустить MD Blinder.exe."
+          python release_notes.py $version release-notes.md
+          if ($LASTEXITCODE -ne 0) { exit 1 }
           gh release create $tag md-blinder-windows.zip md-blinder-windows.zip.sha256 `
             --repo "${{ github.repository }}" --target "${{ github.sha }}" `
-            --title "MD Blinder Desktop $version" --notes "$notes"
+            --title "MD Blinder Desktop $version" --notes-file release-notes.md

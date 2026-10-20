@@ -237,6 +237,19 @@ def run_workload(session, tokenizer, w: Workload, v: Variant):
     return timing, sorted(found)
 
 
+def changed(plain: str, base: list, other: list, thr: float = NER_CONFIRM_THRESHOLD) -> list[str]:
+    """Спаны, которые пересекли порог подтверждения в ту или другую сторону."""
+    a = {(s, e, lab): sc for s, e, lab, sc in base}
+    b = {(s, e, lab): sc for s, e, lab, sc in other}
+    out = []
+    for key in sorted(a.keys() | b.keys()):
+        sa, sb = a.get(key), b.get(key)
+        if (sa is not None and sa >= thr) != (sb is not None and sb >= thr):
+            s, e, lab = key
+            out.append(f"{plain[s:e]!r} {lab}: {sa} → {sb}")
+    return out
+
+
 def compare(base: list, other: list) -> dict:
     def keyed(rows, thr):
         return {(s, e, lab): sc for s, e, lab, sc in rows if sc >= thr}
@@ -256,7 +269,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=Path("bench.json"))
     ap.add_argument("--only", default="")
     ap.add_argument("--baseline", type=Path)
-    ap.add_argument("--repeat", type=int, default=2)
+    ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--full", action="store_true", help="еще потоки, длина фрагментов и int8")
     args = ap.parse_args()
 
     md = args.model_dir
@@ -285,21 +299,25 @@ def main() -> int:
         if not fp32_local.exists():
             print(f"fp16→fp32: {convert_fp16_to_fp32(md / 'model_fp16.onnx', fp32_local):.1f}s")
         int8 = md / "model_int8_matmul.onnx"
-        if (md / "model.onnx").exists() and not int8.exists():
+        if args.full and (md / "model.onnx").exists() and not int8.exists():
             print(f"int8 MatMul: {quantize_int8(md / 'model.onnx', int8):.1f}s")
         variants = [
-            Variant("сейчас: fp16", "model_fp16.onnx", note="эталон"),
-            Variant("fp16 → fp32 локально", "model_fp16_as_fp32.onnx"),
-            Variant("fp32 оригинал (model.onnx)", "model.onnx"),
-            Variant("fp16, 1 поток", "model_fp16.onnx", threads=1),
-            Variant("fp16→fp32, 1 поток", "model_fp16_as_fp32.onnx", threads=1),
-            Variant("fp16→fp32, 2 потока", "model_fp16_as_fp32.onnx", threads=2),
+            Variant("сейчас: fp16, батч 8", "model_fp16.onnx", note="эталон"),
+            Variant("fp16, батч 1", "model_fp16.onnx", batch=1),
+            Variant("fp16, батч 2", "model_fp16.onnx", batch=2),
+            Variant("fp16, батч 4", "model_fp16.onnx", batch=4),
+            Variant("fp16→fp32, батч 8", "model_fp16_as_fp32.onnx"),
             Variant("fp16→fp32, батч 1", "model_fp16_as_fp32.onnx", batch=1),
-            Variant("fp16→fp32, батч 4", "model_fp16_as_fp32.onnx", batch=4),
-            Variant("fp16→fp32, батч 16", "model_fp16_as_fp32.onnx", batch=16),
-            Variant("fp16→fp32, фрагменты 150 слов", "model_fp16_as_fp32.onnx", max_len=700, max_words=150),
-            Variant("int8 MatMul (из fp32)", "model_int8_matmul.onnx"),
+            Variant("fp16→fp32, батч 2", "model_fp16_as_fp32.onnx", batch=2),
+            Variant("fp32 оригинал, батч 1", "model.onnx", batch=1),
         ]
+        if args.full:
+            variants += [
+                Variant("fp16, 1 поток", "model_fp16.onnx", threads=1),
+                Variant("fp16→fp32, 2 потока", "model_fp16_as_fp32.onnx", threads=2),
+                Variant("fp16→fp32, фрагменты 150 слов", "model_fp16_as_fp32.onnx", max_len=700, max_words=150),
+                Variant("int8 MatMul (из fp32)", "model_int8_matmul.onnx"),
+            ]
         variants = [v for v in variants if (md / v.model).exists()]
 
     baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
@@ -336,10 +354,15 @@ def main() -> int:
                   flush=True)
         del session
         results.append(row)
+        if base_found is not None:
+            for w in workloads:
+                lines = changed(w.plain, base_found[w.name], row["found"][w.name])
+                for line in lines[:12]:
+                    print(f"  Δ {w.name}: {line}")
         if base_found is None:
             base_found = row["found"]
 
-    print("\n| вариант | калибровка | сессия, с | договор, с | таблица, с | потеряно/новых (≥0.3) | max Δscore |")
+    print("\n| вариант | калибровка | сессия, с | договор, с | таблица, с | потеряно/новых (≥0.3) из | max Δscore |")
     print("|---|---|---|---|---|---|---|")
     for row in results:
         if "error" in row:
@@ -352,7 +375,7 @@ def main() -> int:
         row["vs_baseline"] = diffs
         wl = row["workloads"]
         print(f"| {row['name']} | {'да' if row['calibration'] else 'НЕТ'} | {row['init_s']} | "
-              f"{wl['договор']['total']} | {wl['таблица']['total']} | {lost}/{new} | {delta} |")
+              f"{wl['договор']['total']} | {wl['таблица']['total']} | {lost}/{new} из {sum(d['confirmed']['base'] for d in diffs)} | {delta} |")
 
     payload = dict(info=info, workloads={w.name: w.stats for w in workloads}, results=results,
                    found=base_found)

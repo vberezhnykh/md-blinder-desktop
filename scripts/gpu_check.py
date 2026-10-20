@@ -65,6 +65,10 @@ def measure(session, tokenizer, workloads, v: b.Variant, repeat: int, log: Repor
 
 
 def main() -> int:
+    # При выводе в файл или канал Windows берет кодовую страницу (cp1252), без кириллицы.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     here = Path(sys.executable if getattr(sys, "frozen", False) else __file__).resolve().parent
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", type=Path, default=model_asset.model_dir())

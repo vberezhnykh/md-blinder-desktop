@@ -17,6 +17,7 @@ from md_blinder.anonymize.config import NER_GRAY_ZONE_LOW
 from md_blinder.anonymize.types import RawMatch
 from md_blinder.cancel import CancelToken, Cancelled
 from md_blinder.ner import engine
+from md_blinder.ner.batching import NER_BATCH_SIZE
 from md_blinder.ner.calibration import CALIBRATION_TEXT, EXPECTED
 from md_blinder.ner.engine import NER_LABELS, NerModelError, NerProgress, detect_entities_ner, load_model, map_label
 from md_blinder.ner.gliner_span import Span
@@ -98,13 +99,16 @@ def many_chunks(n: int) -> str:
 def test_progress_reports_detect_batches_before_and_after_inference() -> None:
     events: list[NerProgress] = []
     model = FakeModel()
-    detect_entities_ner(many_chunks(10), model, on_progress=events.append)  # type: ignore[arg-type]
-    assert len(model.calls) == 2  # 8 + 2
+    detect_entities_ner(many_chunks(5), model, on_progress=events.append)  # type: ignore[arg-type]
+    assert NER_BATCH_SIZE == 2
+    assert len(model.calls) == 3  # 2 + 2 + 1
     assert [(e.stage, e.batch, e.batches, e.chunk, e.chunks, e.batch_chunks) for e in events] == [
-        ("detect", 1, 2, 0, 10, 8),
-        ("detect", 1, 2, 8, 10, 8),
-        ("detect", 2, 2, 8, 10, 2),
-        ("detect", 2, 2, 10, 10, 2),
+        ("detect", 1, 3, 0, 5, 2),
+        ("detect", 1, 3, 2, 5, 2),
+        ("detect", 2, 3, 2, 5, 2),
+        ("detect", 2, 3, 4, 5, 2),
+        ("detect", 3, 3, 4, 5, 1),
+        ("detect", 3, 3, 5, 5, 1),
     ]
     assert all(e.ep == "cpu" and e.elapsed_ms is not None for e in events)
 

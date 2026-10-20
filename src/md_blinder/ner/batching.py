@@ -13,7 +13,10 @@ from ..anonymize.types import EntityType, RawMatch
 from .chunk_text import Chunk
 from .gliner_span import WORD_RE
 
-NER_BATCH_SIZE = 8
+# Замер на настоящей модели (scripts/bench_ner.py, CPU, 4 ядра): батч 2 быстрее
+# батча 8 на 9–22% на прозе и не медленнее на таблицах, найденное не меняется.
+# Батч 1 на CPU еще быстрее, но с fp16 сдвигает оценку отдельных спанов.
+NER_BATCH_SIZE = 2
 
 
 class NerItem(Protocol):

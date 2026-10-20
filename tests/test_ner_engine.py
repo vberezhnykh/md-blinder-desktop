@@ -17,7 +17,7 @@ from md_blinder.anonymize.config import NER_GRAY_ZONE_LOW
 from md_blinder.anonymize.types import RawMatch
 from md_blinder.cancel import CancelToken, Cancelled
 from md_blinder.ner import engine
-from md_blinder.ner.batching import NER_BATCH_SIZE
+from md_blinder.ner.batching import NER_BATCH_SIZE, NER_BATCH_SIZE_GPU
 from md_blinder.ner.calibration import CALIBRATION_TEXT, EXPECTED
 from md_blinder.ner.engine import NER_LABELS, NerModelError, NerProgress, detect_entities_ner, load_model, map_label
 from md_blinder.ner.gliner_span import Span
@@ -149,12 +149,14 @@ class FakeGliner(FakeModel):
     passing: set[str] = set()
     failing_init: set[str] = set()
 
-    def __init__(self, model_dir: Path | str, *, optimization: object) -> None:
-        if str(optimization) in self.failing_init:
+    def __init__(self, model_dir: Path | str, *, optimization: object, device: str = "cpu") -> None:
+        key = str(optimization) if device == "cpu" else f"{device} {optimization}"
+        if key in self.failing_init:
             raise NerRuntimeError("boom")
-        ok = str(optimization) in self.passing
+        ok = key in self.passing
         super().__init__({value: label for value, label in EXPECTED} if ok else {"Иван Петров": "person"})
         self.optimization = optimization
+        self.device = device
         self.released = False
         FakeGliner.created.append(self)
 
@@ -168,6 +170,8 @@ def fake_gliner(monkeypatch: pytest.MonkeyPatch) -> type[FakeGliner]:
     FakeGliner.passing = set()
     FakeGliner.failing_init = set()
     monkeypatch.setattr(engine, "GlinerModel", FakeGliner)
+    # На Windows установлен onnxruntime-directml: без этого тесты зависели бы от ОС.
+    monkeypatch.setattr(engine, "gpu_available", lambda: False)
     return FakeGliner
 
 
@@ -185,9 +189,47 @@ def test_load_model_falls_back_when_calibration_fails(fake_gliner: type[FakeGlin
     fake_gliner.failing_init = {str(GRAPH_OPTIMIZATION_FALLBACKS[0])}
     fake_gliner.passing = {str(GRAPH_OPTIMIZATION_FALLBACKS[2])}
     model = load_model(tmp_path)
-    assert [str(m.optimization) for m in fake_gliner.created] == [str(c) for c in GRAPH_OPTIMIZATION_FALLBACKS[1:]]
+    assert [str(m.optimization) for m in fake_gliner.created] == [str(c) for c in GRAPH_OPTIMIZATION_FALLBACKS[1:3]]
     assert fake_gliner.created[0].released
     assert model is fake_gliner.created[1] and not model.released
+
+
+def test_load_model_prefers_gpu_and_falls_back_to_cpu(
+    fake_gliner: type[FakeGliner], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(engine, "gpu_available", lambda: True)
+    first = str(GRAPH_OPTIMIZATION_FALLBACKS[0])
+    fake_gliner.passing = {f"gpu {first}"}
+    events: list[NerProgress] = []
+    model = load_model(tmp_path, events.append)
+    assert model.device == "gpu" and len(fake_gliner.created) == 1
+    assert [(e.stage, e.ep) for e in events] == [("init", "gpu"), ("warmup", "gpu")]
+
+    # Видеокарта не проходит калибровку ни на одном из GPU_CONFIGS: дальше CPU.
+    fake_gliner.created = []
+    fake_gliner.passing = {first}
+    model = load_model(tmp_path)
+    assert [(m.device, str(m.optimization)) for m in fake_gliner.created] == [
+        *(("gpu", str(c)) for c in engine.GPU_CONFIGS), ("cpu", first),
+    ]
+    assert model.device == "cpu" and all(m.released for m in fake_gliner.created[:-1])
+
+
+def test_device_env_disables_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engine, "gpu_available", lambda: True)
+    monkeypatch.setenv(engine.DEVICE_ENV, "cpu")
+    assert engine.available_devices() == ["cpu"]
+    monkeypatch.delenv(engine.DEVICE_ENV)
+    assert engine.available_devices() == ["gpu", "cpu"]
+
+
+def test_gpu_model_uses_larger_batches() -> None:
+    model = FakeModel()
+    model.device = "gpu"  # type: ignore[attr-defined]
+    events: list[NerProgress] = []
+    detect_entities_ner(many_chunks(10), model, on_progress=events.append)  # type: ignore[arg-type]
+    assert [len(texts) for texts, _, _ in model.calls] == [NER_BATCH_SIZE_GPU, 10 - NER_BATCH_SIZE_GPU]
+    assert all(e.ep == "gpu" for e in events)
 
 
 def test_load_model_raises_when_no_backend_passes(fake_gliner: type[FakeGliner], tmp_path: Path) -> None:

@@ -1,7 +1,16 @@
 """Сессия ONNX Runtime для GLiNER (порт src/workers/glinerRuntime.ts).
 
-Только CPU (CPUExecutionProvider), веса fp16 — как в браузере. int8/q4f16 не
-используются: на них настоящие русские имена получали ~0.16 вместо ~0.92.
+Устройство — CPU (CPUExecutionProvider) или, в сборке для Windows с
+onnxruntime-directml, видеокарта (DmlExecutionProvider). Веса fp16 — как в
+браузере. int8/q4f16 не используются: на них настоящие русские имена получали
+~0.16 вместо ~0.92.
+
+Видеокарта. На встроенной Intel Graphics (Core Ultra) батч из 8 фрагментов на
+DirectML считает договор в 1.9 раза и таблицу в 2.9 раза быстрее CPU с батчем
+2, калибровка проходит, спаны совпадают с CPU, кроме единиц на пороге 0.3
+(scripts/gpu_check.py). Каждая новая форма входа в первый раз считается дольше,
+сессия создается ~10 с. Если видеокарта не создала сессию или не прошла
+калибровку, engine.load_model переходит на CPU.
 
 Оптимизация графа. В браузере (onnxruntime-web, WASM) уровень 'all' падал в
 SimplifiedLayerNormFusion на этом fp16-графе (onnxruntime #26717), поэтому там
@@ -22,7 +31,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Literal, Optional, Sequence
 
 import numpy as np
 import onnxruntime as ort
@@ -48,8 +57,11 @@ class OptimizationConfig:
 
 
 # Порядок важен: первым — выбранный вариант, дальше — запасные, более консервативные.
+# 'layout' нужен сборке onnxruntime-directml 1.24: в ней CPU-сессия с 'all' не
+# создается (InsertedPrecisionFreeCast), а 'layout' по скорости почти равен 'all'.
 GRAPH_OPTIMIZATION_FALLBACKS: tuple[OptimizationConfig, ...] = (
     OptimizationConfig("all", (SIMPLIFIED_LAYER_NORM_FUSION,)),
+    OptimizationConfig("layout"),
     OptimizationConfig("basic"),
     OptimizationConfig("disabled"),
 )
@@ -62,8 +74,17 @@ _LEVELS = {
 }
 
 
+Device = Literal["cpu", "gpu"]
+DML_PROVIDER = "DmlExecutionProvider"
+
+
 class NerRuntimeError(RuntimeError):
     pass
+
+
+def gpu_available() -> bool:
+    """Есть ли в установленном onnxruntime провайдер DirectML (сборка для Windows)."""
+    return DML_PROVIDER in ort.get_available_providers()
 
 
 @dataclass
@@ -90,26 +111,39 @@ class GlinerModel:
         model_dir: Path | str,
         *,
         optimization: OptimizationConfig = GRAPH_OPTIMIZATION_FALLBACKS[0],
+        device: Device = "cpu",
         intra_op_threads: int = 0,
         tokenizer: Optional[_WordTokenizer] = None,
     ) -> None:
         model_dir = Path(model_dir)
         self.model_dir = model_dir
         self.optimization = optimization
+        self.device: Device = device
         self.tokenizer = tokenizer or load_tokenizer(model_dir)
         options = ort.SessionOptions()
         options.graph_optimization_level = _LEVELS[optimization.level]
         options.log_severity_level = 3  # шум оптимизатора («Could not find a CPU kernel…») не ошибка
         if intra_op_threads:
             options.intra_op_num_threads = intra_op_threads
+        if device == "gpu":
+            # Требования DirectML: без шаблонов памяти и без параллельного исполнения графа.
+            options.enable_mem_pattern = False
+            options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+            providers: list = [DML_PROVIDER, "CPUExecutionProvider"]
+        else:
+            providers = ["CPUExecutionProvider"]
         kwargs = {"disabled_optimizers": list(optimization.disabled_optimizers)} if optimization.disabled_optimizers else {}
         try:
             # Путь, а не байты: 580 МБ не дублируются в памяти Python.
             self._session: Optional[ort.InferenceSession] = ort.InferenceSession(
-                str(model_dir / "model_fp16.onnx"), options, providers=["CPUExecutionProvider"], **kwargs
+                str(model_dir / "model_fp16.onnx"), options, providers=providers, **kwargs
             )
         except Exception as error:  # noqa: BLE001 — ORT бросает свои классы исключений
-            raise NerRuntimeError(f"Не удалось создать сессию NER ({optimization}): {error}") from error
+            raise NerRuntimeError(f"Не удалось создать сессию NER ({device}, {optimization}): {error}") from error
+        # Без подходящего адаптера ORT молча создает сессию на CPU: это не GPU-вариант.
+        if device == "gpu" and self._session.get_providers()[0] != DML_PROVIDER:
+            self._session = None
+            raise NerRuntimeError("Видеокарта для DirectML не найдена")
 
     def infer(self, texts: Sequence[str], labels: Sequence[str], threshold: float = 0.5) -> list[list[Span]]:
         if not texts:

@@ -18,6 +18,9 @@ if not exist .venv (
 echo Устанавливаю зависимости...
 .venv\Scripts\python -m pip install --disable-pip-version-check -q --upgrade pip || exit /b 1
 .venv\Scripts\python -m pip install --disable-pip-version-check -q -e ".[dev]" || exit /b 1
+rem pymupdf-layout тянет обычный onnxruntime, он затирает файлы onnxruntime-directml.
+.venv\Scripts\python -m pip uninstall --disable-pip-version-check -q -y onnxruntime onnxruntime-directml || exit /b 1
+.venv\Scripts\python -m pip install --disable-pip-version-check -q --no-deps onnxruntime-directml || exit /b 1
 
 echo Запускаю тесты...
 .venv\Scripts\python -m pytest -q || exit /b 1

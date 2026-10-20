@@ -24,7 +24,14 @@ def self_check() -> int:
         import tokenizers  # noqa: F401
         from PySide6 import QtWidgets  # noqa: F401
 
-        lines.append(f"onnxruntime {onnxruntime.__version__}, PyMuPDF {pymupdf.VersionBind}: OK")
+        providers = onnxruntime.get_available_providers()
+        lines.append(
+            f"onnxruntime {onnxruntime.__version__} ({', '.join(providers)}), PyMuPDF {pymupdf.VersionBind}: OK"
+        )
+        # Собранная программа для Windows должна уметь считать на видеокарте.
+        if sys.platform == "win32" and getattr(sys, "frozen", False) and "DmlExecutionProvider" not in providers:
+            ok = False
+            lines.append("onnxruntime собран без DirectML: расчет на видеокарте недоступен")
         from .convert.pdf_tables import find_page_tables, layout_available
 
         ok &= layout_available()
@@ -81,8 +88,10 @@ def self_check() -> int:
         if model_asset.is_model_present():
             from .ner.engine import load_model
 
-            load_model(model_asset.model_dir())
-            lines.append("Модель NER: калибровка пройдена")
+            model = load_model(model_asset.model_dir())
+            where = "видеокарта" if model.device == "gpu" else "CPU"
+            lines.append(f"Модель NER: калибровка пройдена ({where}, граф {model.optimization})")
+            model.release()
         else:
             lines.append("Модель NER: не скачана, проверка пропущена")
     except Exception:  # noqa: BLE001

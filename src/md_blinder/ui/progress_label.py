@@ -24,6 +24,7 @@ class UiProgress:
     chunks: Optional[int] = None
     batch: Optional[int] = None
     batches: Optional[int] = None
+    ep: Optional[str] = None  # NER: "cpu" или "gpu"
 
 
 def format_elapsed(sec: float) -> str:
@@ -69,7 +70,10 @@ def status_hint(p: Optional[UiProgress]) -> Optional[str]:
     if p.phase == "ner-download":
         return "Модель скачивается один раз и сохраняется на этом компьютере."
     if p.phase in ("ner-init", "ner-warmup"):
-        return "Модель разворачивается на CPU, обычно 10–40 секунд. Процентов на этом шаге нет, это нормально."
+        where = "на видеокарте" if p.ep == "gpu" else "на CPU"
+        return f"Модель разворачивается {where}, обычно 10–40 секунд. Процентов на этом шаге нет, это нормально."
     if p.phase == "ner-detect":
+        if p.ep == "gpu":
+            return "Расчет идет на видеокарте. Первый документ считается дольше, следующие быстрее."
         return "Расчет идет на CPU и занимает секунды на каждый фрагмент."
     return None

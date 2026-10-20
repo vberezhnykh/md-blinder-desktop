@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -28,6 +29,7 @@ from .convert.docx import docx_to_markdown
 from .convert.file_type import detect_file_kind
 from .convert.ocr import OcrProgress, ocr_pdf_pages
 from .convert.pdf import analyze_pdf, assemble_markdown
+from .convert.xlsx import xlsx_to_markdown
 from .paths import tessdata_dir
 from .ui.progress_label import UiProgress
 
@@ -39,7 +41,7 @@ SKIP = "skip"
 @dataclass
 class ProcessingResult:
     path: Path
-    format: str  # docx | pdf
+    format: str  # docx | xlsx | pdf
     markdown: str
     entities: list[Entity]
     ner_failed: bool = False
@@ -157,12 +159,29 @@ class ProcessingJob(QObject):
                 f'Формат .doc не поддерживается. Откройте файл "{name}" в Word и сохраните как .docx, '
                 "затем загрузите заново."
             )
+        if kind == "legacy-xls":
+            raise UserFacingError(
+                f'Формат .xls не поддерживается. Откройте файл "{name}" в Excel и сохраните как .xlsx, '
+                "затем загрузите заново."
+            )
         if kind == "unknown":
-            raise UserFacingError(f'Файл "{name}" не поддерживается. Поддерживаются .docx и .pdf (включая сканы).')
+            raise UserFacingError(
+                f'Файл "{name}" не поддерживается. Поддерживаются .docx, .xlsx и .pdf (включая сканы).'
+            )
 
         ocr_skipped: list[int] = []
         if kind == "docx":
             md = docx_to_markdown(self.path)
+        elif kind == "xlsx":
+            try:
+                md = xlsx_to_markdown(self.path)
+            except zipfile.BadZipFile:
+                raise UserFacingError(
+                    f'Файл "{name}" не открылся как книга Excel. Если он защищен паролем, '
+                    "снимите защиту в Excel и загрузите заново."
+                ) from None
+            if not md.strip():
+                raise UserFacingError(f'В файле "{name}" нет заполненных ячеек.')
         else:
             analysis = analyze_pdf(
                 self.path, force_ocr=self.force_ocr,

@@ -23,7 +23,8 @@ from .offsets import OffsetMap
 EXPORT_VERSION = 1
 INVALID_EXPORT_ERROR = "Файл не похож на экспорт истории MD Blinder"
 
-DocFormat = Literal["docx", "pdf"]
+# xlsx есть только в настольной версии: браузерная при импорте показывает такой документ как docx.
+DocFormat = Literal["docx", "xlsx", "pdf"]
 
 
 def now_ms() -> int:
@@ -176,7 +177,7 @@ def parse_history(text: str) -> list[HistoryDoc]:
         docs.append(HistoryDoc(
             id=d["id"],
             name=d["name"],
-            format="pdf" if d.get("format") == "pdf" else "docx",
+            format=d["format"] if d.get("format") in ("pdf", "xlsx") else "docx",
             created_at=int(created) if isinstance(created, (int, float)) and not isinstance(created, bool) else now,
             updated_at=int(updated) if isinstance(updated, (int, float)) and not isinstance(updated, bool) else now,
             source_text=source,

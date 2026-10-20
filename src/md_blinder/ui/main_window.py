@@ -424,7 +424,7 @@ class MainWindow(QMainWindow):
 
     def _pick_paths(self, title: str) -> list[Path]:
         start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
-        paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, "Документы (*.docx *.pdf);;Все файлы (*)")
+        paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, "Документы (*.docx *.xlsx *.pdf);;Все файлы (*)")
         if paths:
             self.settings.setValue("lastDir", str(Path(paths[0]).parent))
         return [Path(p) for p in paths]
@@ -698,7 +698,7 @@ class MainWindow(QMainWindow):
                 (lambda: None) if is_current else (lambda i=meta.id: self.open_doc(i)),
                 hint, current=is_current,
             )
-        menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx и .pdf, можно несколько", "plus")
+        menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus")
         if docs:
             menu.add_separator()
             menu.add_item(
@@ -1170,7 +1170,7 @@ class MainWindow(QMainWindow):
         box = QCheckBox("Пункт в меню проводника")
         box.setChecked(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
         box.setToolTip(
-            f"«{shell.LABEL}» в меню файлов .docx и .pdf по правой кнопке мыши. "
+            f"«{shell.LABEL}» в меню файлов .docx, .xlsx и .pdf по правой кнопке мыши. "
             "В Windows 11 — в разделе «Показать дополнительные параметры»."
         )
         box.toggled.connect(self._explorer_menu_toggled)

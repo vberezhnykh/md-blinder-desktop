@@ -1,4 +1,4 @@
-"""Синтетические DOCX и PDF для тестов. Никаких реальных данных."""
+"""Синтетические DOCX, XLSX и PDF для тестов. Никаких реальных данных."""
 
 from __future__ import annotations
 
@@ -85,3 +85,23 @@ def table(rows: list[list[str]]) -> str:
         "<w:tr>" + "".join(f"<w:tc>{para(c)}</w:tc>" for c in row) + "</w:tr>" for row in rows
     )
     return f"<w:tbl>{cells}</w:tbl>"
+
+
+def make_xlsx(path: Path, sheets: dict[str, dict[str, object]], hidden: tuple[str, ...] = ()) -> Path:
+    """sheets: {имя листа: {"A1": значение}}; формат ячейки задается парой (значение, number_format)."""
+    import openpyxl
+
+    book = openpyxl.Workbook()
+    book.remove(book.active)
+    for name, cells in sheets.items():
+        ws = book.create_sheet(name)
+        for ref, value in cells.items():
+            if isinstance(value, tuple):
+                ws[ref] = value[0]
+                ws[ref].number_format = value[1]
+            else:
+                ws[ref] = value
+        if name in hidden:
+            ws.sheet_state = "hidden"
+    book.save(path)
+    return path

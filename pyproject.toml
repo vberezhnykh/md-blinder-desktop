@@ -17,7 +17,8 @@ dependencies = [
   "markdownify>=1.1",
   "beautifulsoup4>=4.12",
   # На Windows — сборка с DirectML: NER считается на видеокарте, если она проходит
-  # калибровку, иначе на CPU (ner/engine.py). Обе сборки вместе не ставятся.
+  # калибровку, иначе на CPU (ner/engine.py). pymupdf-layout тянет обычный onnxruntime,
+  # который затирает файлы DirectML: build.bat и CI переставляют onnxruntime-directml.
   "onnxruntime>=1.20; sys_platform != 'win32'",
   "onnxruntime-directml>=1.24; sys_platform == 'win32'",
   "tokenizers>=0.20",

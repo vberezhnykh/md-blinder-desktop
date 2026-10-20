@@ -9,6 +9,7 @@ src/lib/anonymize/ner.ts).
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,10 +20,10 @@ from ..anonymize.strip_formatting import remap_matches, strip_inline_formatting
 from ..anonymize.types import EntityType, RawMatch
 from ..cancel import CancelToken, check
 from ..components import model_asset
-from .batching import NER_BATCH_SIZE, count_words, expand_batch_result, plan_batches
+from .batching import NER_BATCH_SIZE, NER_BATCH_SIZE_GPU, count_words, expand_batch_result, plan_batches
 from .calibration import CALIBRATION_LABELS, CALIBRATION_TEXT, CALIBRATION_THRESHOLD, CalibrationError, assert_calibration
 from .chunk_text import chunk_text
-from .runtime import GRAPH_OPTIMIZATION_FALLBACKS, GlinerModel, NerRuntimeError, OptimizationConfig
+from .runtime import GRAPH_OPTIMIZATION_FALLBACKS, Device, GlinerModel, NerRuntimeError, OptimizationConfig, gpu_available
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +33,11 @@ NER_LABELS: tuple[str, ...] = ("person", "company", "address", "registration num
 # интерфейс не молчал десятки секунд, пока создается сессия и идет прогрев.
 NerStage = Literal["download", "init", "warmup", "detect"]
 EP_NAME = "cpu"
+# MD_BLINDER_NER_DEVICE=cpu отключает видеокарту (например, если она считает медленнее CPU).
+DEVICE_ENV = "MD_BLINDER_NER_DEVICE"
+# На видеокарте пробуем только два первых варианта графа: каждая неудачная попытка
+# стоит секунд, а дальше надежнее CPU.
+GPU_CONFIGS = GRAPH_OPTIMIZATION_FALLBACKS[:2]
 
 
 @dataclass(frozen=True)
@@ -75,30 +81,44 @@ def _emit(on_progress: Optional[ProgressCallback], progress: NerProgress) -> Non
         on_progress(progress)
 
 
+def available_devices() -> list[Device]:
+    """Видеокарта первой, если сборка ее поддерживает и она не отключена."""
+    if gpu_available() and os.environ.get(DEVICE_ENV, "").strip().lower() != "cpu":
+        return ["gpu", "cpu"]
+    return ["cpu"]
+
+
 def load_model(
     model_dir: Path | str,
     on_progress: Optional[ProgressCallback] = None,
     cancel: Optional[CancelToken] = None,
     configs: tuple[OptimizationConfig, ...] = GRAPH_OPTIMIZATION_FALLBACKS,
+    devices: Optional[list[Device]] = None,
 ) -> GlinerModel:
     """Создает сессию и прогоняет калибровку RU/UA/EN. Не прошедший вариант
-    освобождается, пробуется следующий; если не прошел ни один — NerModelError."""
+    освобождается, пробуется следующий (на видеокарте — первые из GPU_CONFIGS,
+    затем все варианты на CPU); если не прошел ни один — NerModelError."""
     errors: list[str] = []
-    for config in configs:
+    attempts = [
+        (device, config)
+        for device in (devices or available_devices())
+        for config in (configs if device == "cpu" else tuple(c for c in configs if c in GPU_CONFIGS))
+    ]
+    for device, config in attempts:
         check(cancel)
         # Создание сессии — самая «тихая» фаза: ORT разбирает и оптимизирует граф на
         # 580 МБ, это секунды без единого события.
-        _emit(on_progress, NerProgress(stage="init", ep=EP_NAME))
+        _emit(on_progress, NerProgress(stage="init", ep=device))
         t1 = time.perf_counter()
         try:
-            model = GlinerModel(model_dir, optimization=config)
+            model = GlinerModel(model_dir, optimization=config, device=device)
         except NerRuntimeError as error:
-            log.warning("[ner] сессия (%s) не создана: %s", config, error)
+            log.warning("[ner] сессия (%s, %s) не создана: %s", device, config, error)
             errors.append(str(error))
             continue
-        log.info("[ner] сессия ONNX (%s) создана за %s", config, _fmt_ms((time.perf_counter() - t1) * 1000))
+        log.info("[ner] сессия ONNX (%s, %s) создана за %s", device, config, _fmt_ms((time.perf_counter() - t1) * 1000))
 
-        _emit(on_progress, NerProgress(stage="warmup", ep=EP_NAME))
+        _emit(on_progress, NerProgress(stage="warmup", ep=device))
         t2 = time.perf_counter()
         try:
             check(cancel)
@@ -106,13 +126,13 @@ def load_model(
             assert_calibration(calibration)
         except (CalibrationError, NerRuntimeError, ValueError) as error:
             model.release()
-            log.warning("[ner] вариант %s не прошел калибровку: %s", config, error)
-            errors.append(f"{config}: {error}")
+            log.warning("[ner] вариант %s, %s не прошел калибровку: %s", device, config, error)
+            errors.append(f"{device}, {config}: {error}")
             continue
         except BaseException:
             model.release()
             raise
-        log.info("[ner] прогрев (%s) за %s", config, _fmt_ms((time.perf_counter() - t2) * 1000))
+        log.info("[ner] прогрев (%s, %s) за %s", device, config, _fmt_ms((time.perf_counter() - t2) * 1000))
         return model
     raise NerModelError("Модель NER не прошла проверку качества RU/UA/EN: " + "; ".join(errors))
 
@@ -154,11 +174,13 @@ def detect_in_plain_text(
     req_start = time.perf_counter()
     chunks = chunk_text(text)
     matches: list[RawMatch] = []
-    # Фрагменты идут в session.run небольшими партиями (NER_BATCH_SIZE).
+    # Фрагменты идут в session.run партиями (на CPU по NER_BATCH_SIZE, на видеокарте
+    # по NER_BATCH_SIZE_GPU).
     # Одинаковые фрагменты (типовые фразы) считаются один раз, уникальные
     # сортируются по числу слов, чтобы короткие не добивались паддингом до
     # длинного. Смещения — от base каждого вхождения, дедуп позиции не сливает.
-    plan = plan_batches(chunks, NER_BATCH_SIZE)
+    device = getattr(model, "device", EP_NAME)
+    plan = plan_batches(chunks, NER_BATCH_SIZE_GPU if device == "gpu" else NER_BATCH_SIZE)
 
     def elapsed_ms() -> int:
         return round((time.perf_counter() - req_start) * 1000)
@@ -170,7 +192,7 @@ def detect_in_plain_text(
         batch_words = sum(count_words(t) for t in batch_texts)
         # Прогресс отдается ДО инференса, иначе на коротком документе (1 батч)
         # индикатор стоит на нуле все время счета и выглядит как зависание.
-        progress = dict(stage="detect", ep=EP_NAME, chunks=len(chunks), batch=b + 1,
+        progress = dict(stage="detect", ep=device, chunks=len(chunks), batch=b + 1,
                         batches=len(plan.batches), batch_chunks=batch_chunks)
         _emit(on_progress, NerProgress(chunk=min(processed, len(chunks)), elapsed_ms=elapsed_ms(), **progress))
 

@@ -24,7 +24,10 @@ def self_check() -> int:
         import tokenizers  # noqa: F401
         from PySide6 import QtWidgets  # noqa: F401
 
-        lines.append(f"onnxruntime {onnxruntime.__version__}, PyMuPDF {pymupdf.VersionBind}: OK")
+        lines.append(
+            f"onnxruntime {onnxruntime.__version__} ({', '.join(onnxruntime.get_available_providers())}), "
+            f"PyMuPDF {pymupdf.VersionBind}: OK"
+        )
         from .convert.pdf_tables import find_page_tables, layout_available
 
         ok &= layout_available()
@@ -81,8 +84,10 @@ def self_check() -> int:
         if model_asset.is_model_present():
             from .ner.engine import load_model
 
-            load_model(model_asset.model_dir())
-            lines.append("Модель NER: калибровка пройдена")
+            model = load_model(model_asset.model_dir())
+            where = "видеокарта" if model.device == "gpu" else "CPU"
+            lines.append(f"Модель NER: калибровка пройдена ({where}, граф {model.optimization})")
+            model.release()
         else:
             lines.append("Модель NER: не скачана, проверка пропущена")
     except Exception:  # noqa: BLE001

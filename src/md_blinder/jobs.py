@@ -5,7 +5,7 @@ OCR или модель NER), поток отправляет сигнал ask �
 потока. Отмена через CancelToken прерывает и ожидание ответа.
 
 Загруженная модель живет в ModelHolder и переиспользуется следующими задачами:
-разворачивание графа на CPU занимает десятки секунд.
+разворачивание графа занимает десятки секунд.
 """
 
 from __future__ import annotations
@@ -260,7 +260,7 @@ class ProcessingJob(QObject):
             phase=phase,
             chunk=getattr(p, "chunk", None), chunks=getattr(p, "chunks", None),
             batch=getattr(p, "batch", None), batches=getattr(p, "batches", None),
-            pct=getattr(p, "pct", None),
+            pct=getattr(p, "pct", None), ep=getattr(p, "ep", None),
         )
 
 

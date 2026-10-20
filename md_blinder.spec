@@ -2,7 +2,7 @@
 # Сборка onedir: папка с MD Blinder.exe. Модель NER и языки OCR в сборку не входят,
 # программа скачивает их по запросу в %LOCALAPPDATA%\md-blinder.
 
-from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 datas = [
     ("src/md_blinder/anonymize/presidio.LICENSE", "md_blinder/anonymize"),
@@ -26,6 +26,8 @@ excludes = [
 a = Analysis(
     ["launcher.py"],
     pathex=["src"],
+    # DirectML.dll лежит в onnxruntime/capi рядом с библиотекой ORT.
+    binaries=collect_dynamic_libs("onnxruntime"),
     datas=datas,
     hiddenimports=["md_blinder.ner.engine", *collect_submodules("pymupdf.layout")],
     excludes=excludes,

@@ -17,6 +17,8 @@ from .gliner_span import WORD_RE
 # батча 8 на 9–22% на прозе и не медленнее на таблицах, найденное не меняется.
 # Батч 1 на CPU еще быстрее, но с fp16 сдвигает оценку отдельных спанов.
 NER_BATCH_SIZE = 2
+# На видеокарте наоборот: батч 8 вдвое быстрее батча 2 (scripts/gpu_check.py).
+NER_BATCH_SIZE_GPU = 8
 
 
 class NerItem(Protocol):

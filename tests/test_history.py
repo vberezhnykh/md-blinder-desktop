@@ -46,6 +46,11 @@ def test_round_trip():
     assert d2.format == "pdf"
 
 
+def test_xlsx_format_survives_round_trip():
+    [d] = parse_history(serialize_history([doc(name="book.xlsx", format="xlsx")]))
+    assert d.format == "xlsx"
+
+
 def test_invalid_json():
     with pytest.raises(ValueError, match=INVALID):
         parse_history("не json")

@@ -43,11 +43,11 @@ class FakeRegistry:
         del self.keys[path]
 
 
-def test_register_adds_verb_for_docx_and_pdf():
+def test_register_adds_verb_for_docx_xlsx_and_pdf():
     reg = FakeRegistry()
     exe = Path(r"C:\Apps\MD Blinder\MD Blinder.exe")
     shell.register(exe, reg)
-    for ext in (".docx", ".pdf"):
+    for ext in (".docx", ".xlsx", ".pdf"):
         base = rf"Software\Classes\SystemFileAssociations\{ext}\shell\MDBlinder"
         assert reg.keys[base][None] == "Анонимизировать в MD Blinder"
         assert reg.keys[base]["MultiSelectModel"] == "Single"

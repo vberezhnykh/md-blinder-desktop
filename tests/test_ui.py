@@ -8,7 +8,7 @@ from md_blinder.jobs import SKIP
 from md_blinder.storage.history import HistoryStore
 from md_blinder.ui.main_window import MainWindow
 
-from fixtures import make_docx, para, table
+from fixtures import make_docx, make_xlsx, para, table
 
 TEXT = "Договор между ООО «Альфа» и Иван Петров. Телефон +7 916 123-45-67, email ivan@example.com."
 
@@ -295,3 +295,15 @@ def test_add_files_to_open_document_makes_a_package(qtbot, window, tmp_path):
     qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
     batch_ids = {m.batch_id for m in window.store.load_metadata()}
     assert len(batch_ids) == 1 and None not in batch_ids
+
+
+def test_xlsx_opens_in_a_package_with_docx(qtbot, window, tmp_path):
+    contract = make_docx(tmp_path / "contract.docx", para("Пишите на alice@example.com."))
+    book = make_xlsx(tmp_path / "contacts.xlsx", {"Контакты": {"A1": "Email", "A2": "alice@example.com", "A3": "dan@example.com"}})
+    process_all(qtbot, window, [contract, book])
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    meta = next(m for m in window.store.load_metadata() if m.name == "contacts.xlsx")
+    assert meta.format == "xlsx"
+    window.open_doc(meta.id)
+    assert "## Контакты" in window.anonymized_text
+    assert "| [EMAIL_1] |" in window.anonymized_text and "| [EMAIL_2] |" in window.anonymized_text

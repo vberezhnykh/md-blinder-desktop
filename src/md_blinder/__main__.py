@@ -1,6 +1,6 @@
 """Точка входа: python -m md_blinder.
 
-Ключ --self-check запускает проверку без окна: импорт зависимостей, поиск таблиц в PDF, OCR
+Ключ --self-check запускает проверку без окна: импорт зависимостей, чтение XLSX, поиск таблиц в PDF, OCR
 (если языковые файлы скачаны) и калибровку модели (если она скачана).
 Результат пишется в self-check.txt в каталоге данных, код возврата 0 — все в порядке.
 """
@@ -42,6 +42,20 @@ def self_check() -> int:
             "Поиск таблиц в PDF: " + ("OK" if tables_ok else "тестовая таблица не найдена")
             + ("" if layout_available() else ", модель разметки pymupdf_layout не загрузилась")
         )
+        import tempfile
+        from pathlib import Path
+
+        import openpyxl
+
+        from .convert.xlsx import xlsx_to_markdown
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = openpyxl.Workbook()
+            book.active.append(["Cell 00", "Cell 01"])
+            book.save(Path(tmp) / "check.xlsx")
+            xlsx_ok = "| Cell 00 | Cell 01 |" in xlsx_to_markdown(Path(tmp) / "check.xlsx")
+        ok &= xlsx_ok
+        lines.append(f"Чтение XLSX: {'OK' if xlsx_ok else 'тестовая таблица не прочитана'}")
         from .ui.theme import FONTS_DIR
 
         fonts = len(list(FONTS_DIR.glob("*.ttf")))

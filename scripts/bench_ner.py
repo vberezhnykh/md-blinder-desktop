@@ -5,7 +5,8 @@
 plan_batches), а его спаны сравниваются с текущим вариантом (fp16, CPU).
 
     python scripts/bench_ner.py --model-dir model --out bench.json
-    python scripts/bench_ner.py --model-dir model --only dml --baseline bench.json
+
+Проверка видеокарты на машине пользователя — scripts/gpu_check.py.
 """
 
 from __future__ import annotations
@@ -164,6 +165,7 @@ class Variant:
     threads: int = 0
     batch: int = 8
     provider: str = "cpu"
+    device: int = 0  # номер адаптера DirectML
     level: str = "all"
     max_len: Optional[int] = None
     max_words: Optional[int] = None
@@ -184,7 +186,10 @@ def make_session(path: Path, v: Variant) -> ort.InferenceSession:
     if v.threads:
         options.intra_op_num_threads = v.threads
     kwargs = {"disabled_optimizers": [SIMPLIFIED_LAYER_NORM_FUSION]} if v.level == "all" else {}
-    providers = {"cpu": ["CPUExecutionProvider"], "dml": ["DmlExecutionProvider", "CPUExecutionProvider"]}[v.provider]
+    providers = {
+        "cpu": ["CPUExecutionProvider"],
+        "dml": [("DmlExecutionProvider", {"device_id": str(v.device)}), "CPUExecutionProvider"],
+    }[v.provider]
     if v.provider == "dml":
         options.enable_mem_pattern = False
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -267,7 +272,6 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model-dir", type=Path, required=True)
     ap.add_argument("--out", type=Path, default=Path("bench.json"))
-    ap.add_argument("--only", default="")
     ap.add_argument("--baseline", type=Path)
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--full", action="store_true", help="еще потоки, длина фрагментов и int8")
@@ -291,34 +295,30 @@ def main() -> int:
                        pipe_share=round(pipes / max(sum(words), 1), 3))
         print(w.name, w.stats)
 
-    if args.only == "dml":
-        variants = [Variant("DirectML fp16", "model_fp16.onnx", provider="dml"),
-                    Variant("DirectML fp16, layout", "model_fp16.onnx", provider="dml", level="layout")]
-    else:
-        fp32_local = md / "model_fp16_as_fp32.onnx"
-        if not fp32_local.exists():
-            print(f"fp16→fp32: {convert_fp16_to_fp32(md / 'model_fp16.onnx', fp32_local):.1f}s")
-        int8 = md / "model_int8_matmul.onnx"
-        if args.full and (md / "model.onnx").exists() and not int8.exists():
-            print(f"int8 MatMul: {quantize_int8(md / 'model.onnx', int8):.1f}s")
-        variants = [
-            Variant("сейчас: fp16, батч 8", "model_fp16.onnx", note="эталон"),
-            Variant("fp16, батч 1", "model_fp16.onnx", batch=1),
-            Variant("fp16, батч 2", "model_fp16.onnx", batch=2),
-            Variant("fp16, батч 4", "model_fp16.onnx", batch=4),
-            Variant("fp16→fp32, батч 8", "model_fp16_as_fp32.onnx"),
-            Variant("fp16→fp32, батч 1", "model_fp16_as_fp32.onnx", batch=1),
-            Variant("fp16→fp32, батч 2", "model_fp16_as_fp32.onnx", batch=2),
-            Variant("fp32 оригинал, батч 1", "model.onnx", batch=1),
+    fp32_local = md / "model_fp16_as_fp32.onnx"
+    if not fp32_local.exists():
+        print(f"fp16→fp32: {convert_fp16_to_fp32(md / 'model_fp16.onnx', fp32_local):.1f}s")
+    int8 = md / "model_int8_matmul.onnx"
+    if args.full and (md / "model.onnx").exists() and not int8.exists():
+        print(f"int8 MatMul: {quantize_int8(md / 'model.onnx', int8):.1f}s")
+    variants = [
+        Variant("сейчас: fp16, батч 8", "model_fp16.onnx", note="эталон"),
+        Variant("fp16, батч 1", "model_fp16.onnx", batch=1),
+        Variant("fp16, батч 2", "model_fp16.onnx", batch=2),
+        Variant("fp16, батч 4", "model_fp16.onnx", batch=4),
+        Variant("fp16→fp32, батч 8", "model_fp16_as_fp32.onnx"),
+        Variant("fp16→fp32, батч 1", "model_fp16_as_fp32.onnx", batch=1),
+        Variant("fp16→fp32, батч 2", "model_fp16_as_fp32.onnx", batch=2),
+        Variant("fp32 оригинал, батч 1", "model.onnx", batch=1),
+    ]
+    if args.full:
+        variants += [
+            Variant("fp16, 1 поток", "model_fp16.onnx", threads=1),
+            Variant("fp16→fp32, 2 потока", "model_fp16_as_fp32.onnx", threads=2),
+            Variant("fp16→fp32, фрагменты 150 слов", "model_fp16_as_fp32.onnx", max_len=700, max_words=150),
+            Variant("int8 MatMul (из fp32)", "model_int8_matmul.onnx"),
         ]
-        if args.full:
-            variants += [
-                Variant("fp16, 1 поток", "model_fp16.onnx", threads=1),
-                Variant("fp16→fp32, 2 потока", "model_fp16_as_fp32.onnx", threads=2),
-                Variant("fp16→fp32, фрагменты 150 слов", "model_fp16_as_fp32.onnx", max_len=700, max_words=150),
-                Variant("int8 MatMul (из fp32)", "model_int8_matmul.onnx"),
-            ]
-        variants = [v for v in variants if (md / v.model).exists()]
+    variants = [v for v in variants if (md / v.model).exists()]
 
     baseline = json.loads(args.baseline.read_text(encoding="utf-8")) if args.baseline else None
     base_found = baseline["found"] if baseline else None

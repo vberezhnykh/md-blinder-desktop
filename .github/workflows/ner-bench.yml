@@ -1,13 +1,15 @@
 name: NER benchmark
 
 # Ручной замер скорости и точности вариантов сессии NER на настоящей модели
-# (scripts/bench_ner.py). В обычный CI не входит: модель там не скачивается.
+# (scripts/bench_ner.py) и сборка ner-gpu-check.exe (scripts/gpu_check.py) для
+# проверки DirectML на машине с видеокартой. В обычный CI не входит: модель там
+# не скачивается.
 
 on:
   workflow_dispatch:
   push:
     branches: ["claude/**"]
-    paths: ["scripts/bench_ner.py", ".github/workflows/ner-bench.yml"]
+    paths: ["scripts/bench_ner.py", "scripts/gpu_check.py", ".github/workflows/ner-bench.yml"]
 
 permissions:
   contents: read
@@ -63,3 +65,54 @@ jobs:
         with:
           name: bench-${{ runner.os }}
           path: bench-*.json
+
+  gpu-check:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: actions/cache@v4
+        with:
+          path: model
+          key: gliner-multi-v2.1-${{ env.REV }}-fp16-fp32
+
+      - name: Download model
+        shell: bash
+        run: |
+          mkdir -p model
+          base="https://huggingface.co/onnx-community/gliner_multi-v2.1/resolve/$REV"
+          for f in tokenizer.json tokenizer_config.json onnx/model_fp16.onnx; do
+            out="model/$(basename "$f")"
+            [ -s "$out" ] || curl -fsSL --retry 3 -o "$out" "$base/$f"
+          done
+
+      # onnxruntime-directml вместо onnxruntime: обе сборки в одном окружении конфликтуют.
+      - name: Install
+        run: python -m pip install onnxruntime-directml tokenizers numpy regex openpyxl markdownify beautifulsoup4 pyinstaller
+
+      - name: Build ner-gpu-check.exe
+        run: >
+          pyinstaller --noconfirm --clean --onedir --console --name ner-gpu-check
+          --paths src --paths scripts --collect-submodules md_blinder --collect-binaries onnxruntime
+          scripts/gpu_check.py
+
+      # Без видеокарты проверяется только, что exe запускается и считает на CPU.
+      - name: Smoke run
+        shell: bash
+        run: |
+          "dist/ner-gpu-check/ner-gpu-check.exe" --model-dir model --repeat 1 < /dev/null
+          cat dist/ner-gpu-check/ner-gpu-report.txt >> "$GITHUB_STEP_SUMMARY"
+          rm dist/ner-gpu-check/ner-gpu-report.txt
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ner-gpu-check-windows
+          path: dist/ner-gpu-check
+          retention-days: 14

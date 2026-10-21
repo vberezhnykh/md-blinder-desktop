@@ -1,5 +1,8 @@
 """Фоновая обработка файла: конвертация, OCR, NER, похожие упоминания.
 
+В режиме «только конвертация» задача останавливается после Markdown: поиск
+персональных данных не запускается и модель NER не нужна.
+
 Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать модели
 OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
 потока. Отмена через CancelToken прерывает и ожидание ответа.
@@ -48,6 +51,7 @@ class ProcessingResult:
     ner_skipped: bool = False
     ocr_skipped_pages: list[int] = field(default_factory=list)
     force_ocr: bool = False
+    convert_only: bool = False
 
 
 class UserFacingError(Exception):
@@ -90,11 +94,12 @@ class ProcessingJob(QObject):
 
     def __init__(
         self, path: Path, force_ocr: bool = False, batch_members: Sequence[BatchMember] = (),
-        skipped: Optional[set[str]] = None,
+        skipped: Optional[set[str]] = None, convert_only: bool = False,
     ) -> None:
         super().__init__()
         self.path = Path(path)
         self.force_ocr = force_ocr
+        self.convert_only = convert_only
         # Остальные документы пакета: по ним размечаются уже подтвержденные
         # значения и согласуются метки.
         self.batch_members = list(batch_members)
@@ -204,6 +209,11 @@ class ProcessingJob(QObject):
             md = assemble_markdown(analysis, recognized)
         check(cancel)
         md = _normalize_newlines(md)
+        if self.convert_only:
+            return ProcessingResult(
+                path=self.path, format=kind, markdown=md, entities=[],
+                ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr, convert_only=True,
+            )
 
         ner_detect = None
         ner_skipped = False

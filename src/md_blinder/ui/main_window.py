@@ -66,6 +66,7 @@ from .update_ui import UpdateBar, UpdateController, version_footer
 from .widgets import Notice, PopupMenu, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
+SETTING_CONVERT_ONLY = "convertOnly"
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -213,13 +214,19 @@ class DocumentPage(QWidget):
         self.ocr_retry_hint.setObjectName("muted")
         self.ocr_retry.layout().addWidget(self.ocr_retry_hint, 1)
         self.ner_notice = Notice()
+        self.convert_notice = Notice(
+            "Документ только сконвертирован в Markdown: поиск персональных данных выключен на стартовом экране. "
+            "Копирование и экспорт дают текст без замен. Данные можно отметить вручную, выделив их в исходнике."
+        )
         self.ocr_notice = Notice()
         self.image_notice = Notice()
         self.collision_notice = Notice(
             "В документе уже есть текст вида [PERSON_1], похожий на метки замены. В итоговом тексте "
             "такие фрагменты экранируются, чтобы их нельзя было спутать."
         )
-        for notice in (self.ocr_retry, self.ner_notice, self.ocr_notice, self.image_notice, self.collision_notice):
+        for notice in (
+            self.ocr_retry, self.ner_notice, self.convert_notice, self.ocr_notice, self.image_notice, self.collision_notice,
+        ):
             slot = QWidget()
             wrap = QVBoxLayout(slot)
             wrap.setContentsMargins(0, 12, 0, 0)
@@ -275,6 +282,7 @@ class _Run:
     force_ocr: bool
     batch_id: Optional[str]
     members: list[HistoryDoc]  # документы пакета, включая уже обработанные в этом запуске
+    convert_only: bool = False  # только Markdown, без поиска персональных данных
     created: list[tuple[HistoryDoc, ProcessingResult]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     skipped: set[str] = field(default_factory=set)
@@ -359,6 +367,8 @@ class MainWindow(QMainWindow):
         s.history.delete_doc.connect(self.request_delete)
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
+        s.convert_only_box.setChecked(self.settings.value(SETTING_CONVERT_ONLY, False, type=bool))
+        s.convert_only_box.toggled.connect(lambda value: self.settings.setValue(SETTING_CONVERT_ONLY, value))
 
         p.home_button.clicked.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
@@ -457,7 +467,9 @@ class MainWindow(QMainWindow):
         self.start.dropzone.set_busy(True)
         if batch_id is None and len(paths) > 1:
             batch_id = str(uuid.uuid4())
-        self.run = _Run(list(paths), force_ocr, batch_id, list(members or []))
+        self.run = _Run(
+            list(paths), force_ocr, batch_id, list(members or []), convert_only=self.start.convert_only_box.isChecked(),
+        )
         self.job_started = time.monotonic()
         self.start.loading.show()
         self.elapsed_timer.start()
@@ -471,7 +483,7 @@ class MainWindow(QMainWindow):
             self._finish_run()
             return
         self.progress = None
-        self.job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped)
+        self.job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped, run.convert_only)
         self.job.progress.connect(self._job_progress)
         self.job.ask.connect(self._job_ask)
         self.job.finished.connect(self._job_finished)
@@ -593,6 +605,7 @@ class MainWindow(QMainWindow):
         self.page.side.review.active_id = None
         self.session.replace_doc(doc, dirty=True)
         self._set_ner_notice(result)
+        self.page.convert_notice.setVisible(run.convert_only)
         if result.ocr_skipped_pages:
             pages = result.ocr_skipped_pages
             self.page.ocr_notice.label.setText(
@@ -607,9 +620,11 @@ class MainWindow(QMainWindow):
         if run.failures:
             self.toast.show_message(f"Обработаны не все файлы. {' '.join(run.failures)}", 12000, tone="warn")
         elif run.batch_id and len(run.members) > 1:
+            count = plural(len(run.members), ('документ', 'документа', 'документов'))
             self.toast.show_message(
-                f"В пакете {plural(len(run.members), ('документ', 'документа', 'документов'))}: одинаковые значения "
-                "заменены одинаковыми метками во всех. Остальные документы пакета открываются из меню «Пакет».",
+                f"В пакете {count}. Остальные документы пакета открываются из меню «Пакет»." if run.convert_only else
+                f"В пакете {count}: одинаковые значения заменены одинаковыми метками во всех. "
+                "Остальные документы пакета открываются из меню «Пакет».",
                 8000,
             )
 
@@ -1057,6 +1072,7 @@ class MainWindow(QMainWindow):
         self.page.side.review.active_id = None
         self.session.replace_doc(doc, dirty=doc is not loaded)
         self._set_ner_notice(None)
+        self.page.convert_notice.hide()
         self.page.ocr_notice.hide()
         self.set_view("source")
         self.stack.setCurrentWidget(self.page)

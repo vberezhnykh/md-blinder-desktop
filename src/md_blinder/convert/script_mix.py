@@ -10,7 +10,9 @@ Indra иногда читает часть букв короткого загл�
 только из двойников («ОOO», «M.П.») решают соседние части того же слова, затем
 преобладающая письменность строки. Целиком латинские слова не трогаются, кроме
 нескольких сокращений (ООО, ТОВ, р/с) и коротких слов между кириллическими
-(«K Договору», «Bce иные»); «000» перед кавычками там же становится «ООО». Замена буква в букву, длина текста не меняется.
+(«K Договору», «Bce иные»). В кириллической строке также «000» перед кавычками
+становится «ООО», «No»/«Ne» перед числом — «№», а «\\kappa» (так Indra иногда
+пишет «к» в «к/с») — «к».
 """
 
 from __future__ import annotations
@@ -29,6 +31,8 @@ _CYR_ABBREVIATIONS = {"ООО", "ОАО", "АО", "АТ", "ВАТ", "ТОВ", "�
 
 _TOKEN_RE = regex.compile(r"\S+")
 # «000 «Альфа»»: нули вместо О в ООО перед названием в кавычках.
+_NUMBER_SIGN_RE = regex.compile(r"(?<![\p{L}\d])(?:No|Ne|N°)\.?(?=\s*\d)")
+_KAPPA_RE = regex.compile(r"\\kappa(?![\p{L}])")
 _ZERO_OOO_RE = regex.compile(r"(?<![\p{L}\d])(?<!\d[\s\u00a0])[0OО]*0[0OО]*(?=\s*[«\"“„])")
 _RUN_RE = regex.compile(r"\p{L}+")
 
@@ -125,9 +129,12 @@ def fix_mixed_scripts(text: str) -> str:
         if not line:
             continue
         script = _line_script(line)
+        if script > 0:
+            line = _KAPPA_RE.sub("к", line)
         line = _TOKEN_RE.sub(lambda m: _fix_token(m.group(), script), line)
         if script > 0:
             line = _ZERO_OOO_RE.sub(lambda m: "ООО" if len(m.group()) == 3 else m.group(), line)
             line = _fix_between_cyrillic(line)
+            line = _NUMBER_SIGN_RE.sub("№", line)
         lines[index] = line
     return "\n".join(lines)

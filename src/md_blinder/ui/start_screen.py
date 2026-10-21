@@ -9,6 +9,7 @@ from typing import Optional
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import (
+    QCheckBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
@@ -344,6 +345,13 @@ class StartScreen(QScrollArea):
         self.dropzone.clicked.connect(self.pick_file)
         self.dropzone.file_dropped.connect(self.file_dropped)
         column.addWidget(self.dropzone)
+        self.convert_only_box = QCheckBox("Только конвертировать в Markdown, без поиска персональных данных")
+        self.convert_only_box.setStyleSheet("font-size: 13.5px; margin-top: 12px;")
+        self.convert_only_box.setToolTip(
+            "Текст документа выгружается как есть, без замен. Модель распознавания имен не нужна; "
+            "данные можно отметить вручную в исходнике."
+        )
+        column.addWidget(self.convert_only_box)
         self.loading = LoadingBlock()
         self.loading.hide()
         column.addWidget(self.loading)

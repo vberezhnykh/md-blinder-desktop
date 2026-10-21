@@ -23,6 +23,7 @@ def window(qtbot, tmp_path, monkeypatch):
     store = HistoryStore(tmp_path / "h.sqlite")
     w = MainWindow(store)
     w.settings.clear()
+    w.start.convert_only_box.setChecked(False)
     # Диалоги в тестах не показываем: на все вопросы отвечаем «без скачивания».
     monkeypatch.setattr(w, "_job_ask", lambda kind, payload: w.job.answer(SKIP))
     qtbot.addWidget(w)
@@ -50,6 +51,30 @@ def test_open_docx_detects_structural_data(qtbot, window, tmp_path):
     # Документ сохранился в историю.
     qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
     assert len(window.store.load_metadata()) == 1
+
+
+def test_convert_only_skips_anonymization(qtbot, window, tmp_path, monkeypatch):
+    asked = []
+    monkeypatch.setattr(window, "_job_ask", lambda kind, payload: (asked.append(kind), window.job.answer(SKIP)))
+    window.start.convert_only_box.setChecked(True)
+    assert window.settings.value("convertOnly", type=bool)
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert window.stack.currentWidget() is window.page
+    assert window.session.entities == []
+    assert "ivan@example.com" in window.anonymized_text
+    assert "+7 916 123-45-67" in window.anonymized_text
+    assert asked == []  # модель NER не предлагается скачать
+    assert window.page.convert_notice.isVisible()
+    assert not window.page.ner_notice.isVisible()
+    # Вручную отметить данные по-прежнему можно.
+    start = window.session.text.index("Иван Петров")
+    window._add_entity(start, start + len("Иван Петров"), "PERSON")
+    assert "Иван Петров" not in window.anonymized_text
+
+    window.start.convert_only_box.setChecked(False)
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert {"PHONE", "EMAIL"} <= {e.type for e in window.session.entities}
+    assert not window.page.convert_notice.isVisible()
 
 
 def test_manual_entity_and_undo(qtbot, window, tmp_path):

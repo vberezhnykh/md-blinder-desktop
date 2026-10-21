@@ -66,15 +66,44 @@ def test_convert_only_skips_anonymization(qtbot, window, tmp_path, monkeypatch):
     assert asked == []  # модель NER не предлагается скачать
     assert window.page.convert_notice.isVisible()
     assert not window.page.ner_notice.isVisible()
-    # Вручную отметить данные по-прежнему можно.
+    # Вручную отметить данные можно, но в режиме конвертации текст выгружается как есть.
     start = window.session.text.index("Иван Петров")
     window._add_entity(start, start + len("Иван Петров"), "PERSON")
-    assert "Иван Петров" not in window.anonymized_text
+    assert "Иван Петров" in window.anonymized_text
 
-    window.start.convert_only_box.setChecked(False)
-    open_docx(qtbot, window, tmp_path, para(TEXT))
-    assert {"PHONE", "EMAIL"} <= {e.type for e in window.session.entities}
+    # Флажок на экране документа тот же: снятый, он возвращает замены.
+    assert window.page.convert_only_box.isChecked()
+    window.page.convert_only_box.setChecked(False)
+    assert not window.start.convert_only_box.isChecked()
     assert not window.page.convert_notice.isVisible()
+    assert "Иван Петров" not in window.anonymized_text
+    assert "ivan@example.com" in window.anonymized_text  # поиск еще не запускался
+
+    window.page.detect_button.click()
+    qtbot.waitUntil(lambda: window.job is None, timeout=20000)
+    assert window.stack.currentWidget() is window.page
+    types = {e.type for e in window.session.entities}
+    assert {"PHONE", "EMAIL", "PERSON"} <= types
+    assert "ivan@example.com" not in window.anonymized_text
+    assert "Иван Петров" not in window.anonymized_text  # ручная отметка сохранилась
+    assert not window.page.detect_notice.isVisible()
+    window.session.undo_stack.undo()
+    assert {e.type for e in window.session.entities} == {"PERSON"}
+
+
+def test_convert_only_toggle_on_open_document(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert "ivan@example.com" not in window.anonymized_text
+    found = list(window.session.entities)
+    window.page.convert_only_box.setChecked(True)
+    assert window.start.convert_only_box.isChecked()
+    assert window.page.convert_notice.isVisible()
+    assert "ivan@example.com" in window.anonymized_text
+    assert window.session.entities == found  # разметка не теряется
+    window.page.convert_only_box.setChecked(False)
+    assert "ivan@example.com" not in window.anonymized_text
+    assert not window.page.convert_notice.isVisible()
+    assert not window.page.detect_notice.isVisible()
 
 
 def test_manual_entity_and_undo(qtbot, window, tmp_path):

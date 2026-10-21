@@ -1,7 +1,9 @@
 """Фоновая обработка файла: конвертация, OCR, NER, похожие упоминания.
 
 В режиме «только конвертация» задача останавливается после Markdown: поиск
-персональных данных не запускается и модель NER не нужна.
+персональных данных не запускается и модель NER не нужна. Задача с готовым
+текстом (source_text) пропускает конвертацию и только ищет данные: так ищутся
+данные в документе, открытом без поиска.
 
 Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать модели
 OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
@@ -94,12 +96,13 @@ class ProcessingJob(QObject):
 
     def __init__(
         self, path: Path, force_ocr: bool = False, batch_members: Sequence[BatchMember] = (),
-        skipped: Optional[set[str]] = None, convert_only: bool = False,
+        skipped: Optional[set[str]] = None, convert_only: bool = False, source_text: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.path = Path(path)
         self.force_ocr = force_ocr
         self.convert_only = convert_only
+        self.source_text = source_text
         # Остальные документы пакета: по ним размечаются уже подтвержденные
         # значения и согласуются метки.
         self.batch_members = list(batch_members)
@@ -155,6 +158,8 @@ class ProcessingJob(QObject):
                 self.finished.emit(result)
 
     def _run(self) -> ProcessingResult:
+        if self.source_text is not None:
+            return self._detect(self.source_text, "docx", [])
         cancel = self.cancel_token
         name = self.path.name
         kind = detect_file_kind(self.path)
@@ -214,7 +219,10 @@ class ProcessingJob(QObject):
                 path=self.path, format=kind, markdown=md, entities=[],
                 ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr, convert_only=True,
             )
+        return self._detect(md, kind, ocr_skipped)
 
+    def _detect(self, md: str, kind: str, ocr_skipped: list[int]) -> ProcessingResult:
+        cancel = self.cancel_token
         ner_detect = None
         ner_skipped = False
         if MODEL.loaded or model_asset.is_model_present():

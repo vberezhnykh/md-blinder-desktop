@@ -215,9 +215,11 @@ class DocumentPage(QWidget):
         self.ocr_retry.layout().addWidget(self.ocr_retry_hint, 1)
         self.ner_notice = Notice()
         self.convert_notice = Notice(
-            "Документ только сконвертирован в Markdown: поиск персональных данных выключен на стартовом экране. "
-            "Копирование и экспорт дают текст без замен. Данные можно отметить вручную, выделив их в исходнике."
+            "Включена только конвертация в Markdown: копирование и экспорт дают текст без замен. Отмеченные "
+            "данные сохраняются и снова заменяются, если снять флажок «Только конвертация в Markdown»."
         )
+        self.detect_notice = Notice("В документе нет автоматически найденных персональных данных.")
+        self.detect_button = self.detect_notice.add_button("Найти персональные данные", lambda: None, link=True)
         self.ocr_notice = Notice()
         self.image_notice = Notice()
         self.collision_notice = Notice(
@@ -225,7 +227,8 @@ class DocumentPage(QWidget):
             "такие фрагменты экранируются, чтобы их нельзя было спутать."
         )
         for notice in (
-            self.ocr_retry, self.ner_notice, self.convert_notice, self.ocr_notice, self.image_notice, self.collision_notice,
+            self.ocr_retry, self.ner_notice, self.convert_notice, self.detect_notice, self.ocr_notice,
+            self.image_notice, self.collision_notice,
         ):
             slot = QWidget()
             wrap = QVBoxLayout(slot)
@@ -254,6 +257,11 @@ class DocumentPage(QWidget):
         self.side_hint.setObjectName("muted")
         toolbar.addWidget(self.side_hint)
         toolbar.addStretch(1)
+        self.convert_only_box = QCheckBox("Только конвертация в Markdown")
+        self.convert_only_box.setStyleSheet("font-size: 13.5px;")
+        self.convert_only_box.setToolTip("Копирование и экспорт без замен: документ выгружается как есть")
+        toolbar.addWidget(self.convert_only_box)
+        toolbar.addSpacing(8)
         self.side_by_side_box = QCheckBox("Результат рядом")
         self.side_by_side_box.setStyleSheet("font-size: 13.5px;")
         toolbar.addWidget(self.side_by_side_box)
@@ -318,6 +326,7 @@ class MainWindow(QMainWindow):
         self.elapsed_timer.timeout.connect(self._update_loading)
 
         self.last_pdf: Optional[tuple[Path, str, bool]] = None  # путь, id документа, OCR принудительно
+        self._detect_doc_id: Optional[str] = None  # документ, в котором идет поиск данных
         self.view = "source"
         self.pending_delete: Optional[str] = None
         self.delete_timer = QTimer(self)
@@ -367,8 +376,11 @@ class MainWindow(QMainWindow):
         s.history.delete_doc.connect(self.request_delete)
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
-        s.convert_only_box.setChecked(self.settings.value(SETTING_CONVERT_ONLY, False, type=bool))
-        s.convert_only_box.toggled.connect(lambda value: self.settings.setValue(SETTING_CONVERT_ONLY, value))
+        convert_only = self.settings.value(SETTING_CONVERT_ONLY, False, type=bool)
+        for box in (s.convert_only_box, p.convert_only_box):
+            box.setChecked(convert_only)
+            box.toggled.connect(self.set_convert_only)
+        p.detect_button.clicked.connect(self.find_entities)
 
         p.home_button.clicked.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
@@ -467,9 +479,7 @@ class MainWindow(QMainWindow):
         self.start.dropzone.set_busy(True)
         if batch_id is None and len(paths) > 1:
             batch_id = str(uuid.uuid4())
-        self.run = _Run(
-            list(paths), force_ocr, batch_id, list(members or []), convert_only=self.start.convert_only_box.isChecked(),
-        )
+        self.run = _Run(list(paths), force_ocr, batch_id, list(members or []), convert_only=self.convert_only)
         self.job_started = time.monotonic()
         self.start.loading.show()
         self.elapsed_timer.start()
@@ -483,14 +493,18 @@ class MainWindow(QMainWindow):
             self._finish_run()
             return
         self.progress = None
-        self.job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped, run.convert_only)
-        self.job.progress.connect(self._job_progress)
-        self.job.ask.connect(self._job_ask)
-        self.job.finished.connect(self._job_finished)
-        self.job.failed.connect(self._job_failed)
-        self.job.cancelled.connect(self._job_cancelled)
+        job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped, run.convert_only)
+        self._launch(job, self._job_finished, self._job_failed, self._job_cancelled)
+
+    def _launch(self, job: ProcessingJob, finished, failed, cancelled) -> None:
+        self.job = job
+        job.progress.connect(self._job_progress)
+        job.ask.connect(self._job_ask)
+        job.finished.connect(finished)
+        job.failed.connect(failed)
+        job.cancelled.connect(cancelled)
         self._update_loading()
-        self.thread = start_job(self.job)
+        self.thread = start_job(job)
         thread = self.thread
         self._threads.append(thread)
         thread.finished.connect(lambda: self._threads.remove(thread) if thread in self._threads else None)
@@ -605,7 +619,6 @@ class MainWindow(QMainWindow):
         self.page.side.review.active_id = None
         self.session.replace_doc(doc, dirty=True)
         self._set_ner_notice(result)
-        self.page.convert_notice.setVisible(run.convert_only)
         if result.ocr_skipped_pages:
             pages = result.ocr_skipped_pages
             self.page.ocr_notice.label.setText(
@@ -657,6 +670,84 @@ class MainWindow(QMainWindow):
             self.process_files([self.last_pdf[0]], force_ocr=True, batch_id=batch_id, members=members)
             return
         self.process_file(self.last_pdf[0], force_ocr=True)
+
+    # ------------------------------------------------------------------ только конвертация
+
+    @property
+    def convert_only(self) -> bool:
+        return self.start.convert_only_box.isChecked()
+
+    def set_convert_only(self, value: bool) -> None:
+        """Один флажок на стартовом экране и на экране документа. Новые файлы
+        открываются без поиска данных, а у открытого документа копирование и
+        экспорт идут без замен; разметка при этом не теряется."""
+        self.settings.setValue(SETTING_CONVERT_ONLY, value)
+        for box in (self.start.convert_only_box, self.page.convert_only_box):
+            if box.isChecked() != value:
+                box.blockSignals(True)
+                box.setChecked(value)
+                box.blockSignals(False)
+        self._render_derived()
+
+    def find_entities(self) -> None:
+        """Поиск персональных данных в открытом документе, например открытом в
+        режиме только конвертации. Найденное добавляется к уже отмеченному."""
+        doc = self.session.doc
+        if doc is None or self.job is not None:
+            return
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        self._detect_doc_id = doc.id
+        self.stack.setCurrentWidget(self.start)
+        self.start.set_error("")
+        self.start.set_file_name(doc.name)
+        self.start.dropzone.set_busy(True)
+        self.progress = None
+        self.job_started = time.monotonic()
+        self.start.loading.show()
+        self.elapsed_timer.start()
+        job = ProcessingJob(Path(doc.name), batch_members=self.batch_others, source_text=doc.source_text)
+        self._launch(job, self._detect_finished, self._detect_failed, self._detect_cancelled)
+
+    def _detect_back(self) -> bool:
+        self._job_done()
+        self.start.set_file_name("")
+        doc = self.session.doc
+        if doc is None or doc.id != self._detect_doc_id:
+            return False
+        self.set_view("source")
+        self.stack.setCurrentWidget(self.page)
+        return True
+
+    def _detect_finished(self, result: ProcessingResult) -> None:
+        if not self._detect_back():
+            return
+
+        def merge(entities: list) -> list:
+            taken = [(p.start, p.end) for e in entities for p in e.positions]
+            added = []
+            for e in result.entities:
+                free = [p for p in e.positions if not any(p.start < end and start < p.end for start, end in taken)]
+                if free:
+                    added.append(replace(e, positions=free))
+            return compact_placeholder_numbers(dedupe_entity_ids([*entities, *added]))
+
+        self._update(merge, "Найти персональные данные")
+        self._set_ner_notice(result)
+        self._render_derived()
+        found = len([e for e in self.session.entities if not e.manual])
+        self.toast.show_message(
+            f"Найдено: {plural(found, ('значение', 'значения', 'значений'))}." if found
+            else "Персональные данные не найдены.", 5000,
+        )
+
+    def _detect_failed(self, message: str) -> None:
+        if self._detect_back():
+            self.toast.show_message(message.replace("сконвертировать файл", "найти персональные данные"), 8000, tone="error")
+
+    def _detect_cancelled(self) -> None:
+        self._detect_back()
 
     # ------------------------------------------------------------------ пакет
 
@@ -766,11 +857,12 @@ class MainWindow(QMainWindow):
         if path is None:
             return
         try:
-            path.write_text(batch_to_markdown(members), encoding="utf-8", newline="\n")
+            exported = [replace(d, entities=[]) for d in members] if self.convert_only else members
+            path.write_text(batch_to_markdown(exported), encoding="utf-8", newline="\n")
         except OSError as exc:
             self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
             return
-        pending = sum(len(pending_candidates(d.entities)) for d in members)
+        pending = 0 if self.convert_only else sum(len(pending_candidates(d.entities)) for d in members)
         done = f"Пакет из {plural(len(members), ('документа', 'документов', 'документов'))} сохранен одним файлом."
         if pending:
             self.toast.show_message(
@@ -826,14 +918,22 @@ class MainWindow(QMainWindow):
         p = self.page
         text, entities = doc.source_text, doc.entities
         self._rendered_text = text
-        anonymized = build_anonymized_text_with_map(text, entities)
+        # В режиме только конвертации разметка сохраняется, но в результат не попадает.
+        output = [] if self.convert_only else entities
+        anonymized = build_anonymized_text_with_map(text, output)
         self.anonymized_text = anonymized.text
-        p.preview.render(anonymized.text, text, anonymized.segments, entities)
+        p.preview.render(anonymized.text, text, anonymized.segments, output)
         p.side.render(entities, text)
         p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
-        unreviewed = len(pending_candidates(entities))
-        active = [e for e in entities if e.anonymize]
+        unreviewed = len(pending_candidates(output))
+        active = [e for e in output if e.anonymize]
         p.status.update_state(unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md")
+        if self.convert_only:
+            p.status.summary.setText("Только конвертация: текст выгружается без замен")
+        p.convert_notice.setVisible(self.convert_only)
+        p.detect_notice.setVisible(
+            not self.convert_only and self.job is None and all(e.manual for e in entities)
+        )
         images = len(find_image_ranges(text))
         p.image_notice.label.setText(
             f"В документе есть изображения ({images}). При копировании и экспорте текста они заменяются отметкой "
@@ -953,7 +1053,7 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ выдача
 
     def _notify_done(self, done: str) -> None:
-        unreviewed = len(pending_candidates(self.session.entities))
+        unreviewed = 0 if self.convert_only else len(pending_candidates(self.session.entities))
         if unreviewed == 0:
             self.toast.show_message(done, 3000)
             return
@@ -1072,7 +1172,6 @@ class MainWindow(QMainWindow):
         self.page.side.review.active_id = None
         self.session.replace_doc(doc, dirty=doc is not loaded)
         self._set_ner_notice(None)
-        self.page.convert_notice.hide()
         self.page.ocr_notice.hide()
         self.set_view("source")
         self.stack.setCurrentWidget(self.page)

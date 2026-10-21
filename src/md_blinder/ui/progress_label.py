@@ -38,7 +38,7 @@ def _base_label(p: UiProgress) -> str:
     if p.phase == "ocr":
         return f"Распознавание скана (OCR)… страница {p.page}/{p.total}"
     if p.phase == "ocr-download":
-        return f"Скачивание языковых файлов OCR… {p.pct or 0}%"
+        return f"Скачивание модели распознавания текста… {p.pct or 0}%"
     if p.phase == "regex":
         return "Поиск телефонов, email и реквизитов…"
     if p.phase == "ner-download":
@@ -66,7 +66,7 @@ def status_hint(p: Optional[UiProgress]) -> Optional[str]:
     if p is None:
         return None
     if p.phase == "ocr":
-        return "OCR медленный — распознавание может занять несколько минут."
+        return "Обычно около секунды на страницу."
     if p.phase == "ner-download":
         return "Модель скачивается один раз и сохраняется на этом компьютере."
     if p.phase in ("ner-init", "ner-warmup"):

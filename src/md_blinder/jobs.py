@@ -1,6 +1,6 @@
 """Фоновая обработка файла: конвертация, OCR, NER, похожие упоминания.
 
-Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать языки
+Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать модели
 OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
 потока. Отмена через CancelToken прерывает и ожидание ответа.
 
@@ -24,13 +24,12 @@ from .anonymize.pipeline import anonymize_markdown
 from .anonymize.related import find_related_occurrences
 from .anonymize.types import Entity
 from .cancel import CancelToken, Cancelled, check
-from .components import model_asset, tessdata
+from .components import model_asset, ocr_models
 from .convert.docx import docx_to_markdown
 from .convert.file_type import detect_file_kind
 from .convert.ocr import OcrProgress, ocr_pdf_pages
 from .convert.pdf import analyze_pdf, assemble_markdown
 from .convert.xlsx import xlsx_to_markdown
-from .paths import tessdata_dir
 from .ui.progress_label import UiProgress
 
 # Ответы на вопросы задачи.
@@ -190,14 +189,14 @@ class ProcessingJob(QObject):
             recognized: dict[int, str] = {}
             pages = analysis.ocr_page_numbers
             if pages:
-                if not tessdata.is_tessdata_present() and self._ask("ocr-download", len(pages)) == DOWNLOAD:
-                    tessdata.download_tessdata(
+                if not ocr_models.is_ocr_present() and self._ask("ocr-download", len(pages)) == DOWNLOAD:
+                    ocr_models.download_ocr_models(
                         on_progress=lambda got, total: self._emit(phase="ocr-download", pct=int(got * 100 / max(1, total))),
                         cancel=cancel,
                     )
-                if tessdata.is_tessdata_present():
+                if ocr_models.is_ocr_present():
                     recognized = ocr_pdf_pages(
-                        self.path, pages, tessdata_dir(),
+                        self.path, pages, ocr_models.ocr_models_dir(),
                         on_progress=lambda p: self._emit(phase="ocr", page=p.page, total=p.total), cancel=cancel,
                     )
                 else:

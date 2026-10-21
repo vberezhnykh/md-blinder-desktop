@@ -1,7 +1,7 @@
 """Точка входа: python -m md_blinder.
 
 Ключ --self-check запускает проверку без окна: импорт зависимостей, чтение XLSX, поиск таблиц в PDF, OCR
-(если языковые файлы скачаны) и калибровку модели (если она скачана).
+(если модель OCR скачана) и калибровку модели (если она скачана).
 Результат пишется в self-check.txt в каталоге данных, код возврата 0 — все в порядке.
 """
 
@@ -68,23 +68,28 @@ def self_check() -> int:
         fonts = len(list(FONTS_DIR.glob("*.ttf")))
         ok &= fonts >= 11
         lines.append(f"Шрифты IBM Plex: {'OK' if fonts >= 11 else 'не найдены'} ({fonts})")
-        from .components import model_asset, tessdata
+        from .components import model_asset, ocr_models
 
-        if tessdata.is_tessdata_present():
+        if ocr_models.is_ocr_present():
+            from .convert.ocr import ocr_pdf_pages
+
+            # Скан строки с кириллицей: шрифт IBM Plex из сборки.
             doc = pymupdf.open()
             page = doc.new_page()
-            page.insert_text((50, 100), "Self check 12345", fontsize=24)
-            pix = page.get_pixmap(dpi=144)
+            page.insert_font(fontname="plex", fontfile=str(FONTS_DIR / "IBMPlexSans-Regular.ttf"))
+            page.insert_text((50, 100), "Договор 12345, ИНН 7736321479", fontsize=20, fontname="plex")
+            pix = page.get_pixmap(dpi=200)
             scan = pymupdf.open()
             scan_page = scan.new_page()
             scan_page.insert_image(scan_page.rect, pixmap=pix)
-            textpage = scan_page.get_textpage_ocr(
-                language="rus+ukr+eng", dpi=144, full=True, tessdata=str(tessdata.tessdata_dir()))
-            text = scan_page.get_text(textpage=textpage)
-            ok &= "12345" in text
-            lines.append(f"OCR: {'OK' if '12345' in text else 'не распознал тестовый текст'}")
+            with tempfile.TemporaryDirectory() as tmp:
+                scan.save(Path(tmp) / "scan.pdf")
+                text = ocr_pdf_pages(Path(tmp) / "scan.pdf", [1], ocr_models.ocr_models_dir()).get(1, "")
+            ocr_ok = "12345" in text and "ИНН 7736321479" in text
+            ok &= ocr_ok
+            lines.append("OCR (Indra): " + ("OK" if ocr_ok else f"не распознал тестовый текст: {text[:80]!r}"))
         else:
-            lines.append("OCR: языковые файлы не скачаны, проверка пропущена")
+            lines.append("OCR: модель распознавания текста не скачана, проверка пропущена")
         if model_asset.is_model_present():
             from .ner.engine import load_model
 

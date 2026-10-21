@@ -12,6 +12,10 @@ dependencies = [
   "pymupdf>=1.28.2",
   # Модель разметки страницы для поиска таблиц в PDF; версия совпадает с pymupdf.
   "pymupdf-layout>=1.28.2",
+  # OCR сканов. Версия закреплена: модели (components/ocr_models.py) скачиваются той
+  # ревизии, под которую собран пакет. Тянет opencv-python-headless и обычный onnxruntime,
+  # на Windows его тоже заменяет onnxruntime-directml.
+  "indra-ocr==1.1.2",
   "mammoth>=1.9",
   "openpyxl>=3.1",
   "markdownify>=1.1",
@@ -47,5 +51,5 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
   "model: нужен скачанный файл модели GLiNER",
-  "tessdata: нужны языковые файлы Tesseract",
+  "ocr: нужны модели Indra OCR",
 ]

@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-# Сборка onedir: папка с MD Blinder.exe. Модель NER и языки OCR в сборку не входят,
+# Сборка onedir: папка с MD Blinder.exe. Модели NER и OCR в сборку не входят,
 # программа скачивает их по запросу в %LOCALAPPDATA%\md-blinder.
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
@@ -21,6 +21,9 @@ excludes = [
     "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
     "PySide6.QtBluetooth", "PySide6.QtSql", "PySide6.QtTest",
     "tkinter", "matplotlib", "pytest",
+    # Indra OCR: программа сама скачивает модели и рендерит страницы через PyMuPDF,
+    # загрузчик Hugging Face, pdfium и просмотрщик пакета не нужны.
+    "huggingface_hub", "hf_xet", "pypdfium2", "pypdfium2_raw", "indra_ocr.viewer", "indra_ocr.cli",
 ]
 
 a = Analysis(

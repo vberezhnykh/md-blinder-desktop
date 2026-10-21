@@ -33,9 +33,5 @@ def models_dir() -> Path:
     return data_dir() / "models"
 
 
-def tessdata_dir() -> Path:
-    return data_dir() / "tessdata"
-
-
 def history_db_path() -> Path:
     return data_dir() / "history.sqlite"

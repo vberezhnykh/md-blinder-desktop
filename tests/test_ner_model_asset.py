@@ -32,7 +32,6 @@ def test_model_dir_under_data_dir_and_pinned(monkeypatch: pytest.MonkeyPatch, tm
     monkeypatch.setenv("MD_BLINDER_DATA_DIR", str(tmp_path))
     assert paths.data_dir() == tmp_path
     assert paths.models_dir() == tmp_path / "models"
-    assert paths.tessdata_dir() == tmp_path / "tessdata"
     assert paths.history_db_path() == tmp_path / "history.sqlite"
     assert model_asset.model_dir().parent == tmp_path / "models"
     assert REVISION in model_asset.model_dir().name

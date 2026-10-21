@@ -1,0 +1,93 @@
+name: OCR benchmark
+
+# Ручное сравнение Tesseract (как в приложении) и Indra OCR на сгенерированных
+# сканах с эталонным текстом (scripts/bench_ocr.py). В обычный CI не входит.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths: ["scripts/bench_ocr.py", ".github/workflows/ocr-bench.yml"]
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUTF8: "1"
+
+jobs:
+  pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      # Liberation повторяет метрики Times New Roman и Arial.
+      - name: Fonts
+        run: sudo apt-get install -y --no-install-recommends fonts-liberation
+
+      - name: Make pages
+        run: |
+          python -m pip install pymupdf pillow numpy
+          python scripts/bench_ocr.py make --out ocr-pages
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ocr-pages
+          path: ocr-pages
+
+  bench:
+    needs: pages
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: ocr-pages
+          path: ocr-pages
+
+      - name: Install
+        run: python -m pip install -e . indra-ocr rapidfuzz
+
+      # Как в сборке приложения: в Windows только onnxruntime-directml (см. ci.yml).
+      - name: DirectML build of onnxruntime
+        if: runner.os == 'Windows'
+        run: |
+          python -m pip uninstall -y onnxruntime onnxruntime-directml
+          python -m pip install --no-deps onnxruntime-directml
+          python -c "import onnxruntime as o; print(o.__version__, o.get_available_providers())"
+
+      - name: Tessdata
+        run: python -c "from pathlib import Path; from md_blinder.components.tessdata import download_tessdata; download_tessdata(directory=Path('tessdata'))"
+
+      - name: Benchmark
+        shell: bash
+        run: |
+          python scripts/bench_ocr.py run --pages ocr-pages --tessdata tessdata --out ocr-${{ runner.os }}.json | tee bench.log
+          python scripts/bench_ocr.py summary ocr-${{ runner.os }}.json >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: ocr-${{ runner.os }}
+          path: |
+            ocr-*.json
+            ocr-${{ runner.os }}/

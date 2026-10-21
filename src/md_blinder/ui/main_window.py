@@ -47,6 +47,7 @@ from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
 from .. import shell
+from ..components import ocr_models
 from ..paths import history_db_path
 from ..storage.history import HistoryDoc, HistoryStore, merge_docs, now_ms, parse_history, serialize_history
 from ..editing import replace_position
@@ -515,8 +516,8 @@ class MainWindow(QMainWindow):
             box.setWindowTitle("Распознавание сканов")
             box.setText(
                 f"В документе {plural(pages, ('страница-скан', 'страницы-скана', 'страниц-сканов'))}. "
-                "Для распознавания нужно один раз скачать языковые файлы OCR (русский, украинский, английский), "
-                "около 8 МБ."
+                "Для распознавания нужно один раз скачать модель распознавания текста Indra OCR "
+                f"с Hugging Face, около {ocr_models.TOTAL_MB} МБ."
             )
             box.setInformativeText("Это публичные файлы; текст документа никуда не отправляется.")
             download = box.addButton("Скачать", QMessageBox.ButtonRole.AcceptRole)
@@ -596,7 +597,7 @@ class MainWindow(QMainWindow):
             pages = result.ocr_skipped_pages
             self.page.ocr_notice.label.setText(
                 f"Страницы-сканы не распознаны ({', '.join(map(str, pages[:10]))}{'…' if len(pages) > 10 else ''}): "
-                "языковые файлы OCR не скачаны. Текст этих страниц в результат не попал."
+                "модель распознавания текста не скачана. Текст этих страниц в результат не попал."
             )
             self.page.ocr_notice.show()
         else:

@@ -7,8 +7,9 @@ on:
 permissions:
   contents: read
 
-# Модель NER и языки OCR в CI не скачиваются: тесты, которым они нужны,
-# пропускаются. Все остальные тесты используют синтетические документы.
+# Модель NER в CI не скачивается: тесты, которым она нужна, пропускаются. Модели OCR
+# (около 25 МБ) скачиваются, чтобы тесты распознавания и проверка собранной программы
+# шли всегда. Остальные тесты используют синтетические документы.
 
 jobs:
   test:
@@ -49,6 +50,9 @@ jobs:
           python -m pip install --no-deps onnxruntime-directml
           python -c "import onnxruntime as o; p = o.get_available_providers(); print(o.__version__, p); assert 'DmlExecutionProvider' in p"
 
+      - name: OCR models
+        run: python scripts/fetch_ocr_models.py
+
       - name: Tests
         run: python -m pytest -q
 
@@ -61,8 +65,10 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process -FilePath "dist\MD Blinder\MD Blinder.exe" -ArgumentList "--self-check" -Wait -PassThru
-          Get-Content "$env:LOCALAPPDATA\md-blinder\self-check.txt"
+          $report = Get-Content "$env:LOCALAPPDATA\md-blinder\self-check.txt"
+          $report
           if ($p.ExitCode -ne 0) { exit 1 }
+          if (-not ($report -match "OCR \(Indra\): OK")) { Write-Host "OCR не проверен"; exit 1 }
 
       - name: Upload build
         if: runner.os == 'Windows'

@@ -91,6 +91,36 @@ def test_convert_only_skips_anonymization(qtbot, window, tmp_path, monkeypatch):
     assert {e.type for e in window.session.entities} == {"PERSON"}
 
 
+def test_convert_only_switched_on_during_processing(qtbot, window, tmp_path, monkeypatch):
+    import threading
+    import time
+
+    import md_blinder.jobs as jobs
+    from md_blinder.cancel import check
+
+    started = threading.Event()
+
+    def slow_search(md, ner_detect, cancel):
+        started.set()
+        while True:  # долгий поиск, как NER на большом документе
+            check(cancel)
+            time.sleep(0.01)
+
+    monkeypatch.setattr(jobs, "anonymize_markdown", slow_search)
+    window.process_file(make_docx(tmp_path / "contract.docx", para(TEXT)))
+    qtbot.waitUntil(started.is_set, timeout=20000)
+    window.start.convert_only_box.setChecked(True)
+    qtbot.waitUntil(lambda: window.job is None, timeout=20000)
+    assert window.stack.currentWidget() is window.page
+    assert window.session.entities == []
+    assert "ivan@example.com" in window.anonymized_text
+    assert window.page.convert_notice.isVisible()
+    assert not window.page.side.isVisible()  # проверка находок не нужна
+    assert not window.page.status.steps.isVisible()
+    window.page.convert_only_box.setChecked(False)
+    assert window.page.side.isVisible()
+
+
 def test_convert_only_toggle_on_open_document(qtbot, window, tmp_path):
     open_docx(qtbot, window, tmp_path, para(TEXT))
     assert "ivan@example.com" not in window.anonymized_text

@@ -680,8 +680,14 @@ class MainWindow(QMainWindow):
     def set_convert_only(self, value: bool) -> None:
         """Один флажок на стартовом экране и на экране документа. Новые файлы
         открываются без поиска данных, а у открытого документа копирование и
-        экспорт идут без замен; разметка при этом не теряется."""
+        экспорт идут без замен; разметка при этом не теряется. Флажок, включенный
+        во время обработки, прерывает поиск данных в текущем файле и пропускает
+        его в остальных файлах пакета."""
         self.settings.setValue(SETTING_CONVERT_ONLY, value)
+        if self.run is not None:
+            self.run.convert_only = value
+            if self.job is not None:
+                self.job.set_convert_only(value)
         for box in (self.start.convert_only_box, self.page.convert_only_box):
             if box.isChecked() != value:
                 box.blockSignals(True)
@@ -928,8 +934,13 @@ class MainWindow(QMainWindow):
         unreviewed = len(pending_candidates(output))
         active = [e for e in output if e.anonymize]
         p.status.update_state(unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md")
+        # Без обезличивания проверка не нужна: остаются исходник, результат и выгрузка.
+        p.side.setVisible(not self.convert_only)
+        p.status.steps.setVisible(not self.convert_only)
         if self.convert_only:
-            p.status.summary.setText("Только конвертация: текст выгружается без замен")
+            p.status.pending.hide()
+            p.status.ready.hide()
+            p.status.summary.setText("Только конвертация в Markdown: текст выгружается без замен")
         p.convert_notice.setVisible(self.convert_only)
         p.detect_notice.setVisible(
             not self.convert_only and self.job is None and all(e.manual for e in entities)

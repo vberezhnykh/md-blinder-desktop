@@ -1,7 +1,11 @@
 """Фоновая обработка файла: конвертация, OCR, NER, похожие упоминания.
 
 В режиме «только конвертация» задача останавливается после Markdown: поиск
-персональных данных не запускается и модель NER не нужна.
+персональных данных не запускается и модель NER не нужна. Режим можно включить
+и во время обработки (skip_detection): поиск прерывается, документ остается без
+находок. Задача с готовым
+текстом (source_text) пропускает конвертацию и только ищет данные: так ищутся
+данные в документе, открытом без поиска.
 
 Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать модели
 OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
@@ -26,7 +30,7 @@ from .anonymize.batch import BatchMember, reconcile_batch_placeholders, seed_fro
 from .anonymize.pipeline import anonymize_markdown
 from .anonymize.related import find_related_occurrences
 from .anonymize.types import Entity
-from .cancel import CancelToken, Cancelled, check
+from .cancel import AnyToken, CancelToken, Cancelled, check
 from .components import model_asset, ocr_models
 from .convert.docx import docx_to_markdown
 from .convert.file_type import detect_file_kind
@@ -94,12 +98,13 @@ class ProcessingJob(QObject):
 
     def __init__(
         self, path: Path, force_ocr: bool = False, batch_members: Sequence[BatchMember] = (),
-        skipped: Optional[set[str]] = None, convert_only: bool = False,
+        skipped: Optional[set[str]] = None, convert_only: bool = False, source_text: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.path = Path(path)
         self.force_ocr = force_ocr
         self.convert_only = convert_only
+        self.source_text = source_text
         # Остальные документы пакета: по ним размечаются уже подтвержденные
         # значения и согласуются метки.
         self.batch_members = list(batch_members)
@@ -107,6 +112,9 @@ class ProcessingJob(QObject):
         # предыдущего файла пакета: второй раз они не задаются.
         self.skipped = skipped if skipped is not None else set()
         self.cancel_token = CancelToken()
+        self._skip_detection = CancelToken()
+        # Поиск данных прерывается и отменой задачи, и включением режима только конвертации.
+        self._detect_cancel = AnyToken(self.cancel_token, self._skip_detection)
         self._answers: "queue.Queue[str]" = queue.Queue()
 
     # --- вызывается из главного потока ---
@@ -117,6 +125,13 @@ class ProcessingJob(QObject):
     def cancel(self) -> None:
         self.cancel_token.cancel()
         self._answers.put(SKIP)
+
+    def set_convert_only(self, value: bool) -> None:
+        """Режим только конвертации, включенный во время обработки, прерывает уже
+        начатый поиск данных. Выключенный — действует, если поиск еще не начался."""
+        self.convert_only = value
+        if value:
+            self._skip_detection.cancel()
 
     # --- поток задачи ---
 
@@ -155,6 +170,8 @@ class ProcessingJob(QObject):
                 self.finished.emit(result)
 
     def _run(self) -> ProcessingResult:
+        if self.source_text is not None:
+            return self._detect(self.source_text, "docx", [])
         cancel = self.cancel_token
         name = self.path.name
         kind = detect_file_kind(self.path)
@@ -209,12 +226,21 @@ class ProcessingJob(QObject):
             md = assemble_markdown(analysis, recognized)
         check(cancel)
         md = _normalize_newlines(md)
+        converted = ProcessingResult(
+            path=self.path, format=kind, markdown=md, entities=[],
+            ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr, convert_only=True,
+        )
         if self.convert_only:
-            return ProcessingResult(
-                path=self.path, format=kind, markdown=md, entities=[],
-                ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr, convert_only=True,
-            )
+            return converted
+        try:
+            return self._detect(md, kind, ocr_skipped)
+        except Cancelled:
+            if self.cancel_token.cancelled:
+                raise
+            return converted
 
+    def _detect(self, md: str, kind: str, ocr_skipped: list[int]) -> ProcessingResult:
+        cancel = self._detect_cancel
         ner_detect = None
         ner_skipped = False
         if MODEL.loaded or model_asset.is_model_present():
@@ -249,7 +275,7 @@ class ProcessingJob(QObject):
     def _download_then_detect(self, md: str):
         model_asset.download_model(
             on_progress=lambda got, total: self._emit(phase="ner-download", pct=int(got * 100 / max(1, total))),
-            cancel=self.cancel_token,
+            cancel=self._detect_cancel,
         )
         return self._ner_detect(md)
 
@@ -257,8 +283,8 @@ class ProcessingJob(QObject):
         from .ner.engine import detect_entities_ner
 
         model = MODEL.get(self._on_ner_progress)
-        check(self.cancel_token)
-        return detect_entities_ner(md, model, on_progress=self._on_ner_progress, cancel=self.cancel_token)
+        check(self._detect_cancel)
+        return detect_entities_ner(md, model, on_progress=self._on_ner_progress, cancel=self._detect_cancel)
 
     def _on_ner_progress(self, p: Any) -> None:
         stage = getattr(p, "stage", None) or getattr(p, "phase", None) or "detect"

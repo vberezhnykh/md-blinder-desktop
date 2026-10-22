@@ -248,6 +248,7 @@ QLabel#cardCount {{ color: {PENDING}; font-size: 13px; font-weight: 500; }}
 QLabel#cardValue {{ font-size: 19px; font-weight: 600; }}
 QLabel#cardContext {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_XS}px; padding: 9px 11px; font-family: "{SERIF}"; font-size: 14px; color: {INK_2}; }}
 QLabel#cardReason {{ font-size: 13px; font-weight: 500; }}
+QLabel#cardLink {{ font-size: 13px; }}
 QLabel#fieldLabel {{ color: {INK_3}; font-size: 13px; }}
 QFrame#reviewDone {{ background: {READY_WASH}; border: 1px solid {READY_LINE}; border-radius: {RADIUS_SM}px; }}
 QLabel#doneTitle {{ color: {READY}; font-weight: 600; font-size: 14px; }}

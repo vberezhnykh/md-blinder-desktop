@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import html
+import re
 from typing import Callable, Optional
 
 from PySide6.QtCore import Qt, Signal
@@ -29,7 +30,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import Select, icon_label, set_prop
+from .widgets import ElidedLabel, Select, icon_label, set_prop
 
 
 def _min_start(e: Entity) -> int:
@@ -38,6 +39,19 @@ def _min_start(e: Entity) -> int:
 
 def _truncate(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
+
+
+def _breakable(s: str) -> str:
+    """Разрешает перенос внутри длинных слов: адресов сайтов, почты, номеров счетов.
+    Подпись с переносом по словам не бывает уже самого длинного слова, и без этого
+    такое слово раздвигает карточку шире панели."""
+    return re.sub(r"\S{20,}", lambda m: "\u200b".join(m.group()), s)
+
+
+def _fit_width(label: QLabel) -> None:
+    """Подпись с переносом получает ширину от панели, а не от своего текста."""
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
 
 def _clear(layout) -> None:
@@ -238,28 +252,28 @@ class ReviewPanel(QWidget):
                 head.addWidget(b)
         box.addLayout(head)
 
-        value = QLabel(entity_current_value(text, current))
+        value = QLabel(_breakable(entity_current_value(text, current)))
         value.setObjectName("cardValue")
-        value.setWordWrap(True)
+        _fit_width(value)
         box.addWidget(value)
         position = current.positions[0] if current.positions else None
         if position is not None:
             ctx = candidate_context(text, position.start, position.end)
             snippet = (
-                ("…" if ctx.cut_before else "") + html.escape(ctx.before)
-                + f"<span style='background:{t.MARK}; color:{t.INK}'>{html.escape(ctx.match)}</span>"
-                + html.escape(ctx.after) + ("…" if ctx.cut_after else "")
+                ("…" if ctx.cut_before else "") + html.escape(_breakable(ctx.before))
+                + f"<span style='background:{t.MARK}; color:{t.INK}'>{html.escape(_breakable(ctx.match))}</span>"
+                + html.escape(_breakable(ctx.after)) + ("…" if ctx.cut_after else "")
             )
             context = QLabel(snippet.replace("\n", "<br>"))
             context.setObjectName("cardContext")
-            context.setWordWrap(True)
+            _fit_width(context)
             context.setTextFormat(Qt.TextFormat.RichText)
             box.addWidget(context)
         reason = candidate_reason(entities, current)
         if reason:
-            r = QLabel(reason)
+            r = QLabel(_breakable(reason))
             r.setObjectName("cardReason")
-            r.setWordWrap(True)
+            _fit_width(r)
             box.addWidget(r)
         type_row = QHBoxLayout()
         type_row.setSpacing(10)
@@ -287,9 +301,13 @@ class ReviewPanel(QWidget):
         siblings = [e for e in pending if current.related_to and e.related_to == current.related_to]
         target = next((e for e in entities if e.id == current.related_to), None) if current.related_to else None
         if len(siblings) > 1 and target is not None and not target.candidate and not target.dismissed:
-            all_button = QPushButton(f"Принять все похожие на {target.placeholder} ({len(siblings)})")
-            all_button.setObjectName("link")
-            all_button.setCursor(Qt.CursorShape.PointingHandCursor)
+            # Ссылка, а не кнопка: текст кнопки не переносится, а с длинной меткой
+            # он не помещается в узкую панель.
+            caption = html.escape(f"Принять все похожие на {target.placeholder} ({len(siblings)})")
+            all_link = QLabel(f"<a href='#' style='color:{t.ACCENT}'>{caption}</a>")
+            all_link.setObjectName("cardLink")
+            all_link.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse | Qt.TextInteractionFlag.LinksAccessibleByKeyboard)
+            _fit_width(all_link)
 
             def accept_all() -> None:
                 self._keep_focus = True
@@ -297,8 +315,8 @@ class ReviewPanel(QWidget):
                 self.accept_all_related.emit(target.id)
                 self.activate.emit(nxt)
 
-            all_button.clicked.connect(accept_all)
-            box.addWidget(all_button, 0, Qt.AlignmentFlag.AlignLeft)
+            all_link.linkActivated.connect(lambda _href: accept_all())
+            box.addWidget(all_link)
         self.layout_.addWidget(card)
 
         section = QVBoxLayout()
@@ -348,7 +366,7 @@ class ReviewPanel(QWidget):
             row.addWidget(n)
         col = QVBoxLayout()
         col.setSpacing(0)
-        v = QLabel(_truncate(value.replace("\n", " "), 60))
+        v = ElidedLabel(_truncate(value.replace("\n", " "), 60))
         v.setObjectName("itemValue")
         r = QLabel(reason)
         r.setObjectName("itemReasonCurrent" if current else "itemReason")
@@ -576,9 +594,8 @@ class FoundPanel(QWidget):
         brow = QHBoxLayout(button)
         brow.setContentsMargins(6, 7, 6, 7)
         brow.setSpacing(8)
-        cell = QLabel(_truncate(value.replace("\n", " "), 80))
+        cell = ElidedLabel(_truncate(value.replace("\n", " "), 80))
         cell.setObjectName("cellValue" if entity.anonymize else "cellValueOff")
-        cell.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
         placeholder = QLabel(entity.placeholder)
         placeholder.setObjectName("cellPlaceholder")
         cnt = QLabel(f"×{len(entity.positions)}")
@@ -634,9 +651,14 @@ class FoundPanel(QWidget):
 
             ok.clicked.connect(do_merge)
             cancel.clicked.connect(do_cancel)
+            # Кнопки под списком: в одну строку со списком они не помещаются в узкую панель.
             row.addWidget(target, 1)
-            row.addWidget(ok)
-            row.addWidget(cancel)
+            buttons = QHBoxLayout()
+            buttons.setSpacing(6)
+            buttons.addWidget(ok)
+            buttons.addWidget(cancel)
+            buttons.addStretch(1)
+            rows.addLayout(buttons)
             return area
         label = QLabel("Тип")
         label.setObjectName("fieldLabel")

@@ -321,6 +321,39 @@ def test_select_shows_every_entity_type_without_scrolling(qtbot):
     assert box.maxVisibleItems() >= len(ALL_ENTITY_TYPES)
 
 
+@pytest.mark.parametrize("width", [440, 360])  # обычный режим и «Результат рядом»
+def test_side_panel_fits_its_width_with_long_values(qtbot, width):
+    from md_blinder.anonymize.types import Entity, Position
+    from md_blinder.ui.side_panel import SidePanel
+
+    values = [
+        "International Business Machines Corporation of New York and Delaware",
+        "https://www.example.com/very/long/path/without/any/spaces/at/all/here",
+        "john.very.long.email.address@subdomain.example-company.com",
+    ]
+    text = "Intro. " + " ... ".join(values) + " end."
+
+    def entity(eid, value, **kw):
+        start = text.index(value)
+        return Entity(eid, "COMPANY", value, f"[COMPANY_{eid}]", [Position(start, start + len(value))], **kw)
+
+    confirmed = [entity(f"e{i}", v) for i, v in enumerate(values)]
+    candidates = [entity(f"c{i}", v, candidate=True, related_to="e1") for i, v in enumerate(values)]
+    panel = SidePanel()
+    qtbot.addWidget(panel)
+    panel.setFixedWidth(width)
+    panel.resize(width, 800)
+    panel.show()
+    for active in ("c0", "c1", "c2"):
+        panel.review.active_id = active
+        panel.found._selected, panel.found._merging = "e1", "e1"
+        panel.render(confirmed + candidates, text)
+        for index, part in ((0, panel.review), (1, panel.found)):
+            panel.setCurrentIndex(index)
+            qtbot.wait(1)
+            assert part.area.widget().width() <= part.area.viewport().width()
+
+
 
 def process_all(qtbot, window, paths):
     window.process_files(paths)

@@ -48,6 +48,25 @@ def replaced_summary(values: int, places: int) -> str:
     )
 
 
+class ElidedLabel(QLabel):
+    """Однострочная подпись, которая не раздвигает панель: что не влезает по ширине,
+    заменяется многоточием (text-overflow: ellipsis в вебе)."""
+
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def elided_text(self) -> str:
+        return self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        self.style().drawItemText(
+            painter, self.contentsRect(), int(self.alignment()), self.palette(), self.isEnabled(),
+            self.elided_text(), self.foregroundRole(),
+        )
+
+
 class Select(QComboBox):
     """Выпадающий список в стиле меню программы.
 

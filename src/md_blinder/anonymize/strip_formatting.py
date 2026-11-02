@@ -15,6 +15,10 @@ from .types import Position, RawMatch
 
 _DATA_URI_RE = re.compile(r"data:[\w.+-]+/[\w.+-]+;base64,[A-Za-z0-9+/=]+", re.A)
 
+# Аббревиатура с точками из трех и более заглавных букв: L.L.C, S.O.C, U.S.A.
+# Две буквы («J.P.», «А.Б.») не трогаем: обычно это инициалы.
+_DOTTED_ABBR_RE = re.compile(r"(?<![^\W\d_])[^\W\d_](?:\.[^\W\d_]){2,}(?![^\W\d_])")
+
 
 @dataclass
 class StrippedText:
@@ -44,6 +48,31 @@ def strip_inline_formatting(md: str) -> StrippedText:
             mapping.append(i)
         i += 1
     return StrippedText("".join(plain), mapping, skip)
+
+
+def collapse_abbreviation_dots(text: str) -> tuple[str, list[int]]:
+    """Убирает точки внутри аббревиатур из заглавных букв (L.L.C → LLC).
+
+    Модель режет текст на слова по знакам препинания и видит спаны не длиннее
+    12 слов, поэтому «ABENTIO TRADING L.L.C S.O.C.» (13 слов) ей недоступно
+    целиком. Возвращает текст и индекс каждого его символа в исходном text.
+    """
+    out: list[str] = []
+    mapping: list[int] = []
+    pos = 0
+    for m in _DOTTED_ABBR_RE.finditer(text):
+        if not m.group().replace(".", "").isupper():
+            continue
+        out.append(text[pos:m.start()])
+        mapping.extend(range(pos, m.start()))
+        for i in range(m.start(), m.end()):
+            if text[i] != ".":
+                out.append(text[i])
+                mapping.append(i)
+        pos = m.end()
+    out.append(text[pos:])
+    mapping.extend(range(pos, len(text)))
+    return "".join(out), mapping
 
 
 def remap_matches(

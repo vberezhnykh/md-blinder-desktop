@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable, Literal, Optional
 
 from ..anonymize.config import NER_GRAY_ZONE_LOW
-from ..anonymize.strip_formatting import remap_matches, strip_inline_formatting
+from ..anonymize.strip_formatting import collapse_abbreviation_dots, remap_matches, strip_inline_formatting
 from ..anonymize.types import EntityType, RawMatch
 from ..cancel import CancelToken, check
 from ..components import model_asset
@@ -227,6 +227,9 @@ def detect_entities_ner(
     stripped = strip_inline_formatting(md)
     if not stripped.plain.strip():
         return []
-    matches = detect_in_plain_text(stripped.plain, model, NER_LABELS, NER_GRAY_ZONE_LOW, on_progress, cancel)
+    text, abbr_map = collapse_abbreviation_dots(stripped.plain)
+    matches = detect_in_plain_text(text, model, NER_LABELS, NER_GRAY_ZONE_LOW, on_progress, cancel)
     check(cancel)
+    # Смещения в сжатом тексте → в plain, где точки аббревиатур на месте.
+    matches = remap_matches(matches, text, abbr_map)
     return remap_matches(matches, stripped.plain, stripped.map, stripped.excluded)

@@ -266,3 +266,22 @@ def test_ensure_model_downloads_missing_files(
     engine.ensure_model(events.append, directory=tmp_path)
     downloads = [(e.pct, e.cached) for e in events if e.stage == "download"]
     assert downloads == [(0, False), (50, False), (99, False), (100, False)]
+
+
+def test_dotted_abbreviations_are_collapsed_for_model_and_restored_in_matches() -> None:
+    # «L.L.C S.O.C.» модель режет на 10 слов, имя компании целиком не влезает
+    # в ее окно; в модель уходит «LLC SOC.», в находке исходный текст.
+    md = "| **ABENTIO TRADING L.L.C S.O.C.**, a company (J.P. Smith, U.S.A.) |"
+    model = FakeModel({"ABENTIO TRADING LLC SOC.": "company", "J.P. Smith": "person"})
+    matches = detect_entities_ner(md, model)  # type: ignore[arg-type]
+    assert [(m.type, m.value, md[m.start:m.end]) for m in matches] == [
+        ("COMPANY", "ABENTIO TRADING L.L.C S.O.C.", "ABENTIO TRADING L.L.C S.O.C."),
+        ("PERSON", "J.P. Smith", "J.P. Smith"),
+    ]
+    assert model.calls[0][0] == ["| ABENTIO TRADING LLC SOC., a company (J.P. Smith, USA.) |"]
+
+
+def test_lowercase_dotted_abbreviations_are_kept() -> None:
+    model = FakeModel()
+    detect_entities_ner("Use e.g. or i.e.a.b here, A.b.C too.", model)  # type: ignore[arg-type]
+    assert model.calls[0][0] == ["Use e.g. or i.e.a.b here, A.b.C too."]

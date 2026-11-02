@@ -2,7 +2,7 @@
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QWidget
 
 from md_blinder.jobs import SKIP
 from md_blinder.storage.history import HistoryStore
@@ -360,6 +360,32 @@ def process_all(qtbot, window, paths):
     qtbot.waitUntil(lambda: window.job is None and window.run is None, timeout=40000)
 
 
+def assert_menu_items_fit(qtbot, menu):
+    """Заголовок и подсказка каждого пункта меню видны целиком: раньше пункт получал
+    высоту пустой кнопки, и меню «Пакет» выглядело пустым."""
+    qtbot.waitUntil(menu.isVisible, timeout=2000)
+    qtbot.wait(50)
+    items = [w for w in menu.findChildren(QWidget) if w.objectName() == "menuItem"]
+    assert items
+    for item in items:
+        for label in item.findChildren(QLabel):
+            if not label.text():
+                continue
+            rect = label.geometry()
+            needed = label.heightForWidth(rect.width()) if label.wordWrap() else label.sizeHint().height()
+            assert rect.height() >= needed, label.text()
+            assert rect.bottom() < item.height(), label.text()
+
+
+def test_history_menu_items_are_readable(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    window._refresh_history()
+    window._open_history_menu()
+    assert_menu_items_fit(qtbot, window.page.history_menu)
+    window.page.history_menu.hide()
+
+
 def test_files_opened_together_share_labels_across_the_package(qtbot, window, tmp_path, monkeypatch):
     first = make_docx(tmp_path / "first.docx", para("Пишите на alice@example.com или bob@example.com."))
     second = make_docx(tmp_path / "second.docx", para("Копия bob@example.com и carol@example.com."))
@@ -372,6 +398,7 @@ def test_files_opened_together_share_labels_across_the_package(qtbot, window, tm
     menu = window.page.batch_menu
     titles = [label.text() for label in menu.findChildren(QLabel) if label.objectName() == "menuTitle"]
     assert titles[:3] == ["1. first.docx", "2. second.docx", "Добавить документы в пакет"]
+    assert_menu_items_fit(qtbot, menu)
     menu.hide()
     qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
     other = next(m for m in window.store.load_metadata() if m.name == "second.docx")

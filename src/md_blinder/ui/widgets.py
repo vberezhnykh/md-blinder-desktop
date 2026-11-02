@@ -115,6 +115,40 @@ class Select(QComboBox):
         painter.end()
 
 
+class MenuItem(QPushButton):
+    """Пункт меню: заголовок и подсказка лежат в собственном layout кнопки.
+
+    QPushButton считает размер по своему тексту (у пункта он пустой) и не смотрит
+    на layout, поэтому меню отдавало пункту высоту пустой кнопки, а надписи
+    обрезались почти целиком. Размер и высоту при заданной ширине (подсказка
+    переносится) берем у layout.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        return layout.totalSizeHint() if layout is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        layout = self.layout()
+        return layout.totalMinimumSize() if layout is not None else super().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        layout = self.layout()
+        return layout is not None and layout.hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        layout = self.layout()
+        if layout is None or not layout.hasHeightForWidth():
+            return super().heightForWidth(width)
+        return layout.totalHeightForWidth(width)
+
+
 class PopupMenu(QFrame):
     """Раскрывающееся меню как Menu.tsx: пункты с заголовком и подсказкой, заметки, разделители."""
 
@@ -142,7 +176,7 @@ class PopupMenu(QFrame):
         self, title: str, handler: Callable[[], None], hint: str = "", icon_name: Optional[str] = None,
         current: bool = False, sensitive: bool = False, enabled: bool = True,
     ) -> QPushButton:
-        button = QPushButton()
+        button = MenuItem()
         button.setObjectName("menuItem")
         button.setProperty("current", "true" if current else "false")
         button.setEnabled(enabled)

@@ -105,3 +105,34 @@ def test_candidate_placeholder_follows_existing_numbers():
     surname_only = find(find_related_occurrences(source_text, [entity]), lambda e: e.value == "Иванова")
     assert surname_only is not None
     assert surname_only.placeholder == "[PERSON_2]"
+
+
+def test_generic_and_lowercase_words_of_a_name_are_not_searched_alone():
+    # Ошибочная находка вроде «Senior Executives of the Parties» не должна порождать
+    # кандидатов «Parties» и «Executives» по всему тексту, а «Upstream Providers»
+    # (аббревиатура «UP») — предлог «up».
+    source_text = "Senior Executives of the Parties met. The Parties agreed to set up Upstream Providers."
+    person = make_entity("PERSON", "Senior Executives of the Parties", "[PERSON_1]", [(0, 32)])
+    start = source_text.index("Upstream Providers")
+    company = make_entity("COMPANY", "Upstream Providers", "[COMPANY_1]", [(start, start + 18)])
+    result = find_related_occurrences(source_text, [person, company])
+    assert [e.value for e in result] == []
+
+
+def test_acronym_matches_only_in_capitals():
+    source_text = "Upstream Partners Group (UPG) will upg the lines; UPG pays."
+    entity = make_entity("COMPANY", "Upstream Partners Group", "[COMPANY_1]", [(0, 23)])
+    result = find_related_occurrences(source_text, [entity])
+    acronym = find(result, lambda e: e.value == "UPG")
+    assert acronym is not None and len(acronym.positions) == 2
+    assert find(result, lambda e: e.value == "upg") is None
+
+
+def test_single_name_word_matches_only_when_capitalized():
+    source_text = "Energy Area Manager John Business. Our business grows; Mr Business agreed."
+    start = source_text.index("John Business")
+    entity = make_entity("PERSON", "John Business", "[PERSON_1]", [(start, start + 13)])
+    result = find_related_occurrences(source_text, [entity])
+    surname = find(result, lambda e: e.value == "Business")
+    assert surname is not None and len(surname.positions) == 1
+    assert find(result, lambda e: e.value == "business") is None

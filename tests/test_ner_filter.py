@@ -385,3 +385,74 @@ def test_ua_keeps_real_ua_en_person_and_company_names():
 
     company_result = filter_generic_ner_matches([match("COMPANY", "BJSS Limited")])
     assert len(company_result) == 1
+
+
+# Ложные находки из договора пользователя (2026-11): роли, общие слова, «адреса» без адреса.
+def test_drops_roles_and_common_words_from_user_report():
+    dropped: list[tuple[EntityType, str]] = [
+        ("PERSON", "professional advisers"),
+        ("PERSON", "lawyers"),
+        ("PERSON", "auditors"),
+        ("PERSON", "bankers"),
+        ("PERSON", "Upstream Providers"),
+        ("PERSON", "indemnified Party"),
+        ("PERSON", "sender"),
+        ("PERSON", "successor"),
+        ("PERSON", "Senior executives of the Parties"),
+        ("PERSON", "legal and financial advisers"),
+        ("PERSON", "insurers"),
+        ("PERSON", "minors"),
+        ("PERSON", "Party"),
+        ("PERSON", "Parties"),
+        ("PERSON", "a professional"),
+        ("PERSON", "CLIENT LEGAL NAME"),
+        ("PERSON", "Chief Executive Officer"),
+        ("PERSON", "The Customer / Замовник"),
+        ("PERSON", "посетителя"),
+        ("PERSON", "контактное лицо"),
+        ("PERSON", "Получившая Информацию Сторона"),
+        ("PERSON", "второй Стороне"),
+        ("COMPANY", "it"),
+        ("COMPANY", "limited liability company"),
+        ("COMPANY", "affiliates or subsidiaries"),
+        ("COMPANY", "a Nevada corporation"),
+        ("COMPANY", "Delaware limited liability company"),
+        ("ADDRESS", "wallet address"),
+        ("ADDRESS", "Notice addresses"),
+        ("ADDRESS", "addresses listed in the Agreement"),
+        ("ADDRESS", "territory"),
+        ("ADDRESS", "адресов"),
+        ("ADDRESS", "адрес нахождения Помещений"),
+        ("ADDRESS", "ИНН"),
+        ("REG_NUMBER", "number"),
+        ("REG_NUMBER", "part number"),
+        ("REG_NUMBER", "Telecopy No."),
+        ("REG_NUMBER", "Licensee"),
+    ]
+    result = filter_generic_ner_matches([match(t, v) for t, v in dropped])
+    assert [m.value for m in result] == []
+
+
+def test_keeps_real_data_next_to_the_new_rules():
+    kept = [
+        match("PERSON", "John Smith"),
+        match("PERSON", "Jim Minor"),
+        match("PERSON", "Timothy S Orr"),
+        match("PERSON", "Иван Петров"),
+        match("COMPANY", "Delaware Trust Company"),
+        match("COMPANY", "Nevada Power Company"),
+        match("COMPANY", "Creative Agency"),
+        RawMatch("COMPANY", "plan b", 0, 6, 0.97),
+        match("ADDRESS", "Nicosia, Cyprus"),
+        match("ADDRESS", "Dallas, Texas"),
+        match("ADDRESS", "County of San Diego, California"),
+        match("REG_NUMBER", "MM12/2023"),
+    ]
+    result = filter_generic_ner_matches(kept)
+    assert [m.value for m in result] == [m.value for m in kept]
+
+
+def test_unsure_lowercase_company_is_dropped_but_sure_one_is_kept():
+    unsure = RawMatch("COMPANY", "courier service", 0, 15, 0.28)
+    sure = RawMatch("COMPANY", "acme widgets", 0, 12, 0.9)
+    assert filter_generic_ner_matches([unsure, sure]) == [sure]

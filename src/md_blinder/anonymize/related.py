@@ -18,6 +18,7 @@ import regex
 
 from .apply import next_placeholder_number
 from .image_safety import mask_images_for_detection
+from .ner_filter import is_generic_word
 from .normalize import normalize_value
 from .types import Entity, EntityType, Position
 
@@ -58,10 +59,14 @@ def _bounded_word(inner: str) -> str:
 class _Form:
     pattern: regex.Pattern
     min_len: int
+    # Совпадение должно содержать заглавную букву: отдельное слово имени или
+    # названия в тексте пишется с заглавной, а строчное «business» или «energy» —
+    # обычное слово, даже если в найденном имени оно было с заглавной.
+    needs_upper: bool = False
 
 
-def _word_form(word: str, min_len: int = 4) -> _Form:
-    return _Form(regex.compile(_bounded_word(_escape(word)), _FLAGS_IU), min_len)
+def _word_form(word: str, min_len: int = 4, needs_upper: bool = False) -> _Form:
+    return _Form(regex.compile(_bounded_word(_escape(word)), _FLAGS_IU), min_len, needs_upper)
 
 
 def _split_words(value: str) -> list[str]:
@@ -119,13 +124,25 @@ def _person_forms(value: str) -> list[_Form]:
     # затем одиночные слова, чтобы «И.И. Иванов» занял спан раньше, чем голое
     # «Иванов» перехватит подстроку внутри него.
     forms.extend(_initials_forms(words))
-    for w in names:
+    # По одному слову ищутся только части имени: слово с заглавной буквы и не
+    # родовое. Иначе из ошибочной находки «Senior executives of the Parties»
+    # получались кандидаты «Parties» и «executives» по всему тексту.
+    parts = [w for w in names if _is_name_part(w)]
+    for w in parts:
         if _CYR_RE.search(w):
-            forms.extend(_word_form(d) for d in _cyrillic_declensions(w))
-    for w in names:
+            forms.extend(_word_form(d, needs_upper=True) for d in _cyrillic_declensions(w))
+    for w in parts:
         if len(w) >= 4:
-            forms.append(_word_form(w))
+            forms.append(_word_form(w, needs_upper=True))
     return forms
+
+
+def _has_upper(text: str) -> bool:
+    return any(ch.isupper() for ch in text)
+
+
+def _is_name_part(word: str) -> bool:
+    return _has_upper(word) and not is_generic_word(word)
 
 
 def company_core_words(value: str) -> list[str]:
@@ -142,11 +159,13 @@ def _company_forms(value: str) -> list[_Form]:
         if phrase.lower() != value.lower():
             inner = rf"{_WS}+".join(_escape(w) for w in core)
             forms.append(_Form(regex.compile(_bounded_word(inner), _FLAGS_IU), 4))
-        acronym = "".join(w[0] for w in core)
+        # Аббревиатура ищется только заглавными буквами: без учета регистра
+        # «Upstream Providers» → «UP» ловила предлог «up», «Alpha Notes» → «an».
+        acronym = "".join(w[0] for w in core).upper()
         if len(acronym) >= 2:
-            forms.append(_Form(regex.compile(_bounded_word(_escape(acronym)), _FLAGS_IU), 2))
-    if core and len(core[0]) >= 4:
-        forms.append(_word_form(core[0]))
+            forms.append(_Form(regex.compile(_bounded_word(_escape(acronym)), regex.V0), 2))
+    if core and len(core[0]) >= 4 and not is_generic_word(core[0]):
+        forms.append(_word_form(core[0], needs_upper=_has_upper(core[0])))
     return forms
 
 
@@ -223,7 +242,7 @@ def find_related_occurrences(source_text: str, entities: list[Entity]) -> list[E
                 start = m.start()
                 end = m.end()
                 pos = end
-                if len(text) < form.min_len:
+                if len(text) < form.min_len or (form.needs_upper and not _has_upper(text)):
                     continue
                 if any(start < c_end and c_start < end for c_start, c_end in claimed):
                     continue

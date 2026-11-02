@@ -2,7 +2,7 @@
 
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel
+from PySide6.QtWidgets import QLabel, QPushButton
 
 from md_blinder.jobs import SKIP
 from md_blinder.storage.history import HistoryStore
@@ -385,6 +385,38 @@ def test_files_opened_together_share_labels_across_the_package(qtbot, window, tm
     assert "# Документ 1\n\nПишите на [EMAIL_1] или [EMAIL_2]." in text
     assert "# Документ 2\n\nКопия [EMAIL_2] и [EMAIL_3]." in text
     assert "example.com" not in text and ".docx" not in text
+
+
+def _assert_menu_items_readable(menu):
+    items = [b for b in menu.findChildren(QPushButton) if b.objectName() == "menuItem"]
+    assert items
+    for item in items:
+        for label in item.findChildren(QLabel):
+            need = label.heightForWidth(label.width()) if label.wordWrap() else label.sizeHint().height()
+            assert label.height() >= need, label.text()
+            assert item.rect().contains(label.geometry()), label.text()
+
+
+def test_popup_menus_show_item_titles(qtbot, window, tmp_path):
+    """Пункты меню не обрезаются по высоте пустой кнопки: видны заголовки и подсказки."""
+    window.resize(1200, 800)
+    window.show()
+    paths = [make_docx(tmp_path / f"doc{i}.docx", para(f"Пишите на a{i}@example.com.")) for i in range(3)]
+    process_all(qtbot, window, paths)
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    window._refresh_history()
+    assert window.history_meta
+    for open_menu, menu in (
+        (window._open_batch_menu, window.page.batch_menu),
+        (window._open_history_menu, window.page.history_menu),
+        (window.page.status._open_menu, window.page.status.menu),
+    ):
+        for _ in range(2):
+            open_menu()
+            qtbot.waitUntil(menu.isVisible)
+            qtbot.wait(1)
+            _assert_menu_items_readable(menu)
+            menu.hide()
 
 
 def test_package_labels_stay_aligned_after_deleting_a_value(qtbot, window, tmp_path, monkeypatch):

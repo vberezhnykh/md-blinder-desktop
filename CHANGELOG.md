@@ -2,6 +2,12 @@
 
 Раздел с номером версии попадает в описание релиза на GitHub. Новую версию выпускает подъем `__version__` в `src/md_blinder/__init__.py`.
 
+## 0.4.6
+
+- Еще меньше лишних находок. Участники рынка связи и платформ («carriers», «aggregators», «Network Operator», «mobile operator», «cloud/platform operators») больше не считаются компаниями.
+- Строчные слова в начале и в конце имени отрезаются: «John Smith, director» дает «John Smith», а описания вроде «claiming Party», «SMS recipient», «Affiliates’ employees», «operators of the Call Center» больше не предлагаются как имена.
+- Ссылки на разделы договора («Section 15», «Clause 3.2», «пункт 5.1») больше не попадают в находки.
+
 ## 0.4.5
 
 - Меньше лишних находок. Роли и общие слова договора больше не считаются именами и компаниями: «lawyers», «auditors», «Upstream Providers», «indemnified Party», «Senior executives of the Parties», «Chief Executive Officer», «посетителя», «контактное лицо», «a Nevada corporation» и подобные. Имя человека, написанное только строчными буквами, программа больше не предлагает.

@@ -299,6 +299,46 @@ def test_drag_handle_changes_span_as_one_command(qtbot, window, tmp_path):
     assert restored.positions == [Position(span.start, span.end)]
 
 
+def test_drag_extends_address_everywhere_past_dismissed_finding(qtbot, window, tmp_path):
+    from md_blinder.anonymize.apply import entity_current_value
+    from md_blinder.anonymize.types import Entity, Position
+
+    open_docx(qtbot, window, tmp_path, para(
+        "Registered office at Quijano Chambers, P.O. Box 3159, Road Town, Tortola. "
+        "Physical address: Quijano Chambers, P.O. Box 3159, Road Town, Tortola."
+    ))
+    text = window.session.text
+    value = "P.O. Box 3159, Road Town"
+    first = text.index(", P.O.")
+    second = text.index(value, first + 10)
+    company = text.index("Quijano")
+    # Адрес найден в первом месте вместе с запятыми; «Quijano Chambers» там же —
+    # отклоненная находка, в тексте ее не видно.
+    address = Entity(id="addr", type="ADDRESS", value=value, placeholder="[ADDRESS_5]",
+                     positions=[Position(first, first + len(value) + 3), Position(second, second + len(value))])
+    dismissed = Entity(id="co", type="COMPANY", value="Quijano Chambers", placeholder="[COMPANY_2]",
+                       positions=[Position(company, company + 16)], anonymize=False, dismissed=True)
+    window.session.update_entities(lambda es: [address, dismissed], "test")
+    editor = window.page.editor
+    span = address.positions[0]
+    rect = editor.range_rects(span.start + 6, span.start + 7)[0]
+    qtbot.mouseClick(editor.viewport(), Qt.MouseButton.LeftButton, pos=rect.center().toPoint())
+    assert editor._active == ("addr", span)
+    handles = dict(editor._handle_points())
+    target = editor.range_rects(company + 2, company + 3)[0]
+    before = window.session.undo_stack.count()
+    qtbot.mousePress(editor.viewport(), Qt.MouseButton.LeftButton, pos=handles["left"].toPoint())
+    qtbot.mouseMove(editor.viewport(), target.center().toPoint())
+    qtbot.mouseRelease(editor.viewport(), Qt.MouseButton.LeftButton, pos=target.center().toPoint())
+    moved = next(e for e in window.session.entities if e.id == "addr")
+    extended = "Quijano Chambers, P.O. Box 3159, Road Town"
+    assert [text[p.start:p.end].rstrip(",") for p in moved.positions] == [extended, extended]
+    # В списке замен значение уже расширенное, отклоненная находка ушла.
+    assert entity_current_value(text, moved).rstrip(",") == extended
+    assert not any(e.id == "co" for e in window.session.entities)
+    assert window.session.undo_stack.count() == before + 1
+
+
 def test_open_external_processes_file_or_waits_for_running_job(qtbot, window, tmp_path, monkeypatch):
     opened = []
     monkeypatch.setattr(window, "process_file", lambda path, force_ocr=False: opened.append(path))

@@ -492,3 +492,18 @@ def test_lowercase_edge_words_are_trimmed_from_a_real_name():
     # Уверенная компания строчными остается: бывают такие названия.
     sure = RawMatch("COMPANY", "plan b", 0, 6, 0.97)
     assert filter_generic_ner_matches([sure]) == [sure]
+
+
+def test_trims_punctuation_on_span_edges():
+    text = "registered office at Quijano Chambers, P.O. Box 3159, Road Town, Tortola"
+    start = text.index(", P.O.")
+    end = text.index("Town,") + 5
+    [m] = filter_generic_ner_matches([RawMatch("ADDRESS", text[start:end], start, end)])
+    assert m.value == "P.O. Box 3159, Road Town"
+    assert text[m.start:m.end] == m.value
+
+
+def test_keeps_inner_and_dot_punctuation():
+    [m] = filter_generic_ner_matches([match("COMPANY", "Acme Holdings Inc.")])
+    assert m.value == "Acme Holdings Inc."
+    assert filter_generic_ner_matches([match("ADDRESS", " , ;")]) == []

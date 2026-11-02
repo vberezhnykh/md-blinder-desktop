@@ -75,6 +75,24 @@ def snap_to_word_boundary(text: str, pos: int) -> int:
     return best
 
 
+def snap_to_word_edge(text: str, pos: int, side: str) -> int:
+    """Привязка края вхождения при перетаскивании ручки: левый край встает только
+    на начало слова, правый только на конец. Так в выделение не попадает пробел
+    снаружи («: Quijano» вместо «Quijano»). При равенстве — меньший индекс; если
+    подходящих границ нет (документ из одних пробелов), обычная привязка."""
+    length = len(text)
+    clamped = max(0, min(pos, length))
+    edges: list[int] = []
+    for i in range(length + 1):
+        before = i > 0 and text[i - 1] not in JS_WHITESPACE
+        after = i < length and text[i] not in JS_WHITESPACE
+        if (after and not before) if side == "left" else (before and not after):
+            edges.append(i)
+    if not edges:
+        return snap_to_word_boundary(text, pos)
+    return min(edges, key=lambda b: (abs(b - clamped), b))
+
+
 def _ru_plural_category(n: float) -> str:
     """CLDR-правила для ru (как Intl.PluralRules('ru-RU').select)."""
     if isinstance(n, float):

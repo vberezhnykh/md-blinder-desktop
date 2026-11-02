@@ -330,6 +330,7 @@ class StatusStrip(QWidget):
     export_md = Signal()
     copy_text = Signal()
     export_csv = Signal()
+    export_pdf = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -384,12 +385,19 @@ class StatusStrip(QWidget):
         layout.addLayout(split)
         self.menu = PopupMenu(self, 340)
         self._export_name = "document.md"
+        self._pdf = False
 
     def _open_menu(self) -> None:
         m = self.menu
         m.clear()
         m.add_item("Копировать текст", self.copy_text.emit, "Обезличенный Markdown в буфер обмена", "copy")
         m.add_item("Экспортировать .md", self.export_md.emit, f"Файл «{self._export_name}»", "download")
+        if self._pdf:
+            m.add_item(
+                "Обезличенный PDF", self.export_pdf.emit,
+                "Страницы картинками: данные закрыты плашками с теми же метками, текстовый слой как в Markdown",
+                "download",
+            )
         m.add_separator()
         m.add_item(
             "Таблица замен (.csv)", self.export_csv.emit,
@@ -397,7 +405,7 @@ class StatusStrip(QWidget):
         )
         m.show_under(self.toggle)
 
-    def update_state(self, unreviewed: int, values: int, places: int, export_name: str) -> None:
+    def update_state(self, unreviewed: int, values: int, places: int, export_name: str, pdf: bool = False) -> None:
         ready = unreviewed == 0
         self.steps.set_states(["done", "done" if ready else "active", "active" if ready else "todo"])
         self.pending.setVisible(not ready)
@@ -405,6 +413,7 @@ class StatusStrip(QWidget):
         self.pending.setText(f"Не проверено: {plural(unreviewed, ('кандидат', 'кандидата', 'кандидатов'))}")
         self.summary.setText(replaced_summary(values, places))
         self._export_name = export_name
+        self._pdf = pdf
 
 
 class Notice(QFrame):

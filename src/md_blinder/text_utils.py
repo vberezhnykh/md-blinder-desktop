@@ -75,19 +75,32 @@ def snap_to_word_boundary(text: str, pos: int) -> int:
     return best
 
 
+# Что разделяет слова для ручек, кроме пробелов: разметка Markdown/HTML, которую
+# конвертер оставляет в тексте. «Augli<br>Director» в ячейке таблицы, «|» между
+# ячейками, «\_\_\_/Иванов» в строке подписи. Без этого ручка перескакивала через
+# всю ячейку: пробелов между этими словами нет.
+_EDGE_SEPARATOR_RE = re.compile(
+    "(?:[" + re.escape(JS_WHITESPACE) + r"|/]|<[A-Za-z/][^<>\n]{0,40}>|\\?_)+"
+)
+
+
 def snap_to_word_edge(text: str, pos: int, side: str) -> int:
     """Привязка края вхождения при перетаскивании ручки: левый край встает только
-    на начало слова, правый только на конец. Так в выделение не попадает пробел
-    снаружи («: Quijano» вместо «Quijano»). При равенстве — меньший индекс; если
+    на начало слова, правый только на конец. Слова разделяют пробелы и разметка
+    (<br>, «|», «\\_», «/»), поэтому в выделение не попадает ни пробел снаружи
+    («: Quijano»), ни соседнее слово за <br>. При равенстве — меньший индекс; если
     подходящих границ нет (документ из одних пробелов), обычная привязка."""
     length = len(text)
     clamped = max(0, min(pos, length))
     edges: list[int] = []
-    for i in range(length + 1):
-        before = i > 0 and text[i - 1] not in JS_WHITESPACE
-        after = i < length and text[i] not in JS_WHITESPACE
-        if (after and not before) if side == "left" else (before and not after):
-            edges.append(i)
+    previous_end = 0
+    for m in _EDGE_SEPARATOR_RE.finditer(text):
+        if m.start() > previous_end:
+            # Между разделителями слово [previous_end, m.start()).
+            edges.append(previous_end if side == "left" else m.start())
+        previous_end = m.end()
+    if previous_end < length:
+        edges.append(previous_end if side == "left" else length)
     if not edges:
         return snap_to_word_boundary(text, pos)
     return min(edges, key=lambda b: (abs(b - clamped), b))

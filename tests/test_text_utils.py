@@ -123,3 +123,16 @@ def test_snap_edge_right_stops_at_word_end():
 def test_snap_edge_without_words():
     assert snap_to_word_edge("   ", 2, "left") == snap_to_word_boundary("   ", 2)
     assert snap_to_word_edge("", 0, "right") == 0
+
+
+def test_snap_edge_stops_at_markup_inside_table_cell():
+    # Между «Augli» и «Director» нет пробела, только <br>: правая ручка встает
+    # после «Augli», а не в конце ячейки.
+    text = "| \\_\\_\\_/Xodillayev Saydullokhon Nurillo Augli<br>Director | x |"
+    augli_end = text.index("<br>")
+    assert snap_to_word_edge(text, augli_end + 1, "right") == augli_end
+    assert snap_to_word_edge(text, text.index("Director") + 2, "left") == text.index("Director")
+    # Левая ручка встает на начало фамилии, а не на подчеркивания строки подписи.
+    assert snap_to_word_edge(text, text.index("/X"), "left") == text.index("Xodillayev")
+    # Точка остается частью слова: «Inc.» целиком.
+    assert snap_to_word_edge("Acme Inc. signs", 9, "right") == 9

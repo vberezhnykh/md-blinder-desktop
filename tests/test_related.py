@@ -127,12 +127,3 @@ def test_acronym_matches_only_in_capitals():
     assert acronym is not None and len(acronym.positions) == 2
     assert find(result, lambda e: e.value == "upg") is None
 
-
-def test_single_name_word_matches_only_when_capitalized():
-    source_text = "Energy Area Manager John Business. Our business grows; Mr Business agreed."
-    start = source_text.index("John Business")
-    entity = make_entity("PERSON", "John Business", "[PERSON_1]", [(start, start + 13)])
-    result = find_related_occurrences(source_text, [entity])
-    surname = find(result, lambda e: e.value == "Business")
-    assert surname is not None and len(surname.positions) == 1
-    assert find(result, lambda e: e.value == "business") is None

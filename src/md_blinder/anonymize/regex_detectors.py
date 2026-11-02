@@ -545,6 +545,14 @@ _REG_CONTEXT_RES = (
         "gi",
     ),
     JsRegex(r"\bVAT(?:\s*(?:reg(?:istration)?|no|number|id))?\b[\s:#.]*([A-Z]{0,2}[\d][\d ]{6,14}\d)", "gi"),
+    # «registration number: 202522193W», «UEN 201912345K», «company number 12345678»:
+    # подпись без слова «company» перед ней. Номер обязан содержать цифру, иначе
+    # «registration number of the Company» дало бы «Company».
+    JsRegex(
+        r"\b(?:(?:business\s+)?registration\s+(?:no|number|code)|company\s+number|UEN)\b"
+        r"[\s:#.]*((?=[A-Z./-]*\d)[A-Z0-9][A-Z0-9./-]{4,18}[A-Z0-9])",
+        "gi",
+    ),
 )
 _EIN_RE = JsRegex(r"\b\d{2}-\d{7}\b")
 # CNPJ (бразильский рег. номер юрлица) ##.###.###/####-##. С июля 2026 первые 12

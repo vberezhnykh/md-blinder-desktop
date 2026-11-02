@@ -161,3 +161,12 @@ def test_does_not_merge_address_fragments_separated_by_a_gap_longer_than_30_char
 
     assert len(result) == 2
     assert sorted(m.value for m in result) == sorted([frag1, frag2])
+
+
+def test_does_not_merge_across_a_plain_phrase():
+    # Номер компании, который модель приняла за кусок адреса, не склеивается с
+    # адресом через «, having its registered office at ».
+    text = "registration number: 202522193W, having its registered office at #02-27, 135 MIDDLE ROAD, 188975, Singapore"
+    parts = [_addr(text, f)[0] for f in ("202522193W", "#02-27", "135 MIDDLE ROAD", "188975")]
+    result = stitch_address_runs(parts, text)
+    assert [m.value for m in result] == ["202522193W", "#02-27, 135 MIDDLE ROAD, 188975"]

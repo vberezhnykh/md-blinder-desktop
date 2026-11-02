@@ -636,3 +636,17 @@ def test_excludes_the_removal_notice_from_structural_detection() -> None:
 ])
 def test_javascript_regex_semantics(text: str, expected: list[tuple[str, str, int, int]]) -> None:
     assert [(m.type, m.value, m.start, m.end) for m in detect_structural(text)] == expected
+
+
+@pytest.mark.parametrize("text,number", [
+    ("with the registration number: 202522193W, having", "202522193W"),
+    ("UEN 201912345K", "201912345K"),
+    ("company number 12345678", "12345678"),
+    ("Business Registration No. 53-1234567", "53-1234567"),
+])
+def test_detects_a_registration_number_after_its_label(text: str, number: str) -> None:
+    assert number in values(text, "REG_NUMBER")
+
+
+def test_registration_label_needs_a_number_with_digits() -> None:
+    assert values("the registration number of the Company", "REG_NUMBER") == []

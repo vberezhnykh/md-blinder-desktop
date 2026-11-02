@@ -78,6 +78,9 @@ ROLE_NOUNS: frozenset[str] = frozenset({
     'bankrupt', 'vp', 'svp', 'evp', 'firm', 'partnership', 'association',
     'trust', 'subsidiary', 'organization', 'organisation', 'institution',
     'courier', 'contact', 'name', 'exhibit', 'body', 'mail', 'royalty',
+    # участники рынка связи и платформ (договор об SMS-рассылках, 2026-11)
+    'carrier', 'aggregator', 'coordinator', 'reseller', 'integrator', 'network',
+    'platform',
     # местоимения: «it», «she» модель изредка помечает как компанию или человека
     'it', 'he', 'she', 'they', 'them', 'we', 'us', 'you', 'him', 'itself',
     'himself', 'herself', 'themselves',
@@ -115,6 +118,9 @@ GENERIC_MODIFIERS: frozenset[str] = frozenset({
     'reassigned', 'overnight', 'recognized', 'recognised', 'accounting',
     'unincorporated', 'limited', 'liability', 'voluntary', 'bankruptcy', 'fact',
     'target', 'application', 'u', 's',
+    'cloud', 'mobile', 'digital', 'asset', 'sms', 'mms', 'telecom',
+    'telecommunications', 'wireless', 'internet', 'online', 'messaging',
+    'claiming', 'provided',
 })
 
 CONNECTORS: frozenset[str] = frozenset({'and', 'or', 'of', 'to', 'for', 'in', 'on', 'at', 'by', 'with'})
@@ -439,8 +445,55 @@ def _split_words(value: str) -> list[str]:
     return [w.lower() for w in _split_words_cased(value)]
 
 
+_POSSESSIVE_RE = re.compile(r"['’`]s?\Z", re.I)
+
+
 def _split_words_cased(value: str) -> list[str]:
-    return [w for w in _SPLIT_RE.split(value.strip(_JS_TRIM_CHARS)) if w]
+    """Слова спана без притяжательного окончания: «Affiliates’» → «Affiliates»."""
+    words = (_POSSESSIVE_RE.sub("", w) for w in _SPLIT_RE.split(value.strip(_JS_TRIM_CHARS)))
+    return [w for w in words if w]
+
+
+# Частицы фамилий, которые пишутся со строчной: «Ludwig van Beethoven», «da Silva».
+NAME_PARTICLES: frozenset[str] = frozenset({
+    'van', 'von', 'der', 'den', 'de', 'del', 'della', 'di', 'da', 'das', 'dos',
+    'du', 'la', 'le', 'ten', 'ter', 'bin', 'ibn', 'al', 'el', 'y', 'e', 'zu',
+})
+
+# Ссылка на раздел договора: «Section 15», «clause 3.2», «Schedule A», «пункт 5.1».
+CROSS_REFERENCE = re.compile(
+    r"^(?:section|sections|clause|clauses|article|articles|schedule|annex|appendix|exhibit|"
+    r"paragraph|para|item|part|chapter|пункт|пункта|пункте|п|раздел|раздела|статья|статьи|"
+    r"приложение|приложения|розділ|стаття|додаток)\.?\s*(?:№\s*)?[0-9A-Za-zА-Яа-я]{1,3}(?:[.)(][0-9a-z]{1,3})*\.?\)?$",
+    re.I,
+)
+
+
+_WORD_RE = re.compile(rf"[^{_WS_CHARS}\-/&,.]+")
+
+
+def _is_lower_word(w: str) -> bool:
+    w = _POSSESSIVE_RE.sub("", w)
+    return any(ch.isalpha() for ch in w) and not _has_upper(w) and w.lower() not in NAME_PARTICLES
+
+
+def _trim_lowercase_edges(m: RawMatch) -> "RawMatch | None":
+    """Отрезает строчные слова (кроме частиц фамилий) с обоих краев спана.
+    None — заглавных слов нет совсем; тот же объект — резать нечего."""
+    tokens = [t for t in _WORD_RE.finditer(m.value) if any(ch.isalpha() for ch in t.group(0))]
+    keep = [t for t in tokens if not _is_lower_word(t.group(0))]
+    if not keep:
+        return None
+    first, last = keep[0], keep[-1]
+    if first is tokens[0] and last is tokens[-1]:
+        return m
+    # «operators of the Call Center», «сотрудников подрядных организаций …»: перед
+    # заглавной частью стоит строчная фраза со связкой — описание, а не имя.
+    lead = [t.group(0).lower() for t in tokens[: tokens.index(first)]]
+    if any(w in CONNECTORS or w in RU_CONNECTORS for w in lead):
+        return None
+    start, end = first.start(), last.end()
+    return replace(m, value=m.value[start:end], start=m.start + start, end=m.start + end)
 
 
 def _has_upper(value: str) -> bool:
@@ -517,11 +570,32 @@ def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
         if not words:
             continue
 
+        if CROSS_REFERENCE.match(m.value.strip(_JS_TRIM_CHARS)):
+            continue
+
         # Имя человека пишется с заглавной буквы. Спан PERSON совсем без заглавных
         # («lawyers», «sender», «minors», «посетителя», «контактное лицо») — роль
         # или общее слово, а не имя.
         if m.type == "PERSON" and not _has_upper(m.value):
             continue
+
+        # Имя и название начинаются и заканчиваются словом с заглавной. Строчное
+        # слово с краю («claiming Party», «SMS recipient», «Digital Asset network»,
+        # «Affiliates’ employees») — описание. Для человека это верно всегда, для
+        # компании только на неуверенных находках: бывают названия строчными.
+        # Строчные слова с краев отрезаются («John Smith, director» → «John Smith»);
+        # если в остатке только родовые слова или ничего, находка отбрасывается.
+        if m.type == "PERSON" or (
+            m.type == "COMPANY" and m.score is not None and m.score < NER_CONFIRM_THRESHOLD
+        ):
+            trimmed = _trim_lowercase_edges(m)
+            if trimmed is None:
+                continue
+            if trimmed is not m:
+                rest = _split_words(trimmed.value)
+                if all(_en_in(w, GENERIC_WORDS) or _ru_is_generic_exact(w) for w in rest):
+                    continue
+                m = trimmed
 
         if _DIGIT_RE.search(m.value):
             out.append(m)

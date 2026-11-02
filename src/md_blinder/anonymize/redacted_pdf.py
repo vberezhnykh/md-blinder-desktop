@@ -67,6 +67,7 @@ class RedactedPdfError(Exception):
 class Word:
     text: str
     box: Box  # область плашки в пикселях кадра страницы, с запасом
+    core: Optional[Box] = None  # сами буквы слова: от верха прописных до низа выносных
 
 
 @dataclass
@@ -94,9 +95,10 @@ class Redaction:
     line: int
     first: int  # индексы слов в строке, включительно
     last: int
-    label: str  # плейсхолдер; пустой у продолжения значения на следующей строке
+    label: str  # плейсхолдер: на картинке подписана каждая часть значения
     prefix: str = ""  # часть первого слова до значения, остается в текстовом слое
     suffix: str = ""
+    continued: bool = False  # продолжение значения: в текстовом слое метка уже есть
 
 
 @dataclass
@@ -311,7 +313,7 @@ def _claim(pieces, owners, flat, claimed, placeholder, result) -> None:
             # Часть слова до и после значения остается в текстовом слое, как в Markdown.
             prefix = line.words[first].text[: spans[first][0]] if number == 0 else ""
             suffix = line.words[last].text[spans[last][1] + 1:] if number == len(pieces) - 1 else ""
-            result[page].append(Redaction(line_index, first, last, "" if labeled else placeholder, prefix, suffix))
+            result[page].append(Redaction(line_index, first, last, placeholder, prefix, suffix, continued=labeled))
             labeled = True
             claimed.update((index, w) for w in run)
 
@@ -335,51 +337,50 @@ def _ink(crop: np.ndarray) -> np.ndarray:
     return crop < min(threshold, 200)
 
 
-def _split_words(gray: np.ndarray, box: Sequence[float], text: str) -> list[Word]:
-    """Слова строки скана по просветам между чернилами.
+_NARROW = set("ijlrtfI1.,:;'!|()[]/-\"")
+_WIDE = set("MWmw@%")
 
-    Границы слов сначала оцениваются по доле символов строки, затем каждая
-    притягивается к ближайшему просвету подходящей ширины (динамическое
-    программирование, порядок слов сохраняется). Если просвета рядом нет, граница
-    остается оценкой, а соседние плашки перекрываются с запасом: лучше закрыть
-    лишнюю букву соседа, чем оставить край значения."""
-    words = text.split()
-    height, width = gray.shape[:2]
-    x0, y0, x1, y1 = (int(round(v)) for v in box)
-    x0, x1 = max(0, x0), min(width, max(x0 + 1, x1))
-    y0, y1 = max(0, y0), min(height, max(y0 + 1, y1))
-    h = max(1.0, float(y1 - y0))
-    pad_y = 0.12 * h
-    top, bottom = max(0.0, y0 - pad_y), min(float(height), y1 + pad_y)
-    if not words:
-        return []
-    ink = _ink(gray[y0:y1, x0:x1])
-    columns = ink.sum(axis=0) >= max(1, round(0.04 * h)) if ink.size else np.zeros(0, bool)
-    if not columns.any():
-        left, right = float(x0), float(x1)
-        gaps: list[tuple[float, float]] = []
-    else:
-        inked = np.flatnonzero(columns)
-        left, right = float(x0 + inked[0]), float(x0 + inked[-1] + 1)
-        gaps = [(float(x0 + a), float(x0 + b)) for a, b in _runs(~columns)
-                if a > inked[0] and b <= inked[-1] and b - a >= 0.12 * h]
-    edge = 0.2 * h
-    if len(words) == 1:
-        return [Word(words[0], (max(0.0, left - edge), top, min(float(width), right + edge), bottom))]
 
-    # Ожидаемые границы: середины пробелов в тексте строки.
-    joined = " ".join(words)
-    spaces = [i for i, ch in enumerate(joined) if ch == " "]
-    span = max(1.0, right - left)
-    expected = [left + span * (i + 0.5) / len(joined) for i in spaces]
+def _char_width(ch: str) -> float:
+    """Примерная ширина символа в долях средней: для оценки, где кончается слово."""
+    if ch == " ":
+        return 0.9
+    if ch in _NARROW:
+        return 0.5
+    if ch in _WIDE:
+        return 1.5
+    if ch.isupper():
+        return 1.3
+    return 1.0
 
+
+def _word_gaps_by_width(gaps: Sequence[tuple[float, float]], n: int, h: float) -> Optional[list[Optional[int]]]:
+    """Пробелы между словами шире просветов между буквами. Если ширины просветов
+    делятся на две группы и широких ровно столько, сколько пробелов в тексте, это они.
+    Так надежнее всего на тексте с выравниванием по ширине, где пробелы разные."""
+    if n == 0 or len(gaps) < n:
+        return None
+    widths = sorted(b - a for a, b in gaps)
+    for i in range(len(widths) - 1):
+        low, high = widths[i], widths[i + 1]
+        if high >= 1.6 * low and high >= 0.2 * h:
+            wide = [j for j, (a, b) in enumerate(gaps) if b - a >= high]
+            if len(wide) == n:
+                return list(wide)
+    return None
+
+
+def _word_gaps_by_position(gaps: Sequence[tuple[float, float]], expected: Sequence[float], h: float,
+                           span: float) -> list[Optional[int]]:
+    """Каждая граница притягивается к просвету рядом с оценкой (динамическое
+    программирование, порядок сохраняется); широкие просветы предпочтительнее."""
     n, m = len(expected), len(gaps)
     virtual_cost = 1.2
     wide = [g[1] - g[0] >= 0.3 * h for g in gaps]
 
     def gap_cost(k: int, j: int) -> float:
         a, b = gaps[j]
-        return abs((a + b) / 2 - expected[k]) / (0.6 * h + 0.03 * span) - min(1.0, (b - a) / (0.5 * h)) * 0.5
+        return abs((a + b) / 2 - expected[k]) / (0.6 * h + 0.03 * span) - min(1.0, (b - a) / (0.4 * h))
 
     inf = float("inf")
     # best[k][j + 1]: граница k назначена, последний занятый просвет j (-1 — ни одного).
@@ -401,14 +402,68 @@ def _split_words(gray: np.ndarray, box: Sequence[float], text: str) -> list[Word
                 if total < best[k + 1][nj + 1]:
                     best[k + 1][nj + 1] = total
                     back[k + 1][nj + 1] = (j, nj)
-                skipped += 0.4 if wide[nj] else 0.0
-    final = [best[n][j + 1] + sum(0.4 for g in range(j + 1, m) if wide[g]) for j in range(-1, m)]
+                skipped += 0.6 if wide[nj] else 0.0
+    final = [best[n][j + 1] + sum(0.6 for g in range(j + 1, m) if wide[g]) for j in range(-1, m)]
     j = int(np.argmin(final)) - 1
     chosen: list[Optional[int]] = [None] * n
     for k in range(n, 0, -1):
         prev, gap = back[k][j + 1]
         chosen[k - 1] = gap
         j = prev
+    return chosen
+
+
+def _split_words(gray: np.ndarray, box: Sequence[float], text: str) -> list[Word]:
+    """Слова строки скана по просветам между чернилами.
+
+    Границы слов сначала оцениваются по доле символов строки, затем каждая
+    притягивается к ближайшему просвету подходящей ширины (динамическое
+    программирование, порядок слов сохраняется). Если просвета рядом нет, граница
+    остается оценкой, а соседние плашки перекрываются с запасом: лучше закрыть
+    лишнюю букву соседа, чем оставить край значения."""
+    words = text.split()
+    height, width = gray.shape[:2]
+    x0, y0, x1, y1 = (int(round(v)) for v in box)
+    x0, x1 = max(0, x0), min(width, max(x0 + 1, x1))
+    y0, y1 = max(0, y0), min(height, max(y0 + 1, y1))
+    h = max(1.0, float(y1 - y0))
+    if not words:
+        return []
+    ink = _ink(gray[y0:y1, x0:x1])
+    # Высота строки по чернилам: рамка Indra бывает выше букв.
+    rows = np.flatnonzero(ink.sum(axis=1) >= max(1, round(0.004 * ink.shape[1]))) if ink.size else []
+    core_top, core_bottom = (float(y0 + rows[0]), float(y0 + rows[-1] + 1)) if len(rows) else (float(y0), float(y1))
+    pad_y = 0.15 * (core_bottom - core_top)
+    top, bottom = max(0.0, core_top - pad_y), min(float(height), core_bottom + pad_y)
+    columns = ink.sum(axis=0) >= max(1, round(0.04 * h)) if ink.size else np.zeros(0, bool)
+    if not columns.any():
+        left, right = float(x0), float(x1)
+        gaps: list[tuple[float, float]] = []
+    else:
+        inked = np.flatnonzero(columns)
+        left, right = float(x0 + inked[0]), float(x0 + inked[-1] + 1)
+        gaps = [(float(x0 + a), float(x0 + b)) for a, b in _runs(~columns)
+                if a > inked[0] and b <= inked[-1] and b - a >= 0.12 * h]
+    edge = 0.2 * h
+    if len(words) == 1:
+        return [Word(words[0], (max(0.0, left - edge), top, min(float(width), right + edge), bottom),
+                     (left, core_top, right, core_bottom))]
+
+    # Ожидаемые границы: середины пробелов, с учетом ширины букв.
+    joined = " ".join(words)
+    weights = [_char_width(ch) for ch in joined]
+    total = sum(weights)
+    span = max(1.0, right - left)
+    expected: list[float] = []
+    run = 0.0
+    for ch, wgt in zip(joined, weights):
+        if ch == " ":
+            expected.append(left + span * (run + wgt / 2) / total)
+        run += wgt
+    n = len(expected)
+    chosen = _word_gaps_by_width(gaps, n, h)
+    if chosen is None:
+        chosen = _word_gaps_by_position(gaps, expected, h, span)
 
     # Края слов: середина просвета или оценка с перекрытием.
     cuts: list[tuple[float, float]] = []  # (правый край слова k, левый край слова k + 1)
@@ -423,7 +478,7 @@ def _split_words(gray: np.ndarray, box: Sequence[float], text: str) -> list[Word
         a = left - edge if k == 0 else cuts[k - 1][1]
         b = right + edge if k == n else cuts[k][0]
         a, b = max(0.0, a), min(float(width), b)
-        result.append(Word(word, (a, top, max(a + 1, b), bottom)))
+        result.append(Word(word, (a, top, max(a + 1, b), bottom), (a, core_top, max(a + 1, b), core_bottom)))
     return result
 
 
@@ -491,6 +546,7 @@ def ocr_frame(page: pymupdf.Page, engine) -> PageFrame:
     engine(render_gray(page, DPI))
     gray, k, angle = engine.frame
     lines = [PageLine(_split_words(gray, box, text), tuple(box)) for box, text in engine.frame_lines if text.split()]
+    _fit_to_lines(lines)
     return PageFrame(lines, [tuple(b) for b in engine.frame_pictures], (k, angle, gray.shape[:2]))
 
 
@@ -503,29 +559,89 @@ def frame_image(page: pymupdf.Page, frame: PageFrame) -> np.ndarray:
     return _turn_rgb(rgb, shape, k, angle)
 
 
+def _fit_to_lines(lines: Sequence[PageLine]) -> None:
+    """Плашки не заходят на соседние строки: верх и низ плашки ограничены серединой
+    между буквами этой строки и строки выше или ниже, если они перекрываются по
+    горизонтали. Плашка с запасом по высоте иначе закрывала половину соседней строки."""
+    cores: list[Optional[Box]] = []
+    for line in lines:
+        boxes = [w.core for w in line.words if w.core]
+        cores.append(_union(boxes) if boxes else None)
+    for index, line in enumerate(lines):
+        core = cores[index]
+        if core is None:
+            continue
+        h = core[3] - core[1]
+        top, bottom = core[1] - 0.3 * h, core[3] + 0.3 * h
+        for other, near in enumerate(cores):
+            if other == index or near is None or min(core[2], near[2]) - max(core[0], near[0]) <= 0:
+                continue
+            if (near[1] + near[3]) / 2 < (core[1] + core[3]) / 2:
+                top = max(top, (near[3] + core[1]) / 2)
+            else:
+                bottom = min(bottom, (near[1] + core[3]) / 2)
+        for word in line.words:
+            x0, y0, x1, y1 = word.box
+            word.box = (x0, max(y0, top), x1, max(max(y0, top) + 1, min(y1, bottom)))
+
+
+def _text_words(page: pymupdf.Page) -> list[list[tuple[str, pymupdf.Rect]]]:
+    """Слова строк текстового слоя: текст и рамка самих букв в координатах страницы.
+
+    Рамки символов MuPDF берутся по метрикам шрифта и у многих шрифтов выше
+    межстрочного интервала, поэтому высота считается от базовой линии по кеглю:
+    от верха прописных до низа выносных."""
+    lines: list[list[tuple[str, pymupdf.Rect]]] = []
+    for block in page.get_text("rawdict", flags=pymupdf.TEXTFLAGS_TEXT & ~pymupdf.TEXT_PRESERVE_LIGATURES)["blocks"]:
+        for line in block.get("lines", []):
+            horizontal = abs(line["dir"][1]) < 1e-3
+            words: list[tuple[str, pymupdf.Rect]] = []
+            text, rect = "", None
+            for span in line["spans"]:
+                size = float(span["size"])
+                for char in span["chars"]:
+                    ch = char["c"]
+                    if ch.isspace():
+                        if text:
+                            words.append((text, rect))
+                        text, rect = "", None
+                        continue
+                    box = pymupdf.Rect(char["bbox"])
+                    if horizontal:
+                        baseline = char["origin"][1]
+                        box = pymupdf.Rect(box.x0, baseline - 0.78 * size, box.x1, baseline + 0.24 * size)
+                    text += ch
+                    rect = box if rect is None else rect | box
+            if text:
+                words.append((text, rect))
+            if words:
+                lines.append(words)
+    return lines
+
+
 def text_frame(page: pymupdf.Page) -> PageFrame:
     """Страница с текстовым слоем: слова MuPDF в пикселях отрисовки."""
     to_pixels = page.rotation_matrix * pymupdf.Matrix(SCALE, SCALE)
     width, height = page.rect.width * SCALE, page.rect.height * SCALE
-    grouped: dict[tuple[int, int], list[tuple[pymupdf.Rect, str]]] = {}
-    for x0, y0, x1, y1, text, block, line, _ in page.get_text("words", sort=False):
-        rect = pymupdf.Rect(x0, y0, x1, y1) * to_pixels
-        grouped.setdefault((block, line), []).append((rect, text))
     lines: list[PageLine] = []
-    for items in grouped.values():
-        items.sort(key=lambda item: item[0].x0)
+    for raw in _text_words(page):
+        items = sorted(((rect * to_pixels, text) for text, rect in raw), key=lambda item: item[0].x0)
         h = max(1.0, max(r.height for r, _ in items))
-        pad = 0.12 * h
+        pad = 0.15 * h
         words: list[Word] = []
         for index, (rect, text) in enumerate(items):
             a = rect.x0 - 0.2 * h if index == 0 else (items[index - 1][0].x1 + rect.x0) / 2
             b = rect.x1 + 0.2 * h if index == len(items) - 1 else (rect.x1 + items[index + 1][0].x0) / 2
-            words.append(Word(text, (max(0.0, min(a, rect.x0)), max(0.0, rect.y0 - pad),
-                                     min(width, max(b, rect.x1)), min(height, rect.y1 + pad))))
+            words.append(Word(
+                text,
+                (max(0.0, min(a, rect.x0)), max(0.0, rect.y0 - pad), min(width, max(b, rect.x1)), min(height, rect.y1 + pad)),
+                (rect.x0, rect.y0, rect.x1, rect.y1),
+            ))
         box = pymupdf.Rect(items[0][0])
         for rect, _ in items[1:]:
             box |= rect
         lines.append(PageLine(words, (box.x0, box.y0, box.x1, box.y1)))
+    _fit_to_lines(lines)
     area = page.rect.width * page.rect.height
     centers = [((w.box[0] + w.box[2]) / 2, (w.box[1] + w.box[3]) / 2) for ln in lines for w in ln.words]
     pictures: list[Box] = []
@@ -561,17 +677,25 @@ def _inside(box: Box, area: Box) -> bool:
     return area[0] <= cx <= area[2] and area[1] <= cy <= area[3]
 
 
-def _fit_label(page: pymupdf.Page, font: pymupdf.Font, rect: pymupdf.Rect, label: str) -> None:
-    """Плейсхолдер по центру плашки; не помещается — сжимается по ширине."""
-    size = rect.height * 0.62
+def _label_size(frame: PageFrame) -> float:
+    """Один кегль меток на странице: чуть меньше высоты букв обычной строки."""
+    heights = sorted(w.core[3] - w.core[1] for line in frame.lines for w in line.words if w.core)
+    if not heights:
+        return 9.0
+    return max(5.0, 0.72 * heights[len(heights) // 2] / SCALE)
+
+
+def _fit_label(page: pymupdf.Page, font: pymupdf.Font, rect: pymupdf.Rect, label: str, size: float) -> None:
+    """Метка по центру плашки кеглем страницы. Не помещается по ширине — сначала
+    сжимается до 65%, потом уменьшается; выше плашки не бывает."""
+    size = min(size, rect.height * 0.8)
+    room = max(1.0, rect.width - 2.0)
     length = font.text_length(label, fontsize=size)
-    room = rect.width * 0.94
     sx = min(1.0, room / length) if length else 1.0
-    if sx < 0.6:
-        # Узкая плашка: шрифт меньше, но не мельче 40% высоты, остальное — сжатием.
-        size = max(rect.height * 0.4, size * sx / 0.6)
+    if sx < 0.65:
+        size *= sx / 0.65
+        sx = 0.65
         length = font.text_length(label, fontsize=size)
-        sx = min(1.0, room / length) if length else 1.0
     x = rect.x0 + (rect.width - length * sx) / 2
     y = rect.y0 + rect.height / 2 + size * 0.35
     page.insert_text((x, y), label, fontsize=size, fontname="plex", color=LABEL_COLOR,
@@ -609,11 +733,12 @@ def _paint(image: np.ndarray, frame: PageFrame, redactions: Sequence[Redaction],
     page = doc.new_page(width=width / SCALE, height=height / SCALE)
     page.insert_image(page.rect, pixmap=pymupdf.Pixmap(pymupdf.csRGB, width, height, image.tobytes(), False))
     page.insert_font(fontname="plex", fontbuffer=font.buffer)
+    size = _label_size(frame)
     for box, label, fill, border in plates:
         rect = pymupdf.Rect(*box) / SCALE
         page.draw_rect(rect, color=PLATE_BORDER if border else None, fill=fill, width=0.6 if border else 0)
         if label:
-            _fit_label(page, font, rect, label)
+            _fit_label(page, font, rect, label, size)
     pix = page.get_pixmap(dpi=DPI, colorspace=pymupdf.csRGB, alpha=False)
     doc.close()
     return pix
@@ -635,7 +760,7 @@ def _line_text(line: PageLine, redactions: Sequence[Redaction]) -> str:
             parts.append(line.words[index].text)
             index += 1
             continue
-        piece = r.prefix + r.label + r.suffix
+        piece = r.prefix + ("" if r.continued else r.label) + r.suffix
         if piece:
             parts.append(piece)
         index = r.last + 1

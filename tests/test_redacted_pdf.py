@@ -12,6 +12,7 @@ from md_blinder.anonymize.redacted_pdf import (
     RedactedPdfError,
     Word,
     _split_words,
+    text_frame,
     export_redacted_pdf,
     find_redactions,
     fold,
@@ -63,8 +64,12 @@ def test_value_across_lines_columns_and_hyphenation():
     ]]
     redactions, unmatched = find_redactions(pages, [("Иван Петров", "[PERSON_1]"), ("Ромашка", "[COMPANY_1]")])
     assert unmatched == []
-    got = {(r.line, r.first, r.last, r.label) for r in redactions[0]}
-    assert got == {(0, 1, 1, "[PERSON_1]"), (1, 0, 0, ""), (2, 1, 1, "[COMPANY_1]"), (3, 0, 0, "")}
+    got = {(r.line, r.first, r.last, r.label, r.continued) for r in redactions[0]}
+    # Каждая часть переноса подписана; в текстовом слое метка одна.
+    assert got == {
+        (0, 1, 1, "[PERSON_1]", False), (1, 0, 0, "[PERSON_1]", True),
+        (2, 1, 1, "[COMPANY_1]", False), (3, 0, 0, "[COMPANY_1]", True),
+    }
 
 
 def test_value_in_column_below_not_in_reading_order():
@@ -111,7 +116,7 @@ def test_longer_value_wins_and_unmatched_is_reported():
 
 # ---------------------------------------------------------------- слова скана
 
-def _line_image(words: list[str], size: int = 28) -> tuple[np.ndarray, list[pymupdf.Rect]]:
+def _line_image(words: list[str], size: int = 28, space: float = 1.0) -> tuple[np.ndarray, list[pymupdf.Rect]]:
     doc = pymupdf.open()
     page = doc.new_page(width=800, height=60)
     page.insert_font(fontname="plex", fontfile=str(FONT))
@@ -122,7 +127,7 @@ def _line_image(words: list[str], size: int = 28) -> tuple[np.ndarray, list[pymu
         page.insert_text((x, 40), word, fontsize=size, fontname="plex")
         width = font.text_length(word, fontsize=size)
         rects.append(pymupdf.Rect(x, 15, x + width, 45) * (200 / 72))
-        x += width + font.text_length(" ", fontsize=size)
+        x += width + font.text_length(" ", fontsize=size) * space
     pix = page.get_pixmap(dpi=200, colorspace=pymupdf.csGRAY)
     gray = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.stride)[:, : pix.width]
     return np.ascontiguousarray(gray), rects
@@ -141,6 +146,37 @@ def test_split_words_finds_each_word_on_the_scan():
         assert x0 <= rect.x0 + 1 and x1 >= rect.x1 - 1, word.text
     for k, word in enumerate(found[:-1]):
         assert word.box[2] < (rects[k + 1].x0 + rects[k + 1].x1) / 2
+
+
+def test_split_words_on_justified_capitals():
+    # Строка с выравниванием по ширине: пробелы втрое шире обычного, слова заглавными.
+    words = ["188975,", "Singapore,", "and", "GLOBAL", "ROUTE", "LIMITED", "(the", "Provider"]
+    gray, rects = _line_image(words, size=20, space=3.0)
+    ink = np.argwhere(gray < 128)
+    box = (float(ink[:, 1].min()) - 4, float(ink[:, 0].min()) - 4, float(ink[:, 1].max()) + 4, float(ink[:, 0].max()) + 4)
+    found = _split_words(gray, box, " ".join(words))
+    for word, rect in zip(found, rects):
+        assert word.box[0] <= rect.x0 + 1 and word.box[2] >= rect.x1 - 1, word.text
+
+
+def test_plates_stay_within_their_line(tmp_path):
+    """Плашка не заходит на соседние строки, даже если рамки букв шрифта выше интервала."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=595, height=842)
+    page.insert_font(fontname="plex", fontfile=str(FONT))
+    text = " ".join(["registered office at #02-27, 135 MIDDLE ROAD, BYLANDS BUILDING, 188975, Singapore"] * 6)
+    page.insert_textbox(pymupdf.Rect(56, 80, 540, 400), text, fontsize=11, fontname="plex", align=3, lineheight=1.15)
+    frame = text_frame(page)
+    assert len(frame.lines) >= 4
+    for i, line in enumerate(frame.lines):
+        for other in frame.lines[i + 1:]:
+            for word in line.words:
+                for near in other.words:
+                    overlap_x = min(word.box[2], near.core[2]) - max(word.box[0], near.core[0])
+                    overlap_y = min(word.box[3], near.core[3]) - max(word.box[1], near.core[1])
+                    assert overlap_x <= 0 or overlap_y <= 0.5, (word.text, near.text)
+                    overlap_y = min(near.box[3], word.core[3]) - max(near.box[1], word.core[1])
+                    assert overlap_x <= 0 or overlap_y <= 0.5, (near.text, word.text)
 
 
 # ---------------------------------------------------------------- сборка файла
@@ -235,3 +271,50 @@ def test_scan_export_hides_values_on_the_image(tmp_path):
     seen = ocr_pdf_pages(target, [1], MODELS)[1]
     assert "Петров" not in seen and "7736321479" not in seen and "123456" not in seen
     assert "Договор поставки" in seen and "Ромашка" in seen
+
+
+JUSTIFIED = (
+    "This BULK SMS SERVICE AGREEMENT (the \"Agreement\") is made and entered into on September 30, 2025 (the "
+    "\"Effective Date\") by and between SKYLINE DIGITAL PTE. LTD. (the \"Client\"), a legal entity registered under "
+    "the laws of Singapore, with the registration number: 202522193W, having its registered office at #02-27, "
+    "135 MIDDLE ROAD, BYLANDS BUILDING, 188975, Singapore, and GLOBAL ROUTE LIMITED (the \"Service Provider\"), a "
+    "legal entity duly incorporated and operating under the laws of Hong Kong, registration number 3312456 with its "
+    "registered office at Unit 5, 12/F, Harbour Centre, 25 Harbour Road, Wan Chai, Hong Kong."
+)
+
+
+@needs_models
+@pytest.mark.ocr
+def test_justified_scan_hides_whole_values(tmp_path):
+    """Скан текста с выравниванием по ширине: пробелы разной ширины, слова заглавными.
+    Раньше граница слова съезжала, и «LIMITED» выглядывал из-под плашки как «ITED»."""
+    src = pymupdf.open()
+    page = src.new_page(width=595, height=842)
+    page.insert_textbox(pymupdf.Rect(56, 80, 540, 400), JUSTIFIED, fontsize=11, fontname="helv", align=3, lineheight=1.15)
+    scan = pymupdf.open()
+    scan_page = scan.new_page(width=595, height=842)
+    scan_page.insert_image(scan_page.rect, pixmap=page.get_pixmap(dpi=150, colorspace=pymupdf.csGRAY))
+    source = tmp_path / "scan.pdf"
+    scan.save(source)
+
+    md = convert(source)
+    values = {
+        "SKYLINE DIGITAL PTE. LTD.": "[COMPANY_1]",
+        "GLOBAL ROUTE LIMITED": "[COMPANY_2]",
+        "3312456": "[REG_NUMBER_1]",
+        "Unit 5, 12/F, Harbour Centre, 25 Harbour Road, Wan Chai, Hong Kong": "[ADDRESS_1]",
+    }
+    import re
+
+    entities = []
+    for value, placeholder in values.items():
+        pattern = re.compile(r"\s+".join(re.escape(t) for t in value.split()))
+        positions = [Position(m.start(), m.end()) for m in pattern.finditer(md)]
+        assert positions, value
+        entities.append(Entity(placeholder, "OTHER", value, placeholder, positions))
+    target = tmp_path / "out.pdf"
+    assert export_redacted_pdf(source, target, md, entities, MODELS).unmatched == []
+    seen = ocr_pdf_pages(target, [1], MODELS)[1]
+    for word in ("SKYLINE", "DIGITAL", "GLOBAL", "ROUTE", "LIMITED", "ITED", "3312456", "Unit", "Harbour", "Chai"):
+        assert word not in seen, word
+    assert "Singapore" in seen and "Service Provider" in seen

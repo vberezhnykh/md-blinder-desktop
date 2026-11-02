@@ -24,6 +24,10 @@ _SENTENCE_RE = re.compile(rf"""[.!?]["')\]]?[{_WS_CHARS}]+[^0-9{_WS_CHARS}]""")
 # ("1 Main St to 2 Oak Ave", "from ... between ... and ..."), а не куски одного
 # адреса. re.A: \b и регистронезависимость — только ASCII, как в JS без флага u.
 _STOP_WORDS_RE = re.compile(r"\b(?:to|and|or|from|between|versus|vs)\b", re.I | re.A)
+# Обычная фраза между кусками: два и больше строчных латинских слова подряд
+# («, having its registered office at »). Куски одного адреса так не разделяются,
+# а номер перед такой фразой — уже другая сущность (рег. номер компании).
+_PROSE_RE = re.compile(r"\b[a-z]{2,}\s+[a-z]{2,}\b", re.A)
 
 
 def _max_score(a: Optional[float], b: Optional[float]) -> Optional[float]:
@@ -51,6 +55,8 @@ def stitch_address_runs(matches: list[RawMatch], text: str) -> list[RawMatch]:
             return False
         if _STOP_WORDS_RE.search(gap):
             return False  # разделитель перечисления ("... to ...")
+        if _PROSE_RE.search(gap):
+            return False  # между кусками обычная фраза, а не часть адреса
         return len(gap) <= 45  # адреса длинные; зазор увеличен с 30
 
     merged: list[RawMatch] = []

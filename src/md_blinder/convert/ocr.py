@@ -250,6 +250,57 @@ def _straighten(box: Sequence[float], tilt: float) -> list[float]:
     return [box[0] + dx, box[1] + dy, box[2] + dx, box[3] + dy]
 
 
+_CELL_SPLIT_RE = re.compile(r"(?<!\\)\|")
+_SEPARATOR_RE = re.compile(r"^\|(?:\s*:?-{3,}:?\s*\|)+$")
+_SENTENCE_END_RE = re.compile(r"[.:;!?»\"”)]$")
+_LOWER_START_RE = re.compile(r"[a-zа-яёіїєґ]")
+
+
+def _cells(line: str) -> list[str]:
+    return [cell.strip() for cell in _CELL_SPLIT_RE.split(line.strip().strip("|"))]
+
+
+def table_width(item: str) -> int:
+    """Число столбцов таблицы Markdown; 0 — не таблица."""
+    lines = item.split("\n")
+    if len(lines) < 2 or not item.startswith("|") or not _SEPARATOR_RE.match(lines[1].strip()):
+        return 0
+    return len(_cells(lines[0]))
+
+
+def join_md_tables(first: str, second: str) -> str:
+    """Продолжение таблицы дописывается строками в конец первой; повтор шапки отбрасывается."""
+    head, *rest = second.split("\n")
+    rows = rest[1:]
+    if _cells(head) != _cells(first.split("\n")[0]):
+        rows.insert(0, head)
+    return "\n".join([first, *rows])
+
+
+def _is_paragraph(item: str) -> bool:
+    return not item.startswith(("|", "#", "- ", "* ", ">"))
+
+
+def join_page_items(pages: list[list[str]]) -> None:
+    """Склеивает то, что разорвала граница страницы: таблицу с ее продолжением (столько же
+    столбцов) и предложение, оборванное на полуслове (следующая страница со строчной буквы).
+    Списки страниц должны идти подряд; продолжение переезжает на предыдущую страницу."""
+    for prev, page in zip(pages, pages[1:]):
+        if not prev or not page:
+            continue
+        last, first = prev[-1], page[0]
+        width = table_width(last)
+        if width and table_width(first) == width:
+            prev[-1] = join_md_tables(last, first)
+            page.pop(0)
+        elif (
+            _is_paragraph(last) and _is_paragraph(first)
+            and not _SENTENCE_END_RE.search(last) and _LOWER_START_RE.match(first)
+        ):
+            prev[-1] = last[:-1] + first if last.endswith("-") and last[-2:-1].isalpha() else last + " " + first
+            page.pop(0)
+
+
 def page_items(page) -> list[str]:
     """Строки страницы Indra для поиска колонтитулов; таблица — один элемент."""
     markdown = page.markdown
@@ -262,14 +313,31 @@ def page_items(page) -> list[str]:
     # Части Markdown и блоки разметки идут в одном порядке; если число не совпало,
     # блоки не пересобираются.
     blocks = page.blocks if len(page.blocks) == len(parts) else [None] * len(parts)
+    previous_table: Optional[Sequence[float]] = None
     for part, block in zip(parts, blocks):
         rebuilt = None
+        bbox = _straighten(block["bbox"], tilt) if block else None
         if block and block["label"] == "Table":
-            rebuilt = table_from_lines(_straighten(block["bbox"], tilt), lines)
+            rebuilt = table_from_lines(bbox, lines)
         elif block and block["label"] != "Picture":
-            rebuilt = prose_columns(_straighten(block["bbox"], tilt), lines)
-        items.extend(rebuilt if rebuilt is not None else _table_or_line(part.split("\n")))
+            rebuilt = prose_columns(bbox, lines)
+        new_items = [item for item in (rebuilt if rebuilt is not None else _table_or_line(part.split("\n"))) if item]
+        # Indra делит одну таблицу на несколько блоков; соседний блок с теми же столбцами
+        # и краями — продолжение, а не новая таблица.
+        if (
+            new_items and items and previous_table is not None and bbox is not None
+            and table_width(items[-1]) and table_width(new_items[0]) == table_width(items[-1])
+            and _same_edges(previous_table, bbox)
+        ):
+            items[-1] = join_md_tables(items[-1], new_items.pop(0))
+        items.extend(new_items)
+        previous_table = bbox if items and table_width(items[-1]) else None
     return [fix_mixed_scripts(item) for item in items if item]
+
+
+def _same_edges(a: Sequence[float], b: Sequence[float]) -> bool:
+    tolerance = 0.03 * max(a[2] - a[0], b[2] - b[0], 1.0)
+    return abs(a[0] - b[0]) <= tolerance and abs(a[2] - b[2]) <= tolerance
 
 
 def markdown_items(markdown: str) -> list[str]:
@@ -297,4 +365,13 @@ def ocr_pdf_pages(
             pages_items.append(page_items(result))
     check(cancel)
     cleaned = strip_repeated_lines_and_page_numbers(pages_items)
+    # Склеиваются только страницы, идущие подряд: между распознанными страницами
+    # может стоять страница с текстовым слоем.
+    run: list[list[str]] = []
+    for index, items in enumerate(cleaned):
+        if index and numbers[index] != numbers[index - 1] + 1:
+            join_page_items(run)
+            run = []
+        run.append(items)
+    join_page_items(run)
     return {number: "\n\n".join(items) for number, items in zip(numbers, cleaned)}

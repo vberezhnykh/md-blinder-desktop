@@ -187,3 +187,92 @@ def test_ocr_strip_does_not_mutate():
     snapshot = [list(p) for p in pages]
     strip_repeated_lines_and_page_numbers(pages)
     assert pages == snapshot
+
+
+def test_numbered_clause_continues_on_next_line():
+    pages = [[
+        item(str="11.2.7. The Service Provider will not act for or in the place of the Client in relations with",
+             y=300, w=400, hasEOL=True),
+        item(str="Third Parties.", y=288, w=60, hasEOL=True),
+        item(str="11.3. The Parties agree that the Service Provider is an independent contractor and, as",
+             y=276, w=400, hasEOL=True),
+        item(str="such, is not a partner of the Client.", y=264, w=200, hasEOL=True),
+        item(str="a) receiving and processing inbound calls, e-mails, or chat messages by the", y=252, w=400, hasEOL=True),
+        item(str="Operator;", x=12, y=240, w=40, hasEOL=True),
+        item(str="• Foo bar sample bullet item that wraps onto", y=228, w=300, hasEOL=True),
+        item(str="the next line.", x=10, y=216, w=60, hasEOL=True),
+    ]]
+    assert items_to_markdown(pages).split("\n\n") == [
+        "11.2.7. The Service Provider will not act for or in the place of the Client in relations with Third Parties.",
+        "11.3. The Parties agree that the Service Provider is an independent contractor and, as "
+        "such, is not a partner of the Client.",
+        "a) receiving and processing inbound calls, e-mails, or chat messages by the Operator;",
+        "- Foo bar sample bullet item that wraps onto the next line.",
+    ]
+
+
+def test_number_inside_sentence_is_not_a_clause():
+    pages = [[
+        item(str="The Client shall pay the invoice within", y=300, w=300, hasEOL=True),
+        item(str="30 days after receipt of the Certificate.", y=288, w=300, hasEOL=True),
+    ]]
+    assert items_to_markdown(pages) == "The Client shall pay the invoice within 30 days after receipt of the Certificate."
+
+
+def test_clause_number_in_left_margin_joins_its_text():
+    pages = [[
+        item(str="1.1", x=0, y=300, w=15, hasEOL=True),
+        item(str="“Activity” means the offering of sample services to", x=30, y=300, w=300, hasEOL=True),
+        item(str="businesses in the Territory.", x=30, y=288, w=200, hasEOL=True),
+        item(str="1.2", x=0, y=276, w=15, hasEOL=True),
+        item(str="“Business Data” means all end user data.", x=30, y=276, w=300, hasEOL=True),
+    ]]
+    assert items_to_markdown(pages).split("\n\n") == [
+        "1.1 “Activity” means the offering of sample services to businesses in the Territory.",
+        "1.2 “Business Data” means all end user data.",
+    ]
+
+
+def test_double_spaced_paragraph_stays_whole():
+    lines = [f"Sample double spaced line number {n} of the long paragraph about the obligations" for n in range(10)]
+    page = [item(str=text, y=600 - i * 23, w=400, hasEOL=True) for i, text in enumerate(lines)]
+    page.append(item(str="Next paragraph after a larger gap.", y=600 - 10 * 23 - 30, w=300, hasEOL=True))
+    assert items_to_markdown([page]).split("\n\n") == [" ".join(lines), "Next paragraph after a larger gap."]
+
+
+def test_sentence_continues_on_next_page():
+    pages = [
+        [item(str="The Parties shall keep the terms of this Agreement confidential and shall", y=300, w=400, hasEOL=True)],
+        [item(str="not disclose them to third parties.", y=300, w=200, hasEOL=True),
+         item(str="A new paragraph on the second page of the sample.", y=200, w=300, hasEOL=True)],
+        [item(str="Third page paragraph without a link to the previous one.", y=300, w=300, hasEOL=True)],
+    ]
+    assert items_to_markdown(pages).split("\n\n") == [
+        "The Parties shall keep the terms of this Agreement confidential and shall not disclose them to third parties.",
+        "A new paragraph on the second page of the sample.",
+        "Third page paragraph without a link to the previous one.",
+    ]
+
+
+def _table(html, x, top, bottom, w=400, cols=2):
+    return item(str="", x=x, y=top, w=w, fontSize=0, hasEOL=True, table_html=html, table_cols=cols, table_bottom=bottom)
+
+
+def test_adjoining_table_parts_join():
+    body = item(str="List of the coordinators of the sample contract parties follows.", y=400, w=400, hasEOL=True)
+    first = "<table><tr><th>Name</th><th>Position</th></tr><tr><td>Technical</td><td></td></tr></table>"
+    second = "<table><tr><th>Alpha Person</th><th>Director</th></tr><tr><td>Finance</td><td></td></tr></table>"
+    md = items_to_markdown([[body, _table(first, 0, 380, 340), _table(second, 0, 338, 300)]])
+    assert md.split("\n\n")[1] == (
+        "| Name | Position |\n| --- | --- |\n| Technical |  |\n| Alpha Person | Director |\n| Finance |  |"
+    )
+
+
+def test_separate_tables_stay_separate():
+    first = "<table><tr><th>A</th><th>B</th></tr><tr><td>1</td><td>2</td></tr></table>"
+    second = "<table><tr><th>C</th><th>D</th></tr><tr><td>3</td><td>4</td></tr></table>"
+    body = item(str="Sample body paragraph text above the tables for the font size.", y=400, w=400, hasEOL=True)
+    far = items_to_markdown([[body, _table(first, 0, 380, 340), _table(second, 0, 250, 200)]])
+    shifted = items_to_markdown([[body, _table(first, 0, 380, 340), _table(second, 200, 338, 300, w=200)]])
+    for md in (far, shifted):
+        assert md.count("| --- | --- |") == 2

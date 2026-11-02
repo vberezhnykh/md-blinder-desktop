@@ -82,6 +82,7 @@ def _page_items(page: pymupdf.Page) -> tuple[list[PdfTextItem], PdfPageLayout, P
                 items.append(PdfTextItem(
                     str="", x=table.rect.x0, y=height - table.rect.y0, w=table.rect.width, fontSize=0,
                     hasEOL=True, table_html=table.html, table_cols=table.cols,
+                    table_bottom=height - table.rect.y1,
                 ))
             continue
         x0, _, x1, _ = span["bbox"]

@@ -74,6 +74,16 @@ def _expand_spans(soup: BeautifulSoup, table: Tag) -> None:
             row.append(soup.new_tag(tag))
 
 
+def _drop_empty_rows(table: Tag) -> None:
+    """Убирает строки без текста и картинок: в документе это отбивка, в Markdown — ряд пустых ячеек."""
+    for row in _own_rows(table):
+        if not row.get_text(strip=True) and row.find("img") is None:
+            row.decompose()
+    for section in table.find_all(["thead", "tbody"], recursive=False):
+        if section.find("tr") is None:
+            section.decompose()
+
+
 def preprocess_table_html(html: str) -> str:
     """Раскладывает объединенные ячейки и делает первую строку без <thead> заголовком из <th>.
 
@@ -82,6 +92,7 @@ def preprocess_table_html(html: str) -> str:
     soup = BeautifulSoup(html, "html.parser")
     for table in soup.find_all("table"):
         _expand_spans(soup, table)
+        _drop_empty_rows(table)
         if table.find("thead"):
             continue
         first_row = table.find("tr")

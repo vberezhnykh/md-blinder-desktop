@@ -456,3 +456,47 @@ def test_xlsx_opens_in_a_package_with_docx(qtbot, window, tmp_path):
     window.open_doc(meta.id)
     assert "## Контакты" in window.anonymized_text
     assert "| [EMAIL_1] |" in window.anonymized_text and "| [EMAIL_2] |" in window.anonymized_text
+
+
+def _menu_titles(menu):
+    return [label.text() for label in menu.findChildren(QLabel) if label.objectName() == "menuTitle"]
+
+
+def test_redacted_pdf_export_from_menu(qtbot, window, tmp_path, monkeypatch):
+    import pymupdf
+
+    from md_blinder.ui.theme import FONTS_DIR
+
+    source = tmp_path / "contract.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_font(fontname="plex", fontfile=str(FONTS_DIR / "IBMPlexSans-Regular.ttf"))
+    page.insert_text((50, 100), "Пишите на ivan@example.com или звоните.", fontsize=12, fontname="plex")
+    doc.save(source)
+    window.process_file(source)
+    qtbot.waitUntil(lambda: window.job is None, timeout=20000)
+    assert any(e.value == "ivan@example.com" for e in window.session.entities)
+
+    window.page.status._open_menu()
+    qtbot.waitUntil(window.page.status.menu.isVisible)
+    assert "Обезличенный PDF" in _menu_titles(window.page.status.menu)
+    window.page.status.menu.hide()
+
+    out = tmp_path / "out.pdf"
+    monkeypatch.setattr(window, "_save_path", lambda name, filter_: out)
+    window.export_pdf()
+    qtbot.waitUntil(lambda: window.pdf_job is None, timeout=20000)
+    with pymupdf.open(out) as result:
+        text = result[0].get_text()
+    assert "ivan@example.com" not in text and "[EMAIL_1]" in text
+
+    # Документ из истории: путь к исходнику запомнен и после перезапуска окна.
+    assert window._pdf_sources()[window.session.doc.id]["path"] == str(source.resolve())
+
+
+def test_redacted_pdf_not_offered_for_docx(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    window.page.status._open_menu()
+    qtbot.waitUntil(window.page.status.menu.isVisible)
+    assert "Обезличенный PDF" not in _menu_titles(window.page.status.menu)
+    window.page.status.menu.hide()

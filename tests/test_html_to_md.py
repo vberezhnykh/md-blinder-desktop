@@ -113,3 +113,11 @@ def test_nested_table_spans_expanded_separately():
     assert len(inner.find("tr").find_all(["td", "th"], recursive=False)) == 2
     outer_rows = [tr for tr in outer.find_all("tr") if tr.find_parent("table") is outer]
     assert [len(tr.find_all(["td", "th"], recursive=False)) for tr in outer_rows] == [2, 2]
+
+
+def test_empty_table_rows_dropped():
+    html = (
+        "<table><tr><td>Name</td><td>Phone</td></tr><tr><td></td><td> </td></tr>"
+        "<tr><td>Alpha</td><td>1</td></tr><tr><td><img src='a.png'></td><td></td></tr></table>"
+    )
+    assert html_to_markdown(html) == "| Name | Phone |\n| --- | --- |\n| Alpha | 1 |\n| ![](a.png) |  |"

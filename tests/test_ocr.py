@@ -9,7 +9,7 @@ import pytest
 
 from md_blinder.cancel import Cancelled, CancelToken
 from md_blinder.components import ocr_models
-from md_blinder.convert.ocr import markdown_items, ocr_pdf_pages, prose_columns
+from md_blinder.convert.ocr import join_page_items, markdown_items, ocr_pdf_pages, prose_columns, table_width
 from md_blinder.convert.pdf import analyze_pdf, assemble_markdown
 
 MODELS = Path(os.environ.get("MD_BLINDER_OCR_MODELS") or ocr_models.ocr_models_dir())
@@ -129,3 +129,49 @@ def test_prose_columns_keeps_data_tables():
     # Один столбец текста: строки перекрываются, колонок нет.
     single = [([50, 100 + r * 30, 560, 120 + r * 30], "Обычная строка абзаца договора") for r in range(6)]
     assert prose_columns([40, 90, 570, 300], single) is None
+
+
+def test_join_page_items_glues_tables_and_sentences():
+    table1 = "| Name | Phone |\n| --- | --- |\n| Alpha | 1 |"
+    table2 = "| Name | Phone |\n| --- | --- |\n| Beta | 2 |"
+    other = "| Gamma | 3 | x |\n| --- | --- | --- |\n| Delta | 4 | y |"
+    pages = [
+        ["Intro.", table1],
+        [table2, "The Parties shall keep the terms confidential and shall"],
+        ["not disclose them.", "Second paragraph."],
+        ["Closing statement of the sample.", other],
+        ["| Epsilon | 5 |\n| --- | --- |\n| Zeta | 6 |"],
+    ]
+    join_page_items(pages)
+    assert pages[0] == ["Intro.", "| Name | Phone |\n| --- | --- |\n| Alpha | 1 |\n| Beta | 2 |"]
+    assert pages[1] == ["The Parties shall keep the terms confidential and shall not disclose them."]
+    assert pages[2] == ["Second paragraph."]
+    # Число столбцов разное — это другая таблица.
+    assert pages[4] == ["| Epsilon | 5 |\n| --- | --- |\n| Zeta | 6 |"]
+    assert table_width(other) == 3 and table_width("Intro.") == 0
+
+
+def test_join_page_items_keeps_new_header_row():
+    pages = [["| A | B |\n| --- | --- |\n| 1 | 2 |"], ["| 3 | 4 |\n| --- | --- |\n| 5 | 6 |"]]
+    join_page_items(pages)
+    assert pages == [["| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n| 5 | 6 |"], []]
+
+
+def test_page_items_joins_table_split_into_blocks():
+    from types import SimpleNamespace
+
+    from md_blinder.convert.ocr import page_items
+
+    def line(x0, y, x1, text):
+        return SimpleNamespace(box=[x0, y, x1, y + 20], text=text)
+
+    rows = [(100, "Name", "Position"), (130, "Technical", "Lead"), (170, "Alpha Person", "Director"), (200, "Finance", "Lead")]
+    lines = [piece for y, left, right in rows for piece in (line(50, y, 200, left), line(310, y, 420, right))]
+    page = SimpleNamespace(
+        markdown="<table><tr><td>x</td></tr></table>\n\n<table><tr><td>y</td></tr></table>",
+        lines=lines, skew=0.0,
+        blocks=[{"label": "Table", "bbox": [50, 100, 420, 150]}, {"label": "Table", "bbox": [50, 170, 420, 220]}],
+    )
+    assert page_items(page) == [
+        "| Name | Position |\n| --- | --- |\n| Technical | Lead |\n| Alpha Person | Director |\n| Finance | Lead |"
+    ]

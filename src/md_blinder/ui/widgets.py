@@ -115,6 +115,34 @@ class Select(QComboBox):
         painter.end()
 
 
+class MenuItem(QPushButton):
+    """Пункт меню: подпись и подсказка лежат во вложенной раскладке.
+
+    QPushButton считает размер по своему тексту, которого у пункта нет, и по
+    вертикали держит высоту строго по sizeHint. Без этих переопределений пункт
+    получает высоту пустой кнопки, а заголовок и подсказка обрезаются почти
+    целиком. Высота считается по ширине, потому что подсказка переносится.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.layout().sizeHint() if self.layout() is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        return self.layout().minimumSize() if self.layout() is not None else super().minimumSizeHint()
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return self.layout() is not None and self.layout().hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        if self.layout() is None:
+            return super().heightForWidth(width)
+        return self.layout().totalHeightForWidth(width)
+
+
 class PopupMenu(QFrame):
     """Раскрывающееся меню как Menu.tsx: пункты с заголовком и подсказкой, заметки, разделители."""
 
@@ -142,7 +170,7 @@ class PopupMenu(QFrame):
         self, title: str, handler: Callable[[], None], hint: str = "", icon_name: Optional[str] = None,
         current: bool = False, sensitive: bool = False, enabled: bool = True,
     ) -> QPushButton:
-        button = QPushButton()
+        button = MenuItem()
         button.setObjectName("menuItem")
         button.setProperty("current", "true" if current else "false")
         button.setEnabled(enabled)

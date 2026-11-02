@@ -76,3 +76,24 @@ def stitch_address_runs(matches: list[RawMatch], text: str) -> list[RawMatch]:
     flush()
 
     return [*others, *merged]
+
+
+# Части одного имени, разделенные только пробелом. Модель режет длинные имена из
+# четырех слов на два спана («Xodillayev Saydullokhon» + «Nurillo Augli»), и они
+# получали разные метки. Перевод строки, запятая или «и» между спанами означают
+# разных людей, их не склеиваем.
+_NAME_GAP_RE = re.compile("[ \t ]{1,2}")
+
+
+def stitch_person_runs(matches: list[RawMatch], text: str) -> list[RawMatch]:
+    others = [m for m in matches if m.type != "PERSON"]
+    people = sorted((m for m in matches if m.type == "PERSON"), key=lambda m: m.start)
+    merged: list[RawMatch] = []
+    for m in people:
+        prev = merged[-1] if merged else None
+        if prev is not None and prev.end <= m.start and _NAME_GAP_RE.fullmatch(text[prev.end:m.start]):
+            merged[-1] = RawMatch(type="PERSON", value=text[prev.start:m.end], start=prev.start, end=m.end,
+                                  score=_max_score(prev.score, m.score))
+        else:
+            merged.append(m)
+    return [*others, *merged]

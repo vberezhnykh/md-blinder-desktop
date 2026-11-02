@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from md_blinder.anonymize.stitch_address import stitch_address_runs
+from md_blinder.anonymize.stitch_address import stitch_address_runs, stitch_person_runs
 from md_blinder.anonymize.types import RawMatch
 
 
@@ -170,3 +170,23 @@ def test_does_not_merge_across_a_plain_phrase():
     parts = [_addr(text, f)[0] for f in ("202522193W", "#02-27", "135 MIDDLE ROAD", "188975")]
     result = stitch_address_runs(parts, text)
     assert [m.value for m in result] == ["202522193W", "#02-27, 135 MIDDLE ROAD, 188975"]
+
+
+def _person(text: str, value: str, score: float) -> RawMatch:
+    start = text.index(value)
+    return RawMatch("PERSON", value, start, start + len(value), score)
+
+
+def test_joins_name_parts_separated_by_a_space():
+    # Модель делит узбекское имя из четырех слов на два спана.
+    text = "| \\_\\_/Xodillayev Saydullokhon Nurillo Augli<br>Director |"
+    parts = [_person(text, "Xodillayev Saydullokhon", 0.78), _person(text, "Nurillo Augli", 0.84)]
+    [m] = stitch_person_runs(parts, text)
+    assert m.value == "Xodillayev Saydullokhon Nurillo Augli"
+    assert text[m.start:m.end] == m.value and m.score == 0.84
+
+
+def test_does_not_join_people_separated_by_comma_newline_or_word():
+    for text in ("John Smith, Jane Doe", "John Smith\nJane Doe", "John Smith and Jane Doe"):
+        people = [_person(text, "John Smith", 0.9), _person(text, "Jane Doe", 0.9)]
+        assert [m.value for m in stitch_person_runs(people, text)] == ["John Smith", "Jane Doe"]

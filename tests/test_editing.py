@@ -194,3 +194,13 @@ def test_resize_shrink_applies_everywhere():
     new = Position(old.start, BVI.index(", Tortola", old.start))
     result = resize_occurrence(entities, BVI, "addr", old, new)
     assert [BVI[p.start:p.end] for p in result[0].positions] == ["Quijano Chambers, P.O. Box 3159, Road Town"] * 2
+
+
+def test_drag_right_stops_before_br_in_table_cell():
+    text = "| \\_\\_/Xodillayev Saydullokhon Nurillo Augli<br>Director | Customer |"
+    start = text.index("Xodillayev")
+    end = text.index(" Augli")
+    person = Entity(id="p", type="PERSON", value="", placeholder="[PERSON_1]", positions=[Position(start, end)])
+    span = person.positions[0]
+    new = drag_span([person], "p", span, span, "right", text.index("Augli") + 4, text)
+    assert text[new.start:new.end] == "Xodillayev Saydullokhon Nurillo Augli"

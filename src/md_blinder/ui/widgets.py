@@ -116,37 +116,31 @@ class Select(QComboBox):
 
 
 class MenuItem(QPushButton):
-    """Пункт меню: заголовок и подсказка лежат в собственном layout кнопки.
+    """Пункт меню: подпись и подсказка лежат во вложенной раскладке.
 
-    QPushButton считает размер по своему тексту (у пункта он пустой) и не смотрит
-    на layout, поэтому меню отдавало пункту высоту пустой кнопки, а надписи
-    обрезались почти целиком. Размер и высоту при заданной ширине (подсказка
-    переносится) берем у layout.
+    QPushButton считает размер по своему тексту, которого у пункта нет, и по
+    вертикали держит высоту строго по sizeHint. Без этих переопределений пункт
+    получает высоту пустой кнопки, а заголовок и подсказка обрезаются почти
+    целиком. Высота считается по ширине, потому что подсказка переносится.
     """
 
     def __init__(self) -> None:
         super().__init__()
-        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
-        policy.setHeightForWidth(True)
-        self.setSizePolicy(policy)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
 
     def sizeHint(self) -> QSize:  # noqa: N802
-        layout = self.layout()
-        return layout.totalSizeHint() if layout is not None else super().sizeHint()
+        return self.layout().sizeHint() if self.layout() is not None else super().sizeHint()
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802
-        layout = self.layout()
-        return layout.totalMinimumSize() if layout is not None else super().minimumSizeHint()
+        return self.layout().minimumSize() if self.layout() is not None else super().minimumSizeHint()
 
     def hasHeightForWidth(self) -> bool:  # noqa: N802
-        layout = self.layout()
-        return layout is not None and layout.hasHeightForWidth()
+        return self.layout() is not None and self.layout().hasHeightForWidth()
 
     def heightForWidth(self, width: int) -> int:  # noqa: N802
-        layout = self.layout()
-        if layout is None or not layout.hasHeightForWidth():
+        if self.layout() is None:
             return super().heightForWidth(width)
-        return layout.totalHeightForWidth(width)
+        return self.layout().totalHeightForWidth(width)
 
 
 class PopupMenu(QFrame):

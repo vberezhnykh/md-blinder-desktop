@@ -456,3 +456,39 @@ def test_unsure_lowercase_company_is_dropped_but_sure_one_is_kept():
     unsure = RawMatch("COMPANY", "courier service", 0, 15, 0.28)
     sure = RawMatch("COMPANY", "acme widgets", 0, 12, 0.9)
     assert filter_generic_ner_matches([unsure, sure]) == [sure]
+
+
+def test_drops_market_roles_and_descriptions_from_second_report():
+    dropped: list[tuple[EntityType, str]] = [
+        ("COMPANY", "carriers"),
+        ("COMPANY", "aggregators"),
+        ("COMPANY", "cloud/platform operators"),
+        ("COMPANY", "Network Operator"),
+        ("COMPANY", "Network Operators"),
+        ("COMPANY", "mobile operator"),
+        ("PERSON", "claiming Party"),
+        ("PERSON", "Affiliates’ employees"),
+        ("PERSON", "SMS recipient"),
+        ("PERSON", "designated Commercial Coordinator"),
+        ("PERSON", "Section 15"),
+        ("PERSON", "operators of the Call Center"),
+        ("COMPANY", "Clause 3.2"),
+        ("ADDRESS", "пункт 5.1"),
+    ]
+    unsure = [
+        RawMatch("COMPANY", "Client-provided", 0, 15, 0.2),
+        RawMatch("COMPANY", "Digital Asset network", 0, 21, 0.2),
+    ]
+    result = filter_generic_ner_matches([match(t, v) for t, v in dropped] + unsure)
+    assert [m.value for m in result] == []
+
+
+def test_lowercase_edge_words_are_trimmed_from_a_real_name():
+    text = "John Smith, director"
+    result = filter_generic_ner_matches([match("PERSON", text)])
+    assert [(m.value, m.start, m.end) for m in result] == [("John Smith", 0, 10)]
+    kept = filter_generic_ner_matches([match("PERSON", "Ludwig van Beethoven"), match("PERSON", "Fernando da Silva")])
+    assert [m.value for m in kept] == ["Ludwig van Beethoven", "Fernando da Silva"]
+    # Уверенная компания строчными остается: бывают такие названия.
+    sure = RawMatch("COMPANY", "plan b", 0, 6, 0.97)
+    assert filter_generic_ner_matches([sure]) == [sure]

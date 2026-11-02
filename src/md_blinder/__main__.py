@@ -85,9 +85,21 @@ def self_check() -> int:
             with tempfile.TemporaryDirectory() as tmp:
                 scan.save(Path(tmp) / "scan.pdf")
                 text = ocr_pdf_pages(Path(tmp) / "scan.pdf", [1], ocr_models.ocr_models_dir()).get(1, "")
-            ocr_ok = "12345" in text and "ИНН 7736321479" in text
-            ok &= ocr_ok
+                ocr_ok = "12345" in text and "ИНН 7736321479" in text
+                # Обезличенный PDF из того же скана: номер закрыт, метка в текстовом слое.
+                from .anonymize.redacted_pdf import export_redacted_pdf
+                from .anonymize.types import Entity, Position
+
+                start = text.find("7736321479")
+                entity = Entity("1", "REG_NUMBER", "7736321479", "[REG_NUMBER_1]", [Position(start, start + 10)])
+                export_redacted_pdf(Path(tmp) / "scan.pdf", Path(tmp) / "out.pdf", text, [entity] if start >= 0 else [],
+                                    ocr_models.ocr_models_dir())
+                with pymupdf.open(Path(tmp) / "out.pdf") as out:
+                    layer = out[0].get_text()
+                pdf_ok = "[REG_NUMBER_1]" in layer and "7736321479" not in layer
+            ok &= ocr_ok and pdf_ok
             lines.append("OCR (Indra): " + ("OK" if ocr_ok else f"не распознал тестовый текст: {text[:80]!r}"))
+            lines.append("Обезличенный PDF: " + ("OK" if pdf_ok else f"номер не закрыт: {layer[:80]!r}"))
         else:
             lines.append("OCR: модель распознавания текста не скачана, проверка пропущена")
         if model_asset.is_model_present():

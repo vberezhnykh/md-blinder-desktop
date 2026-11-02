@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
 import time
 import uuid
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QSizePolicy,
     QStackedWidget,
@@ -46,6 +48,7 @@ from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
+from ..export_job import PdfExportJob, PdfExportRequest
 from .. import shell
 from ..components import ocr_models
 from ..paths import history_db_path
@@ -67,6 +70,10 @@ from .widgets import Notice, PopupMenu, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
 SETTING_CONVERT_ONLY = "convertOnly"
+# Где лежит исходный PDF документа из истории: id документа -> путь и режим OCR.
+# Нужен для экспорта обезличенного PDF; хранится только на этом компьютере.
+SETTING_PDF_SOURCES = "pdfSources"
+PDF_SOURCES_LIMIT = 200
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -326,6 +333,9 @@ class MainWindow(QMainWindow):
         self.elapsed_timer.timeout.connect(self._update_loading)
 
         self.last_pdf: Optional[tuple[Path, str, bool]] = None  # путь, id документа, OCR принудительно
+        self.pdf_job: Optional[PdfExportJob] = None
+        self.pdf_request: Optional[PdfExportRequest] = None
+        self.pdf_dialog: Optional[QProgressDialog] = None
         self._detect_doc_id: Optional[str] = None  # документ, в котором идет поиск данных
         self.view = "source"
         self.pending_delete: Optional[str] = None
@@ -397,6 +407,7 @@ class MainWindow(QMainWindow):
         p.status.export_md.connect(self.export_md)
         p.status.copy_text.connect(self.copy_text)
         p.status.export_csv.connect(self.export_csv)
+        p.status.export_pdf.connect(self.export_pdf)
 
         p.editor.edited.connect(self.session.editor_changed)
         p.editor.undo_requested.connect(self.session.undo_stack.undo)
@@ -600,6 +611,8 @@ class MainWindow(QMainWindow):
             source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
         )
         run.created.append((doc, result))
+        if result.format == "pdf":
+            self._remember_pdf_source(doc.id, result.path, result.force_ocr)
         run.members.append(doc)
         self.autosave.queue(replace(doc, entities=list(doc.entities)))
         self._start_next_file()
@@ -933,7 +946,10 @@ class MainWindow(QMainWindow):
         p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
         unreviewed = len(pending_candidates(output))
         active = [e for e in output if e.anonymize]
-        p.status.update_state(unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md")
+        p.status.update_state(
+            unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md",
+            pdf=doc.format == "pdf" and not self.convert_only,
+        )
         # Без обезличивания проверка не нужна: остаются исходник, результат и выгрузка.
         p.side.setVisible(not self.convert_only)
         p.status.steps.setVisible(not self.convert_only)
@@ -1116,6 +1132,124 @@ class MainWindow(QMainWindow):
         self.toast.show_message(
             "Таблица замен сохранена. Она содержит исходные данные: не передавайте ее вместе с обезличенным текстом.",
             6000, tone="warn",
+        )
+
+    # ------------------------------------------------------------------ обезличенный PDF
+
+    def _pdf_sources(self) -> dict:
+        try:
+            data = json.loads(self.settings.value(SETTING_PDF_SOURCES, "{}", type=str) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _remember_pdf_source(self, doc_id: str, path: Path, force_ocr: bool) -> None:
+        sources = self._pdf_sources()
+        sources.pop(doc_id, None)
+        sources[doc_id] = {"path": str(Path(path).resolve()), "forceOcr": bool(force_ocr)}
+        # Словарь хранит порядок добавления: старые записи уходят первыми.
+        while len(sources) > PDF_SOURCES_LIMIT:
+            sources.pop(next(iter(sources)))
+        self.settings.setValue(SETTING_PDF_SOURCES, json.dumps(sources, ensure_ascii=False))
+
+    def export_pdf(self) -> None:
+        doc = self.session.doc
+        if doc is None or doc.format != "pdf" or self.pdf_job is not None:
+            return
+        known = self._pdf_sources().get(doc.id) or {}
+        source = Path(known["path"]) if isinstance(known.get("path"), str) else None
+        force_ocr = bool(known.get("forceOcr", False))
+        if source is None or not source.is_file():
+            start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+            picked, _ = QFileDialog.getOpenFileName(
+                self, f"Где исходный PDF «{shorten(doc.name, 60)}»?", str(Path(start_dir) / doc.name), "PDF (*.pdf)",
+            )
+            if not picked:
+                return
+            source = Path(picked)
+            self._remember_pdf_source(doc.id, source, force_ocr)
+        target = self._save_path(f"{base_name(doc.name)} (обезличенный).pdf", "PDF (*.pdf)")
+        if target is None:
+            return
+        if target.resolve() == source.resolve():
+            self.toast.show_message("Выберите другое имя: исходный PDF нельзя перезаписать.", 6000, tone="error")
+            return
+        request = PdfExportRequest(
+            source=source, target=target, source_text=doc.source_text, entities=list(doc.entities), force_ocr=force_ocr,
+        )
+        self._start_pdf_job(request)
+
+    def _start_pdf_job(self, request: PdfExportRequest) -> None:
+        job = PdfExportJob(request)
+        self.pdf_job = job
+        dialog = QProgressDialog("Чтение PDF", "Отмена", 0, 0, self)
+        dialog.setWindowTitle("Обезличенный PDF")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(420)
+        dialog.canceled.connect(job.cancel)
+        self.pdf_dialog = dialog
+        self.pdf_request = request
+        # Обработчики — методы окна: Qt вызывает их в главном потоке. Лямбда
+        # выполнилась бы в потоке задачи.
+        job.progress.connect(dialog.setLabelText)
+        job.need_ocr.connect(self._pdf_need_ocr)
+        job.finished.connect(self._pdf_finished)
+        job.failed.connect(self._pdf_failed)
+        job.cancelled.connect(self._pdf_done)
+        thread = QThread()
+        job.moveToThread(thread)
+        thread.started.connect(job.run)
+        for signal in (job.finished, job.failed, job.cancelled, job.need_ocr):
+            signal.connect(thread.quit)
+        self._threads.append(thread)
+        thread.finished.connect(lambda: self._threads.remove(thread) if thread in self._threads else None)
+        thread.start()
+        dialog.show()
+
+    def _pdf_done(self) -> None:
+        self.pdf_job = None
+        if self.pdf_dialog is not None:
+            self.pdf_dialog.close()
+            self.pdf_dialog.deleteLater()
+            self.pdf_dialog = None
+
+    def _pdf_need_ocr(self) -> None:
+        request = self.pdf_request
+        self._pdf_done()
+        box = QMessageBox(self)
+        box.setWindowTitle("Распознавание сканов")
+        box.setText(
+            "В PDF есть страницы-сканы. Чтобы найти на них данные, нужно один раз скачать модель "
+            f"распознавания текста Indra OCR с Hugging Face, около {ocr_models.TOTAL_MB} МБ."
+        )
+        box.setInformativeText("Это публичные файлы; текст документа никуда не отправляется.")
+        download = box.addButton("Скачать", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is download:
+            self._start_pdf_job(replace(request, download_ocr=True))
+
+    def _pdf_failed(self, message: str) -> None:
+        self._pdf_done()
+        self.toast.show_message(message, 8000, tone="error")
+
+    def _pdf_finished(self, report) -> None:
+        request = self.pdf_request
+        self._pdf_done()
+        name = shorten(request.target.name, 40)
+        if report.unmatched:
+            labels = ", ".join(sorted({placeholder for placeholder, _ in report.unmatched})[:6])
+            self.toast.show_message(
+                f"PDF «{name}» сохранен, но не все замены нашлись на страницах ({labels}). "
+                "Проверьте эти места в PDF перед отправкой.",
+                12000, tone="warn",
+            )
+            return
+        self._notify_done(
+            f"PDF «{name}» сохранен. Просмотрите его перед отправкой: подписи и рукописные пометки остаются на изображении."
         )
 
     # ------------------------------------------------------------------ история
@@ -1351,6 +1485,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.job is not None:
             self.job.cancel()
+        if self.pdf_job is not None:
+            self.pdf_job.cancel()
         self._commit_delete()
         if not self.autosave.flush():
             answer = QMessageBox.question(

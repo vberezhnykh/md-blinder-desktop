@@ -1,5 +1,8 @@
 """Порт логики src/lib/entityEditorState.test.ts для сдвига разметки при правке."""
 
+import re
+from dataclasses import replace
+
 from md_blinder.anonymize.types import Entity, Position
 from md_blinder.editing import TextChange, apply_change, diff_texts, map_entities, map_pos
 
@@ -94,3 +97,100 @@ def test_replace_position_and_lookup():
     assert active_span_at([e1, e2], old.start + 1) == ("a", old)
     assert active_span_at([e1, e2], 0) is None
     assert hovered_entity_at([e1, e2], e2.positions[0].start + 2) == "b"
+
+
+from md_blinder.editing import resize_occurrence  # noqa: E402
+
+BVI = (
+    "registered office at Quijano Chambers, P.O. Box 3159, Road Town, Tortola; "
+    "physical: Quijano Chambers, P.O. Box 3159, Road Town, Tortola."
+)
+
+
+def address_entity(text, value, *, dismissed_company=None):
+    starts = [m.start() for m in re.finditer(re.escape(value), text)]
+    addr = Entity(id="addr", type="ADDRESS", value=value, placeholder="[ADDRESS_5]",
+                  positions=[Position(s, s + len(value)) for s in starts])
+    entities = [addr]
+    if dismissed_company is not None:
+        s = text.index(dismissed_company)
+        entities.append(Entity(id="co", type="COMPANY", value=dismissed_company, placeholder="[COMPANY_9]",
+                               positions=[Position(s, s + len(dismissed_company))],
+                               anonymize=False, dismissed=True))
+    return entities
+
+
+def test_drag_ignores_dismissed_finding():
+    # Отклоненная находка «Quijano Chambers» в тексте не видна и не держит ручку.
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town", dismissed_company="Quijano Chambers")
+    span = entities[0].positions[0]
+    new = drag_span(entities, "addr", span, span, "left", BVI.index("Quijano") + 1, BVI)
+    assert BVI[new.start:new.end] == "Quijano Chambers, P.O. Box 3159, Road Town"
+
+
+def test_drag_still_stops_at_visible_finding():
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town", dismissed_company="Quijano Chambers")
+    entities[1] = replace(entities[1], dismissed=False, anonymize=True)
+    span = entities[0].positions[0]
+    new = drag_span(entities, "addr", span, span, "left", BVI.index("Quijano") + 1, BVI)
+    assert new.start == entities[1].positions[0].end
+
+
+def test_drag_left_does_not_take_space_before_word():
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town")
+    span = entities[0].positions[1]
+    new = drag_span(entities, "addr", span, span, "left", BVI.index(" Quijano", span.start - 30), BVI)
+    assert BVI[new.start:new.end] == "Quijano Chambers, P.O. Box 3159, Road Town"
+
+
+def test_resize_extends_every_occurrence_with_same_context():
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town")
+    old = entities[0].positions[1]
+    new = Position(BVI.index("Quijano", old.start - 30), old.end)
+    result = resize_occurrence(entities, BVI, "addr", old, new)
+    values = [BVI[p.start:p.end] for p in result[0].positions]
+    assert values == ["Quijano Chambers, P.O. Box 3159, Road Town"] * 2
+
+
+def test_resize_matches_occurrence_with_commas_on_edges():
+    # Вхождение, найденное вместе с запятыми, тоже расширяется (и теряет их).
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town")
+    first = entities[0].positions[0]
+    entities[0] = replace(entities[0], positions=[Position(first.start - 2, first.end + 1), entities[0].positions[1]])
+    old = entities[0].positions[1]
+    new = Position(BVI.index("Quijano", old.start - 30), old.end)
+    result = resize_occurrence(entities, BVI, "addr", old, new)
+    values = [BVI[p.start:p.end] for p in result[0].positions]
+    assert values == ["Quijano Chambers, P.O. Box 3159, Road Town"] * 2
+
+
+def test_resize_removes_dismissed_under_new_bounds():
+    entities = address_entity(BVI, "P.O. Box 3159, Road Town", dismissed_company="Quijano Chambers")
+    old = entities[0].positions[0]
+    new = Position(BVI.index("Quijano"), old.end)
+    result = resize_occurrence(entities, BVI, "addr", old, new)
+    assert [e.id for e in result] == ["addr"]
+    assert [BVI[p.start:p.end] for p in result[0].positions] == ["Quijano Chambers, P.O. Box 3159, Road Town"] * 2
+
+
+def test_resize_leaves_occurrence_with_other_context_or_blocked():
+    text = "at Quijano Chambers, P.O. Box 1; at Other House, P.O. Box 1; Quijano Chambers, P.O. Box 1."
+    entities = address_entity(text, "P.O. Box 1")
+    third = text.rindex("Quijano")
+    entities.append(Entity(id="co", type="COMPANY", value="Quijano", placeholder="[COMPANY_1]",
+                           positions=[Position(third, third + 7)]))
+    old = entities[0].positions[0]
+    new = Position(text.index("Quijano"), old.end)
+    result = resize_occurrence(entities, text, "addr", old, new)
+    values = [text[p.start:p.end] for p in result[0].positions]
+    # Второе вхождение стоит в другом контексте, третье заехало бы на видимую находку.
+    assert values == ["Quijano Chambers, P.O. Box 1", "P.O. Box 1", "P.O. Box 1"]
+    assert result[1] is entities[1]
+
+
+def test_resize_shrink_applies_everywhere():
+    entities = address_entity(BVI, "Quijano Chambers, P.O. Box 3159, Road Town, Tortola")
+    old = entities[0].positions[0]
+    new = Position(old.start, BVI.index(", Tortola", old.start))
+    result = resize_occurrence(entities, BVI, "addr", old, new)
+    assert [BVI[p.start:p.end] for p in result[0].positions] == ["Quijano Chambers, P.O. Box 3159, Road Town"] * 2

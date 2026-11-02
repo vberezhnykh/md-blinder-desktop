@@ -28,6 +28,10 @@ from .related import company_core_words
 from .types import Entity, EntityType, Position
 
 MIN_SEED_LENGTH = 3
+# Адрес связывается с адресом другого документа и по вложению («P.O. Box 3159,
+# Road Town» внутри «Quijano Chambers, P.O. Box 3159, Road Town»), если короткая
+# форма не короче этого: иначе «London» связал бы все лондонские адреса.
+MIN_ADDRESS_LINK_LENGTH = 12
 
 _PLACEHOLDER_RE = re.compile(r"^\[([A-Z_]+)_(\d+)\]$")
 _PLACEHOLDER_NUM_RE = re.compile(r"_(\d+)\]$")
@@ -75,22 +79,50 @@ def _company_core_keys(e: Entity, source_text: str) -> list[str]:
     return list(keys)
 
 
+def _address_values(e: Entity, source_text: str) -> list[str]:
+    if e.type != "ADDRESS":
+        return []
+    # Знаки по краям не мешают сравнению: «, p.o. box 3159, road town,».
+    return [k.split(" ", 1)[1].strip(" ,;:") for k in _entity_keys(e, source_text)]
+
+
+def _contains_words(long: str, short: str) -> bool:
+    """short входит в long целыми словами: «12 main street» не входит в «112 main street»."""
+    pattern = rf"(?<![\p{{L}}\p{{N}}]){regex.escape(short)}(?![\p{{L}}\p{{N}}])"
+    return regex.search(pattern, long, regex.V0) is not None
+
+
 @dataclass
 class _Dictionary:
     by_key: dict[str, str]
     by_core: dict[str, Optional[str]]  # None — запасной ключ ведет к разным меткам
     used_placeholders: set[str]
+    addresses: list[tuple[str, str]]  # (нормализованный адрес, метка)
+
+    def by_address(self, values: list[str], taken: set[str]) -> Optional[str]:
+        """Метка адреса другого документа, который содержит один из адресов
+        сущности или содержится в нем. None, если такого нет или меток несколько."""
+        found: set[str] = set()
+        for value in values:
+            for other, placeholder in self.addresses:
+                short, long = sorted((value, other), key=len)
+                if len(short) >= MIN_ADDRESS_LINK_LENGTH and _contains_words(long, short):
+                    found.add(placeholder)
+        found -= taken
+        return next(iter(found)) if len(found) == 1 else None
 
 
 def _build_dictionary(members: Sequence[BatchMember]) -> _Dictionary:
     by_key: dict[str, str] = {}
     by_core: dict[str, Optional[str]] = {}
     used: set[str] = set()
+    addresses: list[tuple[str, str]] = []
     for member in members:
         for e in member.entities:
             if not _is_main(e):
                 continue
             used.add(e.placeholder)
+            addresses.extend((value, e.placeholder) for value in _address_values(e, member.source_text))
             for key in _entity_keys(e, member.source_text):
                 by_key.setdefault(key, e.placeholder)
             for core in _company_core_keys(e, member.source_text):
@@ -98,7 +130,7 @@ def _build_dictionary(members: Sequence[BatchMember]) -> _Dictionary:
                     by_core[core] = e.placeholder
                 elif by_core[core] != e.placeholder:
                     by_core[core] = None
-    return _Dictionary(by_key, by_core, used)
+    return _Dictionary(by_key, by_core, used, addresses)
 
 
 def _by_placeholder_number(entities: list[Entity]) -> list[Entity]:
@@ -114,7 +146,9 @@ def reconcile_batch_placeholders(
 ) -> list[Entity]:
     """Согласует метки документа с остальными документами пакета.
 
-    1. Значение, которое уже есть в другом документе, получает его метку.
+    1. Значение, которое уже есть в другом документе, получает его метку. Адрес
+       связывается и по вложению: расширенный или укороченный в одном документе
+       адрес сохраняет общую метку.
     2. Остальные сохраняют свою метку, если ее не занимает другое значение пакета.
     3. Иначе получают наименьший свободный в пакете номер.
     4. Кандидаты и отклоненные нумеруются после всех занятых номеров, как в
@@ -142,6 +176,16 @@ def reconcile_batch_placeholders(
                  if isinstance(p, str) and p not in taken),
                 None,
             )
+        if linked is not None:
+            assigned[e.id] = linked
+            taken.add(linked)
+
+    # Вложение адресов проверяется после точных совпадений: иначе адрес мог бы занять
+    # метку, которая по точной форме принадлежит другой сущности документа.
+    for e in main:
+        if e.id in assigned:
+            continue
+        linked = d.by_address(_address_values(e, source_text), taken)
         if linked is not None:
             assigned[e.id] = linked
             taken.add(linked)

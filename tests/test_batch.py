@@ -170,3 +170,21 @@ def test_batch_csv_groups_by_label():
         "[COMPANY_2],COMPANY,ООО «Бета»,Документ 1 (alpha-beta.docx),2",
         "[COMPANY_3],COMPANY,Гаммой,Документ 2 (Договор с Гаммой.docx),1",
     ]
+
+
+def test_extended_address_keeps_label_of_other_document():
+    other = doc("Office: P.O. Box 3159, Road Town, Tortola.", [("ADDRESS", "P.O. Box 3159, Road Town", "[ADDRESS_5]")])
+    text = "Office: Quijano Chambers, P.O. Box 3159, Road Town, Tortola."
+    mine = doc(text, [("ADDRESS", "Quijano Chambers, P.O. Box 3159, Road Town", "[ADDRESS_5]")])
+    result = reconcile_batch_placeholders(mine.entities, text, [other])
+    assert placeholders(result) == ["[ADDRESS_5]"]
+
+
+def test_address_not_linked_by_partial_number_or_short_part():
+    other = doc("At 112 Main Street, Springfield. Road Town.",
+                [("ADDRESS", "112 Main Street, Springfield", "[ADDRESS_1]"), ("ADDRESS", "Road Town", "[ADDRESS_2]")])
+    text = "At 12 Main Street, Springfield. Quijano Chambers, Road Town."
+    mine = doc(text, [("ADDRESS", "12 Main Street, Springfield", "[ADDRESS_1]"),
+                      ("ADDRESS", "Quijano Chambers, Road Town", "[ADDRESS_2]")])
+    result = reconcile_batch_placeholders(mine.entities, text, [other])
+    assert placeholders(result) == ["[ADDRESS_3]", "[ADDRESS_4]"]

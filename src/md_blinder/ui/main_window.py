@@ -53,7 +53,7 @@ from .. import shell
 from ..components import ocr_models
 from ..paths import history_db_path
 from ..storage.history import HistoryDoc, HistoryStore, merge_docs, now_ms, parse_history, serialize_history
-from ..editing import replace_position
+from ..editing import resize_occurrence
 from ..text_utils import plural
 from . import theme as t
 from .autosave import Autosave
@@ -1003,7 +1003,8 @@ class MainWindow(QMainWindow):
         self._update(lambda es: add_occurrence_to_entity(es, text, start, end, entity_id), "Добавить вхождение")
 
     def _span_changed(self, entity_id: str, old, new) -> None:
-        self._update(lambda es: replace_position(es, entity_id, old, new), "Изменить границы")
+        text = self.session.text
+        self._update(lambda es: resize_occurrence(es, text, entity_id, old, new), "Изменить границы")
 
     def _entity_clicked(self, entity_id: str) -> None:
         entity = next((e for e in self.session.entities if e.id == entity_id), None)

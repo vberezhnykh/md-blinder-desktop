@@ -532,12 +532,35 @@ def _strip_leading_determiners(words: list[str]) -> list[str]:
     return words[i:]
 
 
+# Знаки, которые модель захватывает по краям спана вместе с соседними словами:
+# «, P.O. Box 3159, Road Town,». Точку не трогаем: «Inc.», «P.O.».
+_EDGE_PUNCT = _JS_TRIM_CHARS + ",;:"
+
+
+def _trim_punct_edges(m: RawMatch) -> "RawMatch | None":
+    """Срезает пробелы, запятые, точки с запятой и двоеточия по краям спана.
+    None — кроме них в спане ничего нет; тот же объект — резать нечего."""
+    value = m.value.lstrip(_EDGE_PUNCT)
+    lead = len(m.value) - len(value)
+    value = value.rstrip(_EDGE_PUNCT)
+    if not value:
+        return None
+    if len(value) == len(m.value):
+        return m
+    return replace(m, value=value, start=m.start + lead, end=m.start + lead + len(value))
+
+
 def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
     out: list[RawMatch] = []
     for m in matches:
         if m.type not in ("PERSON", "COMPANY", "ADDRESS", "REG_NUMBER"):
             out.append(m)
             continue
+
+        trimmed_edges = _trim_punct_edges(m)
+        if trimmed_edges is None:
+            continue
+        m = trimmed_edges
 
         # Индекс, ошибочно помеченный REG_NUMBER (формат "SW1A 1AA"). Проверяем ДО
         # раннего пропуска «в спане есть цифра» — в индексе цифры есть.

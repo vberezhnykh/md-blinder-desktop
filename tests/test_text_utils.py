@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from md_blinder.text_utils import CandidateContext, candidate_context, plural, snap_to_word_boundary
+from md_blinder.text_utils import CandidateContext, candidate_context, plural, snap_to_word_boundary, snap_to_word_edge
 
 
 # candidateContext
@@ -102,3 +102,24 @@ def test_plural_fraction_and_integral_float():
     assert plural(1.5, FORMS) == "1.5 находок"
     assert plural(2.0, FORMS) == "2 находки"
     assert plural(-1, FORMS) == "-1 находка"
+
+
+# snap_to_word_edge: левая ручка встает на начало слова, правая на конец
+
+def test_snap_edge_left_skips_space_before_word():
+    text = "physical: Quijano Chambers"
+    # Указатель на пробеле после двоеточия: обычная привязка дала бы границу перед
+    # пробелом, левая ручка встает на начало «Quijano».
+    assert snap_to_word_edge(text, text.index(" Quijano"), "left") == text.index("Quijano")
+    assert snap_to_word_edge(text, text.index("Quijano") + 2, "left") == text.index("Quijano")
+
+
+def test_snap_edge_right_stops_at_word_end():
+    text = "Road Town, Tortola"
+    assert snap_to_word_edge(text, text.index(" Tortola") + 1, "right") == text.index(" Tortola")
+    assert snap_to_word_edge(text, len(text), "right") == len(text)
+
+
+def test_snap_edge_without_words():
+    assert snap_to_word_edge("   ", 2, "left") == snap_to_word_boundary("   ", 2)
+    assert snap_to_word_edge("", 0, "right") == 0

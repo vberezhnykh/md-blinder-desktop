@@ -152,3 +152,19 @@ def test_url_spellings_grouped():
 def test_without_ner_is_not_failure():
     result = anonymize_markdown("reach me at a@b.com")
     assert not result.ner_failed
+
+
+def test_address_found_with_commas_is_one_clean_entity():
+    text = (
+        "registered office at Quijano Chambers, P.O. Box 3159, Road Town, Tortola.\n\n"
+        "Physical: Quijano Chambers, P.O. Box 3159, Road Town, Tortola."
+    )
+    first = text.index(", P.O.")
+    second = text.index("P.O.", first + 10)
+    value = "P.O. Box 3159, Road Town"
+    matches = [
+        RawMatch("ADDRESS", text[first:first + len(value) + 3], first, first + len(value) + 3, 0.9),
+        RawMatch("ADDRESS", value, second, second + len(value), 0.9),
+    ]
+    [address] = [e for e in anonymize_markdown(text, ner(matches)).entities if e.type == "ADDRESS"]
+    assert [text[p.start:p.end] for p in address.positions] == [value, value]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import replace
 
+from .config import NER_CONFIRM_THRESHOLD
 from .types import RawMatch
 
 # Браузерная NER-модель часто ловит определяемые «ролевые» термины договора
@@ -65,6 +66,21 @@ ROLE_NOUNS: frozenset[str] = frozenset({
     # as bare spans they read as roles, not PII.
     'ceo', 'cfo', 'cto', 'coo', 'chairman', 'chairperson', 'chairwoman',
     'president', 'secretary', 'treasurer', 'mr', 'mrs', 'ms', 'dr', 'prof',
+    # Роли и общие обозначения, которые модель выдавала за PERSON/COMPANY в
+    # договорах (жалоба пользователя 2026-11 и прогон по корпусу). Множественное
+    # число проверяется через _en_forms, отдельно его перечислять не нужно.
+    'lawyer', 'banker', 'insurer', 'reinsurer', 'underwriter', 'sender',
+    'receiver', 'successor', 'assign', 'transferee', 'transferor', 'executive',
+    'claimant', 'investor', 'acquirer', 'advertiser', 'publisher', 'bidder',
+    'engineer', 'visitor', 'guest', 'liquidator', 'administrator',
+    'conservator', 'arbitrator', 'mediator', 'candidate', 'official',
+    'professional', 'board', 'entrepreneur', 'intermediary', 'subscriber',
+    'bankrupt', 'vp', 'svp', 'evp', 'firm', 'partnership', 'association',
+    'trust', 'subsidiary', 'organization', 'organisation', 'institution',
+    'courier', 'contact', 'name', 'exhibit', 'body', 'mail', 'royalty',
+    # местоимения: «it», «she» модель изредка помечает как компанию или человека
+    'it', 'he', 'she', 'they', 'them', 'we', 'us', 'you', 'him', 'itself',
+    'himself', 'herself', 'themselves',
 })
 
 GENERIC_MODIFIERS: frozenset[str] = frozenset({
@@ -90,6 +106,15 @@ GENERIC_MODIFIERS: frozenset[str] = frozenset({
     'potential', 'prospective', 'former', 'current', 'future', 'participating',
     'contracting', 'remaining', 'surviving', 'successor', 'underlying',
     'intended', 'eligible', 'qualified',
+    # прилагательные из ложных находок 2026-11 («Upstream Providers», «indemnified
+    # Party», «Chief Executive Officer», «registered U.S. Mail»)
+    'professional', 'upstream', 'downstream', 'indemnified', 'warranting',
+    'chief', 'hosting', 'external', 'internal', 'independent', 'certified',
+    'public', 'licensed', 'duly', 'field', 'present', 'concerned', 'referenced',
+    'reasonable', 'rightful', 'neither', 'one', 'personal', 'known', 'invalid',
+    'reassigned', 'overnight', 'recognized', 'recognised', 'accounting',
+    'unincorporated', 'limited', 'liability', 'voluntary', 'bankruptcy', 'fact',
+    'target', 'application', 'u', 's',
 })
 
 CONNECTORS: frozenset[str] = frozenset({'and', 'or', 'of', 'to', 'for', 'in', 'on', 'at', 'by', 'with'})
@@ -139,6 +164,37 @@ GENERIC_ADDRESS_WORDS: frozenset[str] = frozenset({
     'postal', 'physical', 'mailing', 'billing', 'shipping', 'delivery',
     'main', 'seat', 'premises', 'location', 'locations', 'headquarters',
     'hq', 'of', 'and', 'the', 'its', 'their', 'our',
+    # «wallet address», «Notice addresses», «e-mail address», «addresses listed in
+    # the Agreement»: обозначение адреса, а не сам адрес.
+    'notice', 'notices', 'wallet', 'email', 'e', 'mail', 'ip', 'web', 'website',
+    'url', 'return', 'forwarding', 'residential', 'residence', 'domicile',
+    'invoice', 'invoicing', 'legal', 'actual', 'territory', 'territories',
+    'given', 'stated', 'listed', 'appearing', 'herein', 'hereto', 'hereof',
+    'set', 'forth', 'above', 'below', 'beginning', 'agreement', 'contract',
+    'this', 'in', 'at', 'for', 'to', 'by', 'on', 'such', 'each', 'respective',
+    'party', 'parties',
+})
+
+# Голова родовой адресной фразы: спан без цифр, где есть это слово, а остальные
+# слова родовые или написаны со строчной буквы, — обозначение адреса.
+ADDRESS_HEADS: frozenset[str] = frozenset({'address', 'addresses'})
+
+# «a Nevada corporation», «Delaware limited liability company»: штат и правовая
+# форма — описание формы, а не название. Слово «trust» сюда не входит:
+# «Delaware Trust Company» — настоящий банк.
+US_STATE_WORDS: frozenset[str] = frozenset({
+    'alabama', 'alaska', 'arizona', 'arkansas', 'california', 'colorado',
+    'connecticut', 'delaware', 'florida', 'georgia', 'hawaii', 'idaho',
+    'illinois', 'indiana', 'iowa', 'kansas', 'kentucky', 'louisiana', 'maine',
+    'maryland', 'massachusetts', 'michigan', 'minnesota', 'mississippi',
+    'missouri', 'montana', 'nebraska', 'nevada', 'hampshire', 'jersey', 'mexico',
+    'york', 'carolina', 'dakota', 'ohio', 'oklahoma', 'oregon', 'pennsylvania',
+    'rhode', 'island', 'tennessee', 'texas', 'utah', 'vermont', 'virginia',
+    'washington', 'west', 'wisconsin', 'wyoming', 'north', 'south', 'new',
+})
+LEGAL_FORM_WORDS: frozenset[str] = frozenset({
+    'corporation', 'company', 'limited', 'liability', 'partnership', 'general',
+    'nonprofit', 'non', 'profit', 'statutory', 'professional', 'public', 'benefit',
 })
 
 _GENERIC_REGNUM_LIST: tuple[str, ...] = (
@@ -191,7 +247,7 @@ RU_ROLE_STEMS: tuple[str, ...] = (
     'поверенн', 'представител', 'работник', 'сотрудник', 'соисполнител',
     'обладател', 'правообладател', 'пользовател', 'потребител', 'приобретател',
     'участник', 'учредител', 'акционер', 'руководител', 'директор', 'сторон',
-    'гарант', 'контрагент',
+    'гарант', 'контрагент', 'персонал', 'посетител', 'субисполнител',
 )
 
 # Точные формы ролевых слов — используются как есть для однословных спанов
@@ -278,7 +334,8 @@ RU_MODIFIER_STEMS: tuple[str, ...] = (
     'физическ', 'юридическ', 'генеральн', 'ограниченн', 'соответствующ',
     'указанн', 'настоящ', 'названн', 'получивш', 'передающ', 'раскрывающ',
     'нарушивш', 'направивш', 'обязанн', 'уведомляющ', 'порядков',
-    'регистрационн', 'идентификационн', 'ответственност',
+    'регистрационн', 'идентификационн', 'ответственност', 'получающ',
+    'контактн', 'информаци',
     # Украинские корни модификаторов (для многословных «фізична особа»,
     # «юридична особа», «уповноважений представник» и т.п.).
     'фізичн', 'юридичн', 'уповноважен', 'відповідальн', 'наступн', 'зазначен',
@@ -290,6 +347,8 @@ RU_MODIFIER_FORMS: frozenset[str] = frozenset({
     'третьему', 'третьего', 'данный', 'данного', 'данному', 'данным',
     'данном', 'иной', 'иного', 'иному', 'иным', 'ином', 'прочий', 'прочие',
     'прочих',
+    'первый', 'первая', 'первой', 'первого', 'первому', 'первым', 'первом',
+    'второй', 'вторая', 'второго', 'второму', 'вторым', 'втором', 'вторую',
 })
 
 RU_DETERMINERS: frozenset[str] = frozenset({
@@ -308,13 +367,15 @@ RU_CONNECTORS: frozenset[str] = frozenset({
 # для много-, и для однословных спанов.
 RU_REGNUM_EXACT: frozenset[str] = frozenset({
     'номер', 'номера', 'номеру', 'номером', 'номере', 'реестровый', 'реестровым',
+    # подписи реквизитов без самого значения
+    'инн', 'кпп', 'огрн', 'огрнип', 'бик', 'окпо', 'єдрпоу', 'рнокпп', 'іпн',
 })
 
 # Точные формы адресных слов — безопасны и для однословных спанов.
 RU_ADDRESS_EXACT: frozenset[str] = frozenset({
     'адрес', 'адреса', 'адресу', 'адресом', 'адресе', 'местонахождения',
     'местонахождение', 'местонахождении', 'нахождения', 'почта', 'почты',
-    'почте', 'почту', 'почтой',
+    'почте', 'почту', 'почтой', 'адресов', 'адресам', 'адресами', 'адресах',
 })
 
 # Урезанные корни ("почтов" → «почтовый/почтового/…», "электронн" →
@@ -322,7 +383,7 @@ RU_ADDRESS_EXACT: frozenset[str] = frozenset({
 # спане (раньше сюда же входило «эл», ловившее города «Электросталь»/
 # «Элиста»/«Эльбрус» — реальная утечка PII), поэтому используются ТОЛЬКО
 # для многословных спанов (см. RU_ROLE_STEMS выше и пояснение над ним).
-RU_ADDRESS_STEMS: tuple[str, ...] = ('почтов', 'электронн')
+RU_ADDRESS_STEMS: tuple[str, ...] = ('почтов', 'электронн', 'помещени')
 
 
 def _starts_with_any(word: str, stems: tuple[str, ...]) -> bool:
@@ -343,10 +404,6 @@ def _ru_is_generic(w: str) -> bool:
         or w in RU_CONNECTORS
         or _starts_with_any(w, RU_MODIFIER_STEMS)
     )
-
-
-def _ru_is_regnum_generic(w: str) -> bool:
-    return w in RU_REGNUM_EXACT or _ru_is_generic(w)
 
 
 def _ru_is_address_generic(w: str) -> bool:
@@ -374,16 +431,45 @@ def _ru_is_address_generic_exact(w: str) -> bool:
     return w in RU_ADDRESS_EXACT or _ru_is_generic_exact(w)
 
 
-def _ru_is_regnum_generic_exact(w: str) -> bool:
-    return w in RU_REGNUM_EXACT or _ru_is_generic_exact(w)
-
-
 _SPLIT_RE = re.compile(rf"[{_WS_CHARS}\-/&,.]+")
 _DIGIT_RE = re.compile(r"[0-9]")
 
 
 def _split_words(value: str) -> list[str]:
-    return [w for w in _SPLIT_RE.split(value.strip(_JS_TRIM_CHARS).lower()) if w]
+    return [w.lower() for w in _split_words_cased(value)]
+
+
+def _split_words_cased(value: str) -> list[str]:
+    return [w for w in _SPLIT_RE.split(value.strip(_JS_TRIM_CHARS)) if w]
+
+
+def _has_upper(value: str) -> bool:
+    return any(ch.isupper() for ch in value)
+
+
+def _en_forms(w: str) -> tuple[str, ...]:
+    """Слово и его возможные формы единственного числа: «advisers» → «adviser»,
+    «subsidiaries» → «subsidiary». Словари ролей хранят единственное число."""
+    forms = [w]
+    if len(w) > 3 and w.endswith("ies"):
+        forms.append(w[:-3] + "y")
+    if len(w) > 3 and w.endswith("es"):
+        forms.append(w[:-2])
+    if len(w) > 2 and w.endswith("s"):
+        forms.append(w[:-1])
+    return tuple(forms)
+
+
+def _en_in(w: str, vocab: frozenset[str]) -> bool:
+    return any(f in vocab for f in _en_forms(w))
+
+
+def is_generic_word(w: str) -> bool:
+    """Родовое слово договора (роль, определитель, связка) на английском, русском
+    или украинском — по точной форме, без префиксов. Нужен поиску похожих
+    вхождений (related.py): такие слова не ищутся как части имени или названия."""
+    w = w.lower()
+    return _en_in(w, GENERIC_WORDS) or _ru_is_generic_exact(w)
 
 
 def _strip_leading_determiners(words: list[str]) -> list[str]:
@@ -431,8 +517,19 @@ def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
         if not words:
             continue
 
+        # Имя человека пишется с заглавной буквы. Спан PERSON совсем без заглавных
+        # («lawyers», «sender», «minors», «посетителя», «контактное лицо») — роль
+        # или общее слово, а не имя.
+        if m.type == "PERSON" and not _has_upper(m.value):
+            continue
+
         if _DIGIT_RE.search(m.value):
             out.append(m)
+            continue
+
+        # Регистрационный номер без единой цифры — родовая фраза («part number»,
+        # «Telecopy No.», «Licensee»), настоящий номер всегда содержит цифры.
+        if m.type == "REG_NUMBER":
             continue
 
         # Однословный спан дропаем только по ТОЧНОЙ форме (без префикса): на одном
@@ -444,26 +541,27 @@ def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
             # PERSON со суффиксом юрлица — это компания, ошибочно помеченная человеком.
             if m.type == "PERSON" and any(w in COMPANY_SUFFIXES for w in words):
                 continue
-            all_generic = all(w in GENERIC_WORDS for w in words)
-            has_role_noun = any(w in ROLE_NOUNS for w in words)
-            if all_generic and has_role_noun:
-                continue
-            # Русская ветка (параллельно английской): те же критерии по русскому
-            # словарю с учётом склонений.
-            is_generic = _ru_is_generic_exact if single else _ru_is_generic
-            is_role = _ru_is_role_noun_exact if single else _ru_is_role_noun
-            if all(is_generic(w) for w in words) and any(is_role(w) for w in words):
-                continue
-            out.append(m)
-            continue
-
-        if m.type == "REG_NUMBER":
-            if all(w in GENERIC_REGNUM_WORDS for w in words):
+            # Неуверенная «компания» без заглавных букв («courier service»,
+            # «companies») — общее слово. Уверенную не трогаем: бывают названия
+            # строчными буквами.
+            if (
+                m.type == "COMPANY" and not _has_upper(m.value)
+                and m.score is not None and m.score < NER_CONFIRM_THRESHOLD
+            ):
                 continue
             if (
-                _ru_is_regnum_generic_exact(words[0])
-                if single
-                else all(_ru_is_regnum_generic(w) for w in words)
+                m.type == "COMPANY" and any(w in US_STATE_WORDS for w in words)
+                and any(w in LEGAL_FORM_WORDS for w in words)
+                and all(w in US_STATE_WORDS or w in LEGAL_FORM_WORDS for w in words)
+            ):
+                continue
+            # Все слова родовые (английские, русские или украинские, в том числе
+            # вперемешку: «The Customer / Замовник»), и среди них есть роль.
+            ru_generic = _ru_is_generic_exact if single else _ru_is_generic
+            ru_role = _ru_is_role_noun_exact if single else _ru_is_role_noun
+            if (
+                all(_en_in(w, GENERIC_WORDS) or ru_generic(w) for w in words)
+                and any(_en_in(w, ROLE_NOUNS) or ru_role(w) for w in words)
             ):
                 continue
             out.append(m)
@@ -476,6 +574,18 @@ def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
             _ru_is_address_generic_exact(words[0])
             if single
             else all(_ru_is_address_generic(w) for w in words)
+        ):
+            continue
+        # Адрес без цифр и без заглавных букв («territory», «wallet address»).
+        if not _has_upper(m.value):
+            continue
+        # «Notice addresses», «addresses listed in the Agreement», «адрес нахождения
+        # Помещений»: есть слово «адрес», остальное — родовые слова или строчные.
+        cased = _split_words_cased(m.value)
+        if any(w.lower() in ADDRESS_HEADS or w.lower().startswith("адрес") for w in cased) and all(
+            w.lower() in GENERIC_ADDRESS_WORDS or w.lower() in ADDRESS_HEADS or w.lower().startswith("адрес")
+            or not _has_upper(w) or _ru_is_address_generic(w.lower())
+            for w in cased
         ):
             continue
         out.append(m)

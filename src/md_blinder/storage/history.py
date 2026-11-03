@@ -100,6 +100,8 @@ def sanitize_entities(raw: Any, source_length: Optional[int] = None) -> list[Ent
             candidate_note=e["candidateNote"] if isinstance(e.get("candidateNote"), str) else None,
             related_to=e["relatedTo"] if isinstance(e.get("relatedTo"), str) else None,
             dismissed=e.get("dismissed") is True,
+            batch_aliases=[a for a in e["batchAliases"] if isinstance(a, str) and a.strip()]
+            if isinstance(e.get("batchAliases"), list) else [],
         ))
     return result
 

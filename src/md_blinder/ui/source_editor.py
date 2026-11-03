@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Callable, Optional, Sequence
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import (
@@ -38,11 +38,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..anonymize.apply import entity_current_value
+from ..anonymize.batch import BatchIndex, BatchTarget
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from ..editing import TextChange, active_span_at, drag_span, hovered_entity_at, replace_position
 from ..storage.offsets import OffsetMap
 from . import theme as t
-from .widgets import Select
+from .widgets import BATCH_PREFIX, Select
 
 _TABLE_LINE = re.compile(r"^\s*\|")
 LINE_HEIGHT = 130  # процентов от высоты строки шрифта: так выходит line-height 1.7 из веб-версии
@@ -178,13 +179,18 @@ class MergePopup(QFrame):
         self.open_button.clicked.connect(self._open_picker)
         self.select.activated.connect(self._chosen)
 
-    def open_for(self, entity: Entity, entities: list[Entity], text: str, at: QPoint) -> None:
+    def open_for(
+        self, entity: Entity, entities: list[Entity], text: str, at: QPoint, elsewhere: Sequence[BatchTarget] = ()
+    ) -> None:
         self.entity_id = entity.id
         self.select.clear()
         self.select.addItem("объединить с…", "")
         for x in entities:
             if x.type == entity.type and not x.candidate and not x.dismissed and x.id != entity.id:
                 self.select.addItem(f"{x.placeholder} · {_truncate(entity_current_value(text, x), 22)}", x.id)
+        # Замены из других документов пакета; выбор приходит как BATCH_PREFIX + метка.
+        for bt in elsewhere:
+            self.select.addItem(f"{bt.placeholder} · {_truncate(bt.value, 22)} · другой документ", BATCH_PREFIX + bt.placeholder)
         self.select.hide()
         self.open_button.show()
         self.adjustSize()
@@ -237,6 +243,8 @@ class SourceEditor(QTextEdit):
         self._hover_id: Optional[str] = None
         self._suppress = False
         self.selected_type = "PERSON"
+        # Замены остальных документов пакета открытого документа; задает MainWindow.
+        self.batch_index: Callable[[], Optional[BatchIndex]] = lambda: None
         self.popup = AddEntityPopup(self)
         self.popup.add_requested.connect(self.add_requested)
         self.popup.attach_requested.connect(self.attach_requested)
@@ -607,15 +615,17 @@ class SourceEditor(QTextEdit):
         if self._active is not None:
             entity_id, span = self._active
             entity = next(e for e in self._entities if e.id == entity_id)
-            mergeable = (
-                not entity.candidate and not entity.dismissed
-                and sum(1 for x in self._entities if not x.candidate and not x.dismissed and x.type == entity.type) >= 2
+            batch = self.batch_index()
+            elsewhere = batch.merge_targets(entity, self._entities) if batch is not None else []
+            mergeable = not entity.candidate and not entity.dismissed and (
+                bool(elsewhere)
+                or sum(1 for x in self._entities if not x.candidate and not x.dismissed and x.type == entity.type) >= 2
             )
             if mergeable:
                 rects = self.range_rects(span.start, span.end)
                 if rects:
                     at = self.viewport().mapToGlobal(rects[0].topLeft().toPoint())
-                    self.merge_popup.open_for(entity, self._entities, self._text, at)
+                    self.merge_popup.open_for(entity, self._entities, self._text, at, elsewhere)
             self.entity_clicked.emit(entity_id)
         self.viewport().update()
 

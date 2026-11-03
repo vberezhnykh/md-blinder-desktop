@@ -44,7 +44,14 @@ from ..anonymize.apply import (
     pending_candidates,
     restore_candidate,
 )
-from ..anonymize.batch import align_batch, batch_csv_bytes, batch_to_markdown, reconcile_batch_placeholders
+from ..anonymize.batch import (
+    BatchIndex,
+    align_batch,
+    batch_csv_bytes,
+    batch_to_markdown,
+    link_to_batch,
+    reconcile_batch_placeholders,
+)
 from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
@@ -68,7 +75,7 @@ from .source_editor import EditorPane
 from .start_screen import StartScreen, dropped_files
 from .theme import add_shadow
 from .update_ui import UpdateBar, UpdateController, version_footer
-from .widgets import Notice, PopupMenu, StatusStrip, Toast
+from .widgets import BATCH_PREFIX, Notice, PopupMenu, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
 SETTING_CONVERT_ONLY = "convertOnly"
@@ -421,9 +428,8 @@ class MainWindow(QMainWindow):
         p.editor.add_requested.connect(self._add_entity)
         p.editor.attach_requested.connect(self._attach_entity)
         p.editor.entity_clicked.connect(self._entity_clicked)
-        p.editor.merge_requested.connect(
-            lambda a, b: self._update(lambda es: compact_placeholder_numbers(merge_entities(es, a, b)), "Объединить")
-        )
+        p.editor.merge_requested.connect(self._merge)
+        p.editor.batch_index = lambda: self.batch_index
         p.editor.span_changed.connect(self._span_changed)
         p.editor.hovered.connect(p.side.found.set_highlighted)
         p.side.found.row_hovered.connect(p.editor.set_outlined)
@@ -439,7 +445,8 @@ class MainWindow(QMainWindow):
         found.set_anonymize.connect(self._set_anonymize)
         found.select.connect(self.select_entity)
         found.change_type.connect(self._change_type)
-        found.merge.connect(lambda a, b: self._update(lambda es: compact_placeholder_numbers(merge_entities(es, a, b)), "Объединить"))
+        found.merge.connect(self._merge)
+        found.link_batch.connect(self._link_batch)
         found.delete.connect(lambda i: self._update(lambda es: compact_placeholder_numbers([e for e in es if e.id != i]), "Удалить замену"))
 
         self.session.doc_replaced.connect(self._doc_replaced)
@@ -824,6 +831,41 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ пакет
 
+    @property
+    def batch_others(self) -> list[HistoryDoc]:
+        return self._batch_others
+
+    @batch_others.setter
+    def batch_others(self, docs: list[HistoryDoc]) -> None:
+        self._batch_others = docs
+        self._batch_index: Optional[BatchIndex] = None
+
+    @property
+    def batch_index(self) -> Optional[BatchIndex]:
+        """Замены остальных документов пакета: строятся при первом обращении после
+        смены пакета, потому что пакет из сотни документов разбирать заметно."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id or not self._batch_others:
+            return None
+        if self._batch_index is None:
+            self._batch_index = BatchIndex(self._batch_others)
+        return self._batch_index
+
+    def _merge(self, source: str, target: str) -> None:
+        if target.startswith(BATCH_PREFIX):
+            self._link_batch(source, target[len(BATCH_PREFIX):])
+            return
+        self._update(lambda es: compact_placeholder_numbers(merge_entities(es, source, target)), "Объединить")
+
+    def _link_batch(self, entity_id: str, placeholder: str) -> None:
+        """Объединяет находку с заменой из другого документа пакета: находка получает
+        ее метку, и при согласовании пакета метка остается общей."""
+        batch = self.batch_index
+        target = batch.target(placeholder) if batch is not None else None
+        if target is None:
+            return
+        self._update(lambda es: compact_placeholder_numbers(link_to_batch(es, entity_id, target)), "Объединить")
+
     def _reconcile_with_batch(self, entities: list, text: str) -> list:
         doc = self.session.doc
         if doc is None or not doc.batch_id:
@@ -1046,7 +1088,7 @@ class MainWindow(QMainWindow):
         anonymized = build_anonymized_text_with_map(text, output)
         self.anonymized_text = anonymized.text
         p.preview.render(anonymized.text, text, anonymized.segments, output)
-        p.side.render(entities, text)
+        p.side.render(entities, text, None if self.convert_only else self.batch_index)
         p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
         unreviewed = len(pending_candidates(output))
         active = [e for e in output if e.anonymize]

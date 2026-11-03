@@ -54,6 +54,10 @@ class Entity:
     candidate_note: Optional[str] = None
     related_to: Optional[str] = None  # id сущности, на которую похож кандидат
     dismissed: bool = False  # кандидат отклонен вручную
+    # Формы значения из других документов пакета, с которыми пользователь объединил
+    # сущность («Makedon Kiriakidis» для «Makedon Kirjakidjs» после OCR): по ним
+    # согласование пакета дает сущности ту же метку (anonymize/batch.py).
+    batch_aliases: list[str] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -75,6 +79,8 @@ class Entity:
             data["relatedTo"] = self.related_to
         if self.dismissed:
             data["dismissed"] = True
+        if self.batch_aliases:
+            data["batchAliases"] = list(self.batch_aliases)
         return data
 
     @staticmethod
@@ -92,6 +98,7 @@ class Entity:
             candidate_note=data.get("candidateNote"),
             related_to=data.get("relatedTo"),
             dismissed=bool(data.get("dismissed", False)),
+            batch_aliases=[str(a) for a in data.get("batchAliases", []) if isinstance(a, str)],
         )
 
 

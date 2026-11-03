@@ -3,8 +3,13 @@
 from dataclasses import dataclass, field
 
 from md_blinder.anonymize.apply import build_anonymized_text
+from md_blinder.anonymize.apply import merge_entities
 from md_blinder.anonymize.batch import (
+    BatchIndex,
     align_batch,
+    batch_targets,
+    link_to_batch,
+    similar_spelling,
     batch_entities_to_csv,
     batch_to_markdown,
     reconcile_batch_placeholders,
@@ -188,3 +193,90 @@ def test_address_not_linked_by_partial_number_or_short_part():
                       ("ADDRESS", "Quijano Chambers, Road Town", "[ADDRESS_2]")])
     result = reconcile_batch_placeholders(mine.entities, text, [other])
     assert placeholders(result) == ["[ADDRESS_3]", "[ADDRESS_4]"]
+
+
+# --- Объединение с заменой из другого документа ---
+
+OCR_A = "Agent: Makedon Kiriakidis. Company: Northwind Trading LLC."
+OCR_B = "Signed by Makedon Kirjakidjs on behalf of Contoso Ltd."
+
+
+def ocr_pair() -> tuple[Doc, Doc]:
+    a = doc(OCR_A, [("PERSON", "Makedon Kiriakidis", "[PERSON_1]"),
+                    ("COMPANY", "Northwind Trading LLC", "[COMPANY_1]")], "Клиент/a.pdf")
+    b = doc(OCR_B, [("PERSON", "Makedon Kirjakidjs", "[PERSON_1]"), ("COMPANY", "Contoso Ltd", "[COMPANY_1]")], "b.pdf")
+    [a, b] = align_batch([a, b])
+    return a, b
+
+
+def test_ocr_variants_in_two_documents_get_different_labels_until_linked():
+    a, b = ocr_pair()
+    assert placeholders(b.entities) == ["[PERSON_2]", "[COMPANY_2]"]
+    index = BatchIndex([a])
+    person = b.entities[0]
+    # Подсказка: в другом документе похожее написание.
+    [target] = index.similar(person, b.source_text, b.entities)
+    assert (target.placeholder, target.value, target.docs) == ("[PERSON_1]", "Makedon Kiriakidis", ("Клиент/a.pdf",))
+    # Компании не похожи, подсказки нет; а объединить вручную можно с любой заменой того же типа.
+    assert index.similar(b.entities[1], b.source_text, b.entities) == []
+    assert [t.placeholder for t in index.merge_targets(b.entities[1], b.entities)] == ["[COMPANY_1]"]
+
+    linked = link_to_batch(b.entities, person.id, target)
+    linked = reconcile_batch_placeholders(linked, b.source_text, [a])
+    assert placeholders(linked) == ["[PERSON_1]", "[COMPANY_2]"]
+    assert linked[0].batch_aliases == ["Makedon Kiriakidis"]
+    b.entities = linked
+    # После объединения подсказки нет: метка уже общая.
+    assert index.similar(linked[0], b.source_text, linked) == []
+    # Согласование в любом порядке сохраняет общую метку.
+    for docs in ([a, b], [b, a]):
+        aligned = align_batch(docs)
+        people = {d.name: d.entities[0].placeholder for d in aligned}
+        assert people["Клиент/a.pdf"] == people["b.pdf"]
+    # Третий документ с любым из написаний получает ту же метку.
+    c = doc("Copy to Makedon Kirjakidjs.", [("PERSON", "Makedon Kirjakidjs", "[PERSON_1]")])
+    d = doc("Copy to Makedon Kiriakidis.", [("PERSON", "Makedon Kiriakidis", "[PERSON_1]")])
+    for third in (c, d):
+        assert placeholders(reconcile_batch_placeholders(third.entities, third.source_text, [b])) == ["[PERSON_1]"]
+    assert "Makedon Kiriakidis; Makedon Kirjakidjs" in batch_entities_to_csv([a, b])
+
+
+def test_link_survives_history_roundtrip_and_local_merge():
+    from md_blinder.storage.history import sanitize_entities
+
+    a, b = ocr_pair()
+    target = BatchIndex([a]).target("[PERSON_1]")
+    linked = link_to_batch(b.entities, b.entities[0].id, target)
+    restored = sanitize_entities([e.to_json() for e in linked], len(b.source_text))
+    assert restored[0].batch_aliases == ["Makedon Kiriakidis"]
+    assert Entity.from_json(linked[0].to_json()).batch_aliases == ["Makedon Kiriakidis"]
+    assert "batchAliases" not in linked[1].to_json()
+    # Слияние внутри документа сохраняет связь с другим документом.
+    text = "Makedon Kirjakidjs and M. Kirjakidjs"
+    x = entity(text, "PERSON", "Makedon Kirjakidjs", "[PERSON_1]", batch_aliases=["Makedon Kiriakidis"])
+    y = entity(text, "PERSON", "M. Kirjakidjs", "[PERSON_2]")
+    merged = merge_entities([x, y], x.id, y.id)
+    assert merged[0].batch_aliases == ["Makedon Kiriakidis"]
+
+
+def test_link_ignores_other_type_and_targets_exclude_local_labels():
+    a, b = ocr_pair()
+    targets = batch_targets([a])
+    assert [(t.type, t.placeholder) for t in targets] == [("COMPANY", "[COMPANY_1]"), ("PERSON", "[PERSON_1]")]
+    company_target = targets[0]
+    assert link_to_batch(b.entities, b.entities[0].id, company_target) is b.entities
+    # Метка, которая уже есть в документе, объединяется внутри документа, а не через пакет.
+    shared = doc("Makedon Kiriakidis", [("PERSON", "Makedon Kiriakidis", "[PERSON_1]")])
+    assert BatchIndex([a]).merge_targets(shared.entities[0], shared.entities) == []
+
+
+def test_similar_spelling():
+    assert similar_spelling("Makedon Kiriakidis", "Makedon Kirjakidjs")
+    # Кириллические двойники латинских букв после OCR.
+    assert similar_spelling("Makedon Kiriakidis", "Makedоn Kiriakidis")
+    assert similar_spelling("Иван Петрович Сидоров", "Иван Петрович Сидopов")
+    assert similar_spelling("Northwind Trading LLC", "Northwlnd Trading, LLC")
+    assert not similar_spelling("John Smith", "Jane Smith")
+    assert not similar_spelling("12 Main Street, London", "14 Main Street, London", "ADDRESS")
+    assert similar_spelling("DIALOQ LTDA", "DIALOQ LTD4", "COMPANY")
+    assert not similar_spelling("Smith", "Smyth")  # слишком коротко, чтобы судить

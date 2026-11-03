@@ -16,11 +16,11 @@ if not exist .venv (
 )
 
 echo Устанавливаю зависимости...
-.venv\Scripts\python -m pip install --disable-pip-version-check -q --upgrade pip || exit /b 1
-.venv\Scripts\python -m pip install --disable-pip-version-check -q -e ".[dev]" || exit /b 1
-rem pymupdf-layout тянет обычный onnxruntime, он затирает файлы onnxruntime-directml.
-.venv\Scripts\python -m pip uninstall --disable-pip-version-check -q -y onnxruntime onnxruntime-directml || exit /b 1
-.venv\Scripts\python -m pip install --disable-pip-version-check -q --no-deps onnxruntime-directml || exit /b 1
+rem Версии из uv.lock, как в CI; на Windows там onnxruntime-directml вместо onnxruntime.
+.venv\Scripts\python -m pip install --disable-pip-version-check -q uv==0.11.32 || exit /b 1
+.venv\Scripts\uv export --frozen --extra dev --no-emit-project --no-hashes -o requirements-ci.txt || exit /b 1
+.venv\Scripts\uv pip install --python .venv\Scripts\python.exe -r requirements-ci.txt || exit /b 1
+.venv\Scripts\uv pip install --python .venv\Scripts\python.exe --no-deps -e . || exit /b 1
 
 echo Запускаю тесты...
 .venv\Scripts\python -m pytest -q || exit /b 1

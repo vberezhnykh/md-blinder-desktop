@@ -1,4 +1,5 @@
 import datetime as dt
+import re
 import zipfile
 
 import pytest
@@ -74,8 +75,9 @@ def test_formula_uses_cached_value(tmp_path):
         for item in zin.infolist():
             data = zin.read(item.filename)
             if item.filename == "xl/worksheets/sheet1.xml":
-                assert b"<f>1+1</f><v />" in data
-                data = data.replace(b"<f>1+1</f><v />", b"<f>1+1</f><v>2</v>")
+                # Версии openpyxl пишут пустое значение по-разному: <v /> или <v></v>.
+                data, count = re.subn(rb"<f>1\+1</f><v ?/>|<f>1\+1</f><v></v>", b"<f>1+1</f><v>2</v>", data)
+                assert count == 1
             zout.writestr(item, data)
     assert xlsx_to_markdown(saved) == "## S\n\n| Итого |\n| --- |\n| 2 |"
 

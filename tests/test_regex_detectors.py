@@ -643,6 +643,9 @@ def test_javascript_regex_semantics(text: str, expected: list[tuple[str, str, in
     ("UEN 201912345K", "201912345K"),
     ("company number 12345678", "12345678"),
     ("Business Registration No. 53-1234567", "53-1234567"),
+    # Сент-Китс и Невис: буква и номер через пробел; NER принимал его за адрес.
+    ("incorporated in Saint Kitts & Nevis with registration number C 62251, having", "C 62251"),
+    ("Company registration no. HE 123456", "HE 123456"),
 ])
 def test_detects_a_registration_number_after_its_label(text: str, number: str) -> None:
     assert number in values(text, "REG_NUMBER")
@@ -650,3 +653,9 @@ def test_detects_a_registration_number_after_its_label(text: str, number: str) -
 
 def test_registration_label_needs_a_number_with_digits() -> None:
     assert values("the registration number of the Company", "REG_NUMBER") == []
+
+
+def test_spaced_registration_prefix_is_uppercase_only() -> None:
+    # Строчное слово перед цифрами — не префикс номера.
+    assert values("the registration number is 12345678", "REG_NUMBER") == []
+    assert values("registration number c 62251", "REG_NUMBER") == []

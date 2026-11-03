@@ -201,9 +201,11 @@ QFrame#card {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {
 QFrame#topbar {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
 QFrame#topbar[dragging="true"] {{ background: {ACCENT_WASH}; border-color: {ACCENT}; }}
 QFrame#divider {{ background: {LINE}; }}
-QFrame#fact {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; }}
-QFrame#factPrivacy {{ background: {READY_WASH}; border: 1px solid {READY_LINE}; border-radius: {RADIUS_SM}px; }}
-QFrame#fact QLabel, QFrame#factPrivacy QLabel {{ color: {INK_2}; font-size: 14px; }}
+QFrame#modelStatus {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; }}
+QFrame#modelStatus QLabel {{ background: transparent; }}
+QLabel#modelStatusText {{ color: {INK_2}; font-size: 13.5px; }}
+QLabel#modelStatusHint {{ color: {INK_3}; font-size: 12.5px; }}
+QFrame#modelStatus QPushButton {{ padding: 4px 11px; font-size: 13px; border-radius: {RADIUS_XS}px; }}
 QFrame#upload {{ background: {SURFACE}; border: 1.5px dashed {LINE_2}; border-radius: {RADIUS}px; }}
 QFrame#upload[dragging="true"], QFrame#upload:hover {{ border-color: {ACCENT}; }}
 QFrame#upload[dragging="true"] {{ background: {ACCENT_WASH}; }}

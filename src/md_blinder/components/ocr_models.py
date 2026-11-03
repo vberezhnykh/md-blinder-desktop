@@ -22,6 +22,7 @@ from .downloader import download_file
 from .model_asset import ModelAsset
 
 OCR_REPO = "datalab-to/indra-ocr"
+OCR_TITLE = "Indra OCR v1.1"  # название для интерфейса
 # Тег v1.1.0 (indra-ocr 1.1.x).
 OCR_REVISION = "bd02167fdf2005a19962cc15188f8496a2c87d3b"
 OCR_BASE_URL = f"https://huggingface.co/{OCR_REPO}/resolve/{OCR_REVISION}"

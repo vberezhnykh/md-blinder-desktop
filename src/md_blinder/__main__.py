@@ -156,6 +156,8 @@ def main() -> int:
     window = MainWindow()
     window.show()
     window.show_startup_notice(sys.argv)
+    # Модель загружается, когда окно уже на экране: первый документ ее не ждет.
+    QTimer.singleShot(500, window.preload_model)
     instance.received.connect(window.open_external)
     if file_path:
         QTimer.singleShot(0, lambda: window.open_external(str(file_path)))

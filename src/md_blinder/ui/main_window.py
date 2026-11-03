@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QSettings, QStandardPaths, Qt, QThread, QTimer
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -60,6 +60,8 @@ from ..anonymize.batch import (
 from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
+from .. import jobs as jobs_module
+from ..cancel import CancelToken
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
 from ..export_job import PdfExportJob, PdfExportRequest
 from ..folders import collect_files, export_plan
@@ -325,6 +327,12 @@ class _Run:
         return len(self.created) + len(self.failures)
 
 
+class _ModelBridge(QObject):
+    """Переносит смену состояния модели NER из фонового потока в главный."""
+
+    changed = Signal(object)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, store: Optional[HistoryStore] = None) -> None:
         super().__init__()
@@ -393,6 +401,7 @@ class MainWindow(QMainWindow):
 
         self._wire()
         self._refresh_history()
+        self._wire_model_status()
 
     # ------------------------------------------------------------------ связи
 
@@ -559,6 +568,47 @@ class MainWindow(QMainWindow):
         self.elapsed_timer.start()
         self._start_next_file()
 
+    # ------------------------------------------------------------------ модель NER
+
+    def _wire_model_status(self) -> None:
+        # Holder читается здесь, а не при импорте: тесты подменяют jobs.MODEL.
+        self.model_holder = jobs_module.MODEL
+        self._model_cancel: Optional[CancelToken] = None
+        self._model_bridge = _ModelBridge(self)
+        self._model_bridge.changed.connect(lambda _status: self._show_model_status())
+        self._model_listener = self._model_bridge.changed.emit
+        self.model_holder.subscribe(self._model_listener)
+        bar = self.start.model_status
+        bar.download.connect(self.download_model)
+        bar.choose_file.connect(self.choose_model_file)
+        bar.cancel.connect(self.cancel_model_download)
+        bar.load.connect(self.model_holder.preload)
+        self._show_model_status()
+
+    def _show_model_status(self) -> None:
+        self.start.model_status.set_status(
+            self.model_holder.status(), ocr_models.is_ocr_present(), self.convert_only,
+        )
+
+    def preload_model(self) -> None:
+        """После запуска: скачанная модель загружается в фоне, чтобы первый документ
+        не ждал ее. В режиме только конвертации модель не нужна и память не занимает."""
+        if not self.convert_only:
+            self.model_holder.preload()
+
+    def download_model(self, source: Optional[str] = None) -> None:
+        self._model_cancel = CancelToken()
+        self.model_holder.download_then_preload(self._model_cancel, source)
+
+    def choose_model_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Файл модели", "", "ONNX (*.onnx);;Все файлы (*)")
+        if path:
+            self.download_model(path)
+
+    def cancel_model_download(self) -> None:
+        if self._model_cancel is not None:
+            self._model_cancel.cancel()
+
     def _start_next_file(self) -> None:
         run = self.run
         if run is None:
@@ -588,6 +638,7 @@ class MainWindow(QMainWindow):
             self.job.cancel()
 
     def _job_done(self) -> None:
+        self._show_model_status()  # задача могла скачать модели
         self.elapsed_timer.stop()
         self.start.loading.hide()
         self.start.dropzone.set_busy(False)
@@ -775,6 +826,9 @@ class MainWindow(QMainWindow):
                 box.blockSignals(True)
                 box.setChecked(value)
                 box.blockSignals(False)
+        if not value:
+            self.preload_model()
+        self._show_model_status()
         self._render_derived()
 
     def find_entities(self) -> None:
@@ -1745,6 +1799,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
         if self.job is not None:
             self.job.cancel()
+        self.cancel_model_download()
         if self.pdf_job is not None:
             self.pdf_job.cancel()
         self._commit_delete()
@@ -1759,5 +1814,6 @@ class MainWindow(QMainWindow):
         for thread in list(self._threads):
             thread.quit()
             thread.wait(5000)
+        self.model_holder.unsubscribe(self._model_listener)
         self.store.close()
         event.accept()

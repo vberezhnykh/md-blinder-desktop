@@ -1,4 +1,4 @@
-"""Стартовый экран: приватность, выбор файла, история (стартовая часть App.tsx и HistoryPanel.tsx)."""
+"""Стартовый экран: состояние моделей, выбор файла, история (стартовая часть App.tsx и HistoryPanel.tsx)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from PySide6.QtGui import QDragEnterEvent, QDropEvent, QMouseEvent
 from PySide6.QtWidgets import (
     QCheckBox,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -25,7 +24,8 @@ from ..storage.history import HistoryDocMeta
 from ..text_utils import plural
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import icon_label, set_prop
+from .model_status import ModelStatusBar
+from .widgets import set_prop
 
 MAX_WIDTH = 1320  # .app: max-width 1360px минус поля
 HISTORY_VISIBLE = 10  # столько строк истории видно, пока список не раскрыт
@@ -295,24 +295,6 @@ class HistoryPanel(QWidget):
             self.rows.addWidget(row)
 
 
-def _fact(icon_name: str, bold: str, text: str, privacy: bool) -> QFrame:
-    frame = QFrame()
-    frame.setObjectName("factPrivacy" if privacy else "fact")
-    row = QHBoxLayout(frame)
-    row.setContentsMargins(16, 14, 16, 14)
-    row.setSpacing(12)
-    col = QVBoxLayout()
-    col.setContentsMargins(0, 2, 0, 0)
-    col.addWidget(icon_label(icon_name, t.READY if privacy else t.INK_3, 18))
-    col.addStretch(1)
-    row.addLayout(col)
-    label = QLabel(f"<b style='color:{t.INK}'>{bold}</b> {text}")
-    label.setWordWrap(True)
-    label.setStyleSheet("background: transparent;")
-    row.addWidget(label, 1)
-    return frame
-
-
 class StartScreen(QScrollArea):
     pick_file = Signal()
     pick_folder = Signal()
@@ -351,21 +333,9 @@ class StartScreen(QScrollArea):
         column.addWidget(subtitle)
         column.addSpacing(20)
 
-        facts = QGridLayout()
-        facts.setSpacing(12)
-        facts.addWidget(_fact(
-            "shield", "Документы не покидают компьютер.",
-            "Конвертация, распознавание сканов и поиск персональных данных выполняются на этом компьютере.", True,
-        ), 0, 0)
-        facts.addWidget(_fact(
-            "download", "Первый запуск дольше.",
-            "Программа предложит скачать модель распознавания имен (около 580 МБ), а для сканов — модель "
-            "распознавания текста (около 25 МБ). Это публичные файлы, текст документов не отправляется.", False,
-        ), 0, 1)
-        facts.setColumnStretch(0, 1)
-        facts.setColumnStretch(1, 1)
-        column.addLayout(facts)
-        column.addSpacing(20)
+        self.model_status = ModelStatusBar()
+        column.addWidget(self.model_status)
+        column.addSpacing(16)
 
         self.dropzone = DropZone()
         self.dropzone.clicked.connect(self.pick_file)

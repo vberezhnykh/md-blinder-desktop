@@ -21,7 +21,14 @@ from typing import Iterable, Optional, Protocol, Sequence, TypeVar
 import regex
 
 from ..convert.script_mix import TO_LAT
-from .apply import build_anonymized_text, entity_current_value, merge_entities, next_placeholder_number
+from .apply import (
+    build_anonymized_text,
+    entity_current_value,
+    merge_entities,
+    is_custom_label,
+    next_placeholder_number,
+    swap_placeholders,
+)
 from .csv_export import _SURROGATE_RE, _csv_escape
 from .image_safety import mask_images_for_detection
 from .normalize import normalize_value
@@ -198,7 +205,8 @@ def reconcile_batch_placeholders(
         if e.id in assigned:
             continue
         own = e.placeholder
-        if _placeholder_number(own) is not None and own not in taken and own not in d.used_placeholders:
+        keepable = is_custom_label(e) or _placeholder_number(own) is not None
+        if own and keepable and own not in taken and own not in d.used_placeholders:
             assigned[e.id] = own
             taken.add(own)
 
@@ -249,7 +257,7 @@ def align_batch(docs: Sequence[M]) -> list[M]:
         entities = reconcile_batch_placeholders(doc.entities, doc.source_text, list(aligned))
         aligned.append(doc if entities is doc.entities else replace(doc, entities=entities))  # type: ignore[type-var]
     if not any(e.batch_aliases for doc in aligned for e in doc.entities):
-        return aligned
+        return compact_batch_labels(aligned)
     for _ in range(len(aligned)):
         changed = False
         for i, doc in enumerate(aligned):
@@ -259,7 +267,51 @@ def align_batch(docs: Sequence[M]) -> list[M]:
                 changed = True
         if not changed:
             break
-    return aligned
+    return compact_batch_labels(aligned)
+
+
+def compact_batch_labels(docs: Sequence[M]) -> list[M]:
+    """Номера меток пакета без пропусков: после объединения или удаления значения
+    [COMPANY_1], [COMPANY_2], [COMPANY_4] становятся [COMPANY_1]..[COMPANY_3].
+
+    Перенумерация общая для пакета и сохраняет порядок номеров, поэтому одно
+    значение во всех документах получает один новый номер. Кандидаты и
+    отклоненные не трогаются: их номера и так больше всех занятых. Документы без
+    изменений возвращаются теми же объектами."""
+    numbers: dict[str, set[int]] = {}
+    for doc in docs:
+        for e in doc.entities:
+            m = _PLACEHOLDER_RE.match(e.placeholder)
+            if m and _is_main(e) and m.group(1) == e.type:
+                numbers.setdefault(m.group(1), set()).add(int(m.group(2)))
+    mapping: dict[str, str] = {}
+    for type_, used in numbers.items():
+        for n, old in enumerate(sorted(used), 1):
+            if n != old:
+                mapping[f"[{type_}_{old}]"] = f"[{type_}_{n}]"
+    if not mapping:
+        return list(docs)
+    result: list[M] = []
+    for doc in docs:
+        def renamed(e: Entity) -> bool:
+            return _is_main(e) and e.placeholder in mapping and not is_custom_label(e)
+
+        if not any(renamed(e) for e in doc.entities):
+            result.append(doc)
+            continue
+        entities = [replace(e, placeholder=mapping[e.placeholder]) if renamed(e) else e for e in doc.entities]
+        result.append(replace(doc, entities=entities))  # type: ignore[type-var]
+    return result
+
+
+def swap_batch_labels(docs: Sequence[M], first: str, second: str) -> list[M]:
+    """Меняет местами две метки во всех документах пакета: значение [COMPANY_1]
+    становится [COMPANY_2], а значение [COMPANY_2] — [COMPANY_1]."""
+    result: list[M] = []
+    for doc in docs:
+        entities = swap_placeholders(doc.entities, first, second)
+        result.append(doc if entities is doc.entities else replace(doc, entities=entities))  # type: ignore[type-var]
+    return result
 
 
 def seed_from_batch(source_text: str, entities: list[Entity], others: Sequence[BatchMember]) -> list[Entity]:

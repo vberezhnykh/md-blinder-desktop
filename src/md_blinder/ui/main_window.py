@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..anonymize.apply import (
+    MAX_LABEL_LENGTH,
     accept_all_related,
     accept_related_candidate,
     add_entity_from_selection,
@@ -41,8 +42,10 @@ from ..anonymize.apply import (
     compact_placeholder_numbers,
     dedupe_entity_ids,
     merge_entities,
+    normalize_label,
     pending_candidates,
     restore_candidate,
+    swap_placeholders,
 )
 from ..anonymize.batch import (
     BatchIndex,
@@ -52,6 +55,7 @@ from ..anonymize.batch import (
     link_to_batch,
     merge_batch_labels,
     reconcile_batch_placeholders,
+    swap_batch_labels,
 )
 from ..anonymize.csv_export import csv_bytes
 from ..anonymize.image_safety import find_image_ranges
@@ -450,6 +454,7 @@ class MainWindow(QMainWindow):
         found.change_type.connect(self._change_type)
         found.merge.connect(self._merge)
         found.link_batch.connect(self._link_batch)
+        found.relabel.connect(self._relabel)
         found.delete.connect(lambda i: self._update(lambda es: compact_placeholder_numbers([e for e in es if e.id != i]), "Удалить замену"))
 
         self.session.doc_replaced.connect(self._doc_replaced)
@@ -978,32 +983,66 @@ class MainWindow(QMainWindow):
             self.overview = BatchOverview(self)
             self.overview.setModal(True)
             self.overview.merge.connect(self._merge_batch_labels)
+            self.overview.relabel.connect(self._relabel)
         self.overview.set_docs(members)
         self.overview.show()
         self.overview.raise_()
         self.overview.activateWindow()
 
     def _merge_batch_labels(self, keep: str, absorb: str) -> None:
-        """Объединяет две метки во всех документах пакета. Остальные документы
-        сохраняются сразу, открытый меняется командой со стеком отмены; во
-        всплывающем сообщении есть отмена всего объединения."""
+        """Объединяет две метки во всех документах пакета."""
+        self._change_batch(
+            lambda docs: merge_batch_labels(docs, keep, absorb),
+            "Объединить метки пакета", f"{absorb} теперь {keep} во всем пакете.",
+        )
+
+    def _relabel(self, old: str, text: str) -> None:
+        """Новая метка значения: своя («Поставщик») или другая метка того же типа,
+        тогда метки меняются местами. В пакете — во всех документах."""
+        new = normalize_label(text)
+        if new is None:
+            self.toast.show_message(
+                f"Метка должна быть непустой, без квадратных скобок внутри и не длиннее {MAX_LABEL_LENGTH} знаков.",
+                6000, tone="warn",
+            )
+            return
+        doc = self.session.doc
+        if doc is None or new == old:
+            return
+        docs = self._batch_docs() or [doc]
+        types = {e.type for d in docs for e in d.entities
+                 if not e.candidate and not e.dismissed and e.placeholder in (old, new)}
+        if len(types) > 1:
+            self.toast.show_message(f"Метка {new} уже занята значением другого типа.", 6000, tone="warn")
+            return
+        swapped = any(e.placeholder == new for d in docs for e in d.entities if not e.candidate and not e.dismissed)
+        message = f"{old} и {new} поменялись местами." if swapped else f"{old} теперь {new}."
+        if not doc.batch_id:
+            self._update(lambda es: compact_placeholder_numbers(swap_placeholders(es, old, new)), "Сменить метку")
+            return
+        self._change_batch(lambda ds: align_batch(swap_batch_labels(ds, old, new)), "Сменить метку", message)
+
+    def _change_batch(self, fn, label: str, message: str) -> None:
+        """Меняет разметку всех документов пакета. Остальные документы сохраняются
+        сразу, открытый меняется командой со стеком отмены; во всплывающем
+        сообщении есть отмена всего изменения."""
         members = self._collect_batch()
         doc = self.session.doc
         if members is None or doc is None:
             return
-        merged = merge_batch_labels(members, keep, absorb)
-        changed = [(before, after) for before, after in zip(members, merged) if after is not before]
+        result = fn(members)
+        changed = [(before, after) for before, after in zip(members, result) if after is not before]
         if not changed:
             return
         if not self._put_batch_docs([after for _, after in changed if after.id != doc.id]):
             return
-        self.batch_others = [d for d in merged if d.id != doc.id]
-        current = next(d for d in merged if d.id == doc.id)
+        self.batch_others = [d for d in result if d.id != doc.id]
+        current = next(d for d in result if d.id == doc.id)
         if current.entities != doc.entities:
-            self.session.update_entities(lambda _: current.entities, "Объединить метки пакета")
+            self.session.update_entities(lambda _: current.entities, label)
         self._render_derived()
         if self.overview is not None and self.overview.isVisible():
-            self.overview.set_docs(merged)
+            self.overview.set_docs(self._batch_docs())
 
         def undo() -> None:
             restore = [before for before, _ in changed if before.id != doc.id]
@@ -1015,12 +1054,12 @@ class MainWindow(QMainWindow):
             self.batch_others = [originals.get(d.id, d) for d in self.batch_others]
             before_current = next((b for b, _ in changed if b.id == doc.id), None)
             if before_current is not None:
-                self.session.update_entities(lambda _: before_current.entities, "Отменить объединение меток")
+                self.session.update_entities(lambda _: before_current.entities, f"Отменить: {label.lower()}")
             self._render_derived()
             if self.overview is not None and self.overview.isVisible():
                 self.overview.set_docs(self._batch_docs())
 
-        self.toast.show_message(f"{absorb} теперь {keep} во всем пакете.", DELETE_UNDO_MS, action=("Отменить", undo))
+        self.toast.show_message(message, DELETE_UNDO_MS, action=("Отменить", undo))
 
     def _put_batch_docs(self, docs: list[HistoryDoc]) -> bool:
         try:

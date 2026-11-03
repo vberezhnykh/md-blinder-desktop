@@ -17,6 +17,25 @@ from .image_safety import IMAGE_REMOVED_MARKER, find_image_ranges
 from .placeholder_guard import escape_placeholder_literal, find_placeholder_ranges
 from .types import Entity, EntityType, Position
 
+MAX_LABEL_LENGTH = 40
+
+
+def is_custom_label(entity: Entity) -> bool:
+    """Метка задана пользователем («[Поставщик]»), а не вида [TYPE_n] своего типа.
+    Такие метки не перенумеровываются."""
+    return re.fullmatch(rf"\[{re.escape(entity.type)}_[0-9]+\]", entity.placeholder) is None
+
+
+def normalize_label(text: str) -> Optional[str]:
+    """Метка из текста пользователя: «Поставщик» и «[Поставщик]» дают «[Поставщик]».
+    None, если метка пустая, длиннее MAX_LABEL_LENGTH или содержит скобки и переносы."""
+    inner = " ".join(text.split())
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1].strip()
+    if not inner or len(inner) > MAX_LABEL_LENGTH or any(ch in inner for ch in "[]\n"):
+        return None
+    return f"[{inner}]"
+
 _log = logging.getLogger(__name__)
 
 # JS: /_(\d+)\]$/ — \d только ASCII, $ без флага m только конец строки.
@@ -422,7 +441,8 @@ def compact_placeholder_numbers(entities: list[Entity]) -> list[Entity]:
     types = list(dict.fromkeys(e.type for e in entities))
     for type_ in types:
         of_type = [e for e in entities if e.type == type_]
-        main = [e for e in of_type if not e.candidate and not e.dismissed]
+        # Метки, которые задал пользователь, остаются как есть и номеров не занимают.
+        main = [e for e in of_type if not e.candidate and not e.dismissed and not is_custom_label(e)]
         rest = [e for e in of_type if e.candidate or e.dismissed]
         n = 1
         for e in sort_by_number(main):
@@ -435,12 +455,34 @@ def compact_placeholder_numbers(entities: list[Entity]) -> list[Entity]:
     changed = False
     result: list[Entity] = []
     for e in entities:
-        nxt = new_placeholder[e.id]
+        nxt = new_placeholder.get(e.id, e.placeholder)
         if nxt == e.placeholder:
             result.append(e)
         else:
             changed = True
             result.append(replace(e, placeholder=nxt))
+    return result if changed else entities
+
+
+def swap_placeholders(entities: list[Entity], first: str, second: str) -> list[Entity]:
+    """Меняет местами две метки подтвержденных значений: [COMPANY_1] становится
+    [COMPANY_2] и наоборот. Если второй метки в документе нет, первая просто
+    получает ее («[COMPANY_1]» → «[Поставщик]»). Метки значений разных типов не
+    меняются."""
+    if first == second:
+        return entities
+    types = {e.type for e in entities if not e.candidate and not e.dismissed and e.placeholder in (first, second)}
+    if len(types) > 1:
+        return entities
+    swap = {first: second, second: first}
+    changed = False
+    result: list[Entity] = []
+    for e in entities:
+        if not e.candidate and not e.dismissed and e.placeholder in swap:
+            result.append(replace(e, placeholder=swap[e.placeholder]))
+            changed = True
+        else:
+            result.append(e)
     return result if changed else entities
 
 

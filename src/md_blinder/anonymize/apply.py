@@ -391,7 +391,9 @@ def merge_entities(entities: list[Entity], source_id: str, target_id: str) -> li
         if e.id == source_id:
             continue
         if e.id == target_id:
-            result.append(replace(e, positions=positions, anonymize=target.anonymize or source.anonymize))
+            aliases = list(dict.fromkeys([*target.batch_aliases, *source.batch_aliases]))
+            result.append(replace(e, positions=positions, anonymize=target.anonymize or source.anonymize,
+                                  batch_aliases=aliases))
         elif e.related_to == source_id:
             result.append(replace(e, related_to=target_id))
         else:

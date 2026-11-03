@@ -535,6 +535,60 @@ def test_package_labels_stay_aligned_after_deleting_a_value(qtbot, window, tmp_p
     assert window.anonymized_text.startswith("Копия alice@example.com и [EMAIL_2].")
 
 
+def test_merge_findings_from_different_documents_of_a_package(qtbot, window, tmp_path):
+    first = make_docx(tmp_path / "first.docx", para("Agent: Makedon Kiriakidis, alice@example.com."))
+    second = make_docx(tmp_path / "second.docx", para("Signed by Makedon Kirjakidjs and Petr Ivanov."))
+    process_all(qtbot, window, [first, second])
+
+    def add(name):
+        s = window.session.text.index(name)
+        window._add_entity(s, s + len(name), "PERSON")
+
+    add("Makedon Kiriakidis")
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    other = next(m for m in window.store.load_metadata() if m.name == "second.docx")
+    window.open_doc(other.id)
+    add("Makedon Kirjakidjs")
+    add("Petr Ivanov")
+
+    def label(name):
+        e = next(e for e in window.session.entities if window.session.text[e.positions[0].start:].startswith(name))
+        return e.id, e.placeholder
+
+    assert "[PERSON_1]" not in window.anonymized_text
+    found = window.page.side.found
+    window.page.side.setCurrentIndex(1)
+    # Подсказка о похожем написании в другом документе и кнопка объединения в ней.
+    def hints():
+        qtbot.wait(10)  # старые строки списка удаляются в цикле событий
+        return [lb.text() + lb.toolTip() for lb in found.findChildren(QLabel) if lb.objectName() == "hint"]
+
+    assert len(hints()) == 1 and "[PERSON_1]" in hints()[0] and "first.docx" in hints()[0]
+    button = next(b for b in found.findChildren(QPushButton) if b.text() == "Объединить")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert label("Makedon")[1] == "[PERSON_1]" and label("Petr")[1] != "[PERSON_1]"
+    assert not hints()
+    window.session.undo_stack.undo()
+    assert "[PERSON_1]" not in window.anonymized_text
+    # Объединение без подсказки: из списка «Объединить…» в редакторе.
+    window.page.editor.merge_requested.emit(label("Petr")[0], "batch:[PERSON_1]")
+    assert label("Petr")[1] == "[PERSON_1]" and label("Makedon")[1] != "[PERSON_1]"
+    window.session.undo_stack.undo()
+    found.link_batch.emit(label("Makedon")[0], "[PERSON_1]")
+    assert label("Makedon")[1] == "[PERSON_1]"
+
+    # Связь сохраняется: первый документ после повторного открытия тот же, таблица замен пакета общая.
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    first_meta = next(m for m in window.store.load_metadata() if m.name == "first.docx")
+    window.open_doc(first_meta.id)
+    assert "Agent: [PERSON_1], [EMAIL_1]." in window.anonymized_text
+    out = tmp_path / "package.csv"
+    window._save_path = lambda name, filter_: out
+    window.export_batch_csv()
+    table_text = out.read_text(encoding="utf-8-sig")
+    assert "Makedon Kiriakidis; Makedon Kirjakidjs" in table_text
+
+
 def test_add_files_to_open_document_makes_a_package(qtbot, window, tmp_path):
     open_docx(qtbot, window, tmp_path, para("Пишите на alice@example.com."))
     assert window.session.doc.batch_id is None

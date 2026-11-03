@@ -26,11 +26,12 @@ from PySide6.QtWidgets import (
 )
 
 from ..anonymize.apply import candidate_reason, entity_current_value, pending_candidates
+from ..anonymize.batch import BatchIndex, BatchTarget
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import ElidedLabel, Select, icon_label, set_prop
+from .widgets import BATCH_PREFIX, ElidedLabel, Select, icon_label, set_prop
 
 
 def _min_start(e: Entity) -> int:
@@ -461,6 +462,7 @@ class FoundPanel(QWidget):
     select = Signal(str)
     change_type = Signal(str, str)
     merge = Signal(str, str)  # источник, цель
+    link_batch = Signal(str, str)  # сущность, метка замены из другого документа пакета
     delete = Signal(str)
     row_hovered = Signal(object)
 
@@ -473,6 +475,7 @@ class FoundPanel(QWidget):
         outer.addWidget(self.area)
         self._entities: list[Entity] = []
         self._text = ""
+        self._batch: Optional[BatchIndex] = None
         self._selected: Optional[str] = None
         self._merging: Optional[str] = None
         self._collapsed: set[str] = set()
@@ -483,9 +486,10 @@ class FoundPanel(QWidget):
     def confirmed(self, entities: list[Entity]) -> list[Entity]:
         return [e for e in entities if not e.dismissed and not e.candidate]
 
-    def render(self, entities: list[Entity], text: str) -> None:
+    def render(self, entities: list[Entity], text: str, batch: Optional[BatchIndex] = None) -> None:
         self._entities = entities
         self._text = text
+        self._batch = batch
         if self._selected and not any(e.id == self._selected for e in self.confirmed(entities)):
             self._selected = None
             self._merging = None
@@ -569,7 +573,7 @@ class FoundPanel(QWidget):
             self._collapsed.discard(type_)
         else:
             self._collapsed.add(type_)
-        self.render(self._entities, self._text)
+        self.render(self._entities, self._text, self._batch)
 
     def _row(self, entity: Entity, same_type: list[Entity]) -> _EntityRow:
         value = entity_current_value(self._text, entity)
@@ -609,10 +613,42 @@ class FoundPanel(QWidget):
         button.clicked.connect(lambda eid=entity.id: self._click(eid))
         line.addWidget(button, 1)
         box.addLayout(line)
+        if self._batch is not None:
+            for target in self._batch.similar(entity, self._text, self._entities)[:2]:
+                box.addWidget(self._similar_hint(entity, target))
         if selected:
             box.addWidget(self._actions(entity, same_type))
         self._rows[entity.id] = row
         return row
+
+    def _similar_hint(self, entity: Entity, target: BatchTarget) -> QWidget:
+        """Подсказка: в другом документе пакета то же значение написано иначе."""
+        area = QWidget()
+        row = QHBoxLayout(area)
+        row.setContentsMargins(36, 0, 8, 6)
+        row.setSpacing(6)
+        where = "в другом документе" if len(target.docs) == 1 else "в других документах"
+        label = QLabel(_breakable(f"Похоже на {target.placeholder} «{_truncate(target.value, 40)}» {where}"))
+        label.setObjectName("hint")
+        _fit_width(label)
+        label.setToolTip(
+            "В другом документе пакета похожее значение получило другую метку: "
+            "возможно, это ошибка распознавания или опечатка.\n"
+            f"{target.placeholder}: {'; '.join(target.forms[:5])}\n"
+            f"Документы: {', '.join(target.docs[:5])}{'…' if len(target.docs) > 5 else ''}"
+        )
+        row.addWidget(label, 1)
+        button = QPushButton("Объединить")
+        button.setObjectName("small")
+        button.setToolTip(f"Заменять это значение на {target.placeholder} во всем пакете")
+        button.clicked.connect(lambda _=False, eid=entity.id, ph=target.placeholder: self._link(eid, ph))
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        return area
+
+    def _link(self, entity_id: str, placeholder: str) -> None:
+        self._merging = None
+        self._selected = None
+        self.link_batch.emit(entity_id, placeholder)
 
     def _actions(self, entity: Entity, same_type: list[Entity]) -> QWidget:
         area = QWidget()
@@ -623,6 +659,7 @@ class FoundPanel(QWidget):
         row.setSpacing(6)
         rows.addLayout(row)
         others = [x for x in same_type if x.id != entity.id]
+        elsewhere = self._batch.merge_targets(entity, self._entities) if self._batch is not None else []
         if self._merging == entity.id:
             target = Select()
             target.setObjectName("compact")
@@ -631,6 +668,9 @@ class FoundPanel(QWidget):
             target.addItem("объединить с…", "")
             for x in others:
                 target.addItem(f"{x.placeholder} · {_truncate(entity_current_value(self._text, x), 24)}", x.id)
+            # Замены из других документов пакета: их метку получит эта сущность.
+            for bt in elsewhere:
+                target.addItem(f"{bt.placeholder} · {_truncate(bt.value, 24)} · другой документ", BATCH_PREFIX + bt.placeholder)
             ok = QPushButton("Объединить")
             ok.setObjectName("primary")
             ok.setStyleSheet("padding: 3px 10px; font-size: 13px;")
@@ -640,14 +680,19 @@ class FoundPanel(QWidget):
             cancel.setObjectName("small")
 
             def do_merge() -> None:
-                if target.currentData():
-                    self._merging = None
-                    self._selected = None
-                    self.merge.emit(entity.id, target.currentData())
+                chosen = target.currentData()
+                if not chosen:
+                    return
+                if chosen.startswith(BATCH_PREFIX):
+                    self._link(entity.id, chosen[len(BATCH_PREFIX):])
+                    return
+                self._merging = None
+                self._selected = None
+                self.merge.emit(entity.id, chosen)
 
             def do_cancel() -> None:
                 self._merging = None
-                self.render(self._entities, self._text)
+                self.render(self._entities, self._text, self._batch)
 
             ok.clicked.connect(do_merge)
             cancel.clicked.connect(do_cancel)
@@ -669,14 +714,16 @@ class FoundPanel(QWidget):
         type_box.setCurrentText(entity.type)
         type_box.currentTextChanged.connect(lambda tp, eid=entity.id: self.change_type.emit(eid, tp))
         row.addWidget(type_box)
-        if others:
+        if others or elsewhere:
             merge = QPushButton("Объединить…")
             merge.setObjectName("small")
-            merge.setToolTip("Объединить с другой заменой того же типа")
+            merge.setToolTip(
+                "Объединить с другой заменой того же типа" + (", в том числе из других документов пакета" if elsewhere else "")
+            )
 
             def start_merge() -> None:
                 self._merging = entity.id
-                self.render(self._entities, self._text)
+                self.render(self._entities, self._text, self._batch)
 
             merge.clicked.connect(start_merge)
             row.addWidget(merge)
@@ -696,10 +743,10 @@ class FoundPanel(QWidget):
         self._merging = None
         if self._selected == entity_id:
             self._selected = None
-            self.render(self._entities, self._text)
+            self.render(self._entities, self._text, self._batch)
             return
         self._selected = entity_id
-        self.render(self._entities, self._text)
+        self.render(self._entities, self._text, self._batch)
         self.select.emit(entity_id)
 
     def select_entity(self, entity_id: str) -> None:
@@ -709,7 +756,7 @@ class FoundPanel(QWidget):
         self._collapsed.discard(entity.type)
         self._selected = entity_id
         self._merging = None
-        self.render(self._entities, self._text)
+        self.render(self._entities, self._text, self._batch)
         row = self._rows.get(entity_id)
         if row is not None:
             self.area.ensureWidgetVisible(row, 0, 40)
@@ -819,7 +866,7 @@ class SidePanel(QFrame):
         self.tab_review.set_selected(index == 0)
         self.tab_found.set_selected(index == 1)
 
-    def render(self, entities: list[Entity], text: str) -> None:
+    def render(self, entities: list[Entity], text: str, batch: Optional[BatchIndex] = None) -> None:
         pending = len(pending_candidates(entities))
         confirmed = len(self.found.confirmed(entities))
         if pending:
@@ -828,7 +875,7 @@ class SidePanel(QFrame):
             self.tab_review.set_badge("✓", "badgeDone")
         self.tab_found.set_badge(str(confirmed), "badge")
         self.review.render(entities, text)
-        self.found.render(entities, text)
+        self.found.render(entities, text, batch)
         target = self.user_tab if self.user_tab is not None else (0 if pending else 1)
         if self.currentIndex() != target:
             self.setCurrentIndex(target)

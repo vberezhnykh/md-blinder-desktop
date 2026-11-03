@@ -16,10 +16,11 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass, replace
-from typing import Optional, Protocol, Sequence, TypeVar
+from typing import Iterable, Optional, Protocol, Sequence, TypeVar
 
 import regex
 
+from ..convert.script_mix import TO_LAT
 from .apply import build_anonymized_text, entity_current_value, next_placeholder_number
 from .csv_export import _SURROGATE_RE, _csv_escape
 from .image_safety import mask_images_for_detection
@@ -59,10 +60,13 @@ def _key(type_: EntityType, text: str) -> str:
 
 
 def _entity_keys(e: Entity, source_text: str) -> list[str]:
-    """Нормализованные формы всех вхождений сущности, в порядке появления в тексте."""
+    """Нормализованные формы всех вхождений сущности, в порядке появления в тексте,
+    и формы из других документов, с которыми пользователь объединил сущность."""
     keys: dict[str, None] = {}
     for p in sorted(e.positions, key=lambda p: p.start):
         keys[_key(e.type, source_text[p.start:p.end])] = None
+    for alias in e.batch_aliases:
+        keys[_key(e.type, alias)] = None
     return list(keys)
 
 
@@ -317,6 +321,160 @@ def seed_from_batch(source_text: str, entities: list[Entity], others: Sequence[B
     for e in working:
         e.positions.sort(key=lambda p: p.start)
     return working
+
+
+# --- Объединение с заменой из другого документа ---
+
+# Типы, в которых OCR и опечатки дают разные написания одного значения. В номерах
+# и реквизитах отличие в одном знаке — уже другое значение.
+SIMILAR_TYPES: frozenset[str] = frozenset({"PERSON", "COMPANY", "ADDRESS"})
+MIN_SIMILAR_LENGTH = 6
+# На сколько знаков допускается отличие: один на каждые 7 знаков более длинной формы.
+# «makedon kiriakidis» и «makedon kirjakidjs» (18 знаков, 2 отличия) похожи,
+# «john smith» и «jane smith» (10 знаков, 3 отличия) — нет.
+SIMILAR_CHARS_PER_EDIT = 7
+
+_NON_WORD_RE = regex.compile(r"[^\p{L}\p{N}]+")
+_DIGITS_RE = regex.compile(r"\p{N}+")
+
+
+@dataclass(frozen=True)
+class BatchTarget:
+    """Замена из других документов пакета: одна метка и все ее исходные формы."""
+
+    placeholder: str
+    type: EntityType
+    forms: tuple[str, ...]  # исходные формы, первая — для показа
+    docs: tuple[str, ...]  # имена документов, где метка встречается
+
+    @property
+    def value(self) -> str:
+        return self.forms[0]
+
+
+def batch_targets(others: Sequence[BatchMember]) -> list[BatchTarget]:
+    """Подтвержденные замены остальных документов пакета, по одной на метку.
+
+    Документы пакета согласованы, поэтому одна метка в разных документах — одно
+    значение; его формы собираются со всех документов."""
+    forms: dict[str, dict[str, str]] = {}  # метка → ключ формы → форма
+    types: dict[str, EntityType] = {}
+    docs: dict[str, dict[str, None]] = {}
+    for member in others:
+        name = getattr(member, "name", "")
+        for e in member.entities:
+            if not _is_main(e) or not e.positions:
+                continue
+            types.setdefault(e.placeholder, e.type)
+            if types[e.placeholder] != e.type:
+                continue
+            bucket = forms.setdefault(e.placeholder, {})
+            texts = [member.source_text[p.start:p.end] for p in sorted(e.positions, key=lambda p: p.start)]
+            for text in [*texts, *e.batch_aliases]:
+                text = " ".join(text.split())
+                if text:
+                    bucket.setdefault(_key(e.type, text), text)
+            docs.setdefault(e.placeholder, {})[name] = None
+    targets = [
+        BatchTarget(placeholder, types[placeholder], tuple(bucket.values()), tuple(docs[placeholder]))
+        for placeholder, bucket in forms.items() if bucket
+    ]
+    targets.sort(key=lambda t: (t.type, _placeholder_number(t.placeholder) or 0, t.placeholder))
+    return targets
+
+
+def link_to_batch(entities: list[Entity], entity_id: str, target: BatchTarget) -> list[Entity]:
+    """Объединяет сущность документа с заменой из другого документа пакета.
+
+    Формы цели запоминаются у сущности (batch_aliases), и согласование пакета
+    (reconcile_batch_placeholders) дает ей метку цели. Связь живет в разметке
+    документа: остальные документы получают ту же метку при своем согласовании.
+    """
+    entity = next((e for e in entities if e.id == entity_id), None)
+    if entity is None or entity.type != target.type or not _is_main(entity):
+        return entities
+    aliases = list(dict.fromkeys([*entity.batch_aliases, *target.forms]))
+    return [
+        replace(e, batch_aliases=aliases, placeholder=target.placeholder) if e.id == entity_id else e
+        for e in entities
+    ]
+
+
+def _fold(text: str) -> str:
+    """Форма для сравнения написаний: строчные, кириллические двойники латинских
+    букв — латиница (OCR путает «о» и «o»), знаки — один пробел."""
+    return _NON_WORD_RE.sub(" ", text.lower().translate(TO_LAT)).strip()
+
+
+def _within_edits(a: str, b: str, limit: int) -> bool:
+    """Расстояние Левенштейна между a и b не больше limit."""
+    if abs(len(a) - len(b)) > limit:
+        return False
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
+        if min(current) > limit:
+            return False
+        previous = current
+    return previous[-1] <= limit
+
+
+def similar_spelling(a: str, b: str, type_: EntityType = "PERSON") -> bool:
+    """Два написания похожи на одно значение с ошибками OCR или опечаткой.
+
+    В адресе цифры должны совпадать: «12 Main Street» и «14 Main Street» — разные
+    адреса. В имени и названии цифра обычно ошибка OCR: «DIALOQ LTD4» вместо «LTDA»."""
+    fa, fb = _fold(a), _fold(b)
+    if min(len(fa), len(fb)) < MIN_SIMILAR_LENGTH:
+        return False
+    if type_ == "ADDRESS" and _DIGITS_RE.findall(fa) != _DIGITS_RE.findall(fb):
+        return False
+    limit = max(1, max(len(fa), len(fb)) // SIMILAR_CHARS_PER_EDIT)
+    return _within_edits(fa, fb, limit)
+
+
+class BatchIndex:
+    """Замены остальных документов пакета для объединения и подсказок.
+
+    Строится один раз на открытый пакет; сравнение написаний кешируется по
+    форме, поэтому перерисовка списка после каждой правки не пересчитывает его."""
+
+    def __init__(self, others: Sequence[BatchMember]) -> None:
+        self.targets = batch_targets(others)
+        self._by_placeholder = {t.placeholder: t for t in self.targets}
+        self._similar_cache: dict[tuple[str, str], tuple[str, ...]] = {}
+
+    def target(self, placeholder: str) -> Optional[BatchTarget]:
+        return self._by_placeholder.get(placeholder)
+
+    def merge_targets(self, entity: Entity, entities: Iterable[Entity]) -> list[BatchTarget]:
+        """Замены других документов того же типа, которых нет в этом документе.
+        Метки, которые есть и здесь, объединяются обычным образом внутри документа."""
+        local = {e.placeholder for e in entities if _is_main(e)}
+        return [t for t in self.targets if t.type == entity.type and t.placeholder not in local]
+
+    def similar(self, entity: Entity, source_text: str, entities: Iterable[Entity]) -> list[BatchTarget]:
+        """Замены других документов, похожие на сущность по написанию."""
+        if entity.type not in SIMILAR_TYPES or not _is_main(entity):
+            return []
+        available = {t.placeholder: t for t in self.merge_targets(entity, entities)}
+        if not available:
+            return []
+        found: dict[str, None] = {}
+        forms = [source_text[p.start:p.end] for p in entity.positions] + entity.batch_aliases
+        for form in dict.fromkeys(" ".join(f.split()) for f in forms):
+            key = (entity.type, form)
+            if key not in self._similar_cache:
+                self._similar_cache[key] = tuple(
+                    t.placeholder for t in self.targets
+                    if t.type == entity.type and any(similar_spelling(form, other, entity.type) for other in t.forms)
+                )
+            for placeholder in self._similar_cache[key]:
+                if placeholder in available:
+                    found[placeholder] = None
+        return [available[p] for p in found]
 
 
 # --- Выдача пакета ---

@@ -22,6 +22,9 @@ from ..text_utils import plural
 from . import theme as t
 from .icons import icon, pixmap
 
+# Цель объединения из другого документа пакета в списках выбора: префикс и метка замены.
+BATCH_PREFIX = "batch:"
+
 
 def icon_label(name: str, color: str, size: int = 16) -> QLabel:
     label = QLabel()

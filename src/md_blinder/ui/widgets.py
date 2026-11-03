@@ -403,10 +403,17 @@ class PopupMenu(QFrame):
         if self.list_area is not None:
             screen = QGuiApplication.screenAt(pos) or anchor.screen() or QGuiApplication.primaryScreen()
             bottom = screen.availableGeometry().bottom() - self.SCREEN_GAP
+            top = screen.availableGeometry().top() + self.SCREEN_GAP
             rest = self.height() - self.list_area.height()
-            self._list_max = max(bottom - pos.y() - rest, self.MIN_LIST_HEIGHT)
+            below = bottom - pos.y() - rest
+            # Если под кнопкой места меньше минимума, список берет минимум (или сколько
+            # есть на всем экране), а меню поднимается, чтобы не уйти за нижний край.
+            self._list_max = below if below >= self.MIN_LIST_HEIGHT else max(
+                min(self.MIN_LIST_HEIGHT, bottom - top - rest), 1,
+            )
             self._fit_list()
             self.adjustSize()
+            pos.setY(max(min(pos.y(), bottom - self.height()), top))
         self.move(pos)
         self.show()
         if self.search is not None:

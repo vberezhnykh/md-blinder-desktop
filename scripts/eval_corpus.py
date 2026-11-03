@@ -92,7 +92,7 @@ def convert(path: Path, fmt: str) -> str:
         recognized: dict[int, str] = {}
         if analysis.ocr_page_numbers:
             if not ocr_models.is_ocr_present():
-                raise SystemExit("Нужны модели OCR: python scripts/fetch_ocr_models.py")
+                raise SystemExit("Нет моделей OCR в каталоге данных (MD_BLINDER_DATA_DIR): python scripts/fetch_ocr_models.py")
             recognized = ocr_pdf_pages(path, analysis.ocr_page_numbers, ocr_models.ocr_models_dir())
         md = assemble_markdown(analysis, recognized)
     return md.replace("\r\n", "\n").replace("\r", "\n")

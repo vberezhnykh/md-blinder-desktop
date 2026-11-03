@@ -53,6 +53,8 @@ class HistoryDocMeta:
     updated_at: int
     entity_count: int
     batch_id: Optional[str] = None
+    # Непроверенные кандидаты; None — запись из базы, где счетчика еще не было.
+    pending_count: Optional[int] = None
 
 
 def sanitize_entities(raw: Any, source_length: Optional[int] = None) -> list[Entity]:
@@ -212,7 +214,12 @@ def merge_docs(existing: list[HistoryDoc], incoming: list[HistoryDoc]) -> list[H
 
 
 _DOC_COLUMNS = "id, name, format, created_at, updated_at, source_text, entities, batch_id"
-_META_COLUMNS = "id, name, format, created_at, updated_at, entity_count, batch_id"
+_META_COLUMNS = "id, name, format, created_at, updated_at, entity_count, batch_id, pending_count"
+
+
+def _pending_count(entities: list[Entity]) -> int:
+    """Сколько кандидатов еще ждут проверки (как pending_candidates)."""
+    return sum(1 for e in entities if e.candidate and not e.dismissed)
 
 
 class HistoryStore:
@@ -237,6 +244,16 @@ class HistoryStore:
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "batch_id" not in columns:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN batch_id TEXT")
+        # Счетчик непроверенных кандидатов для списка истории; в старых базах считается один раз.
+        columns = {row[1] for row in self._conn.execute("PRAGMA table_info(document_meta)")}
+        if "pending_count" not in columns:
+            self._conn.execute("ALTER TABLE document_meta ADD COLUMN pending_count INTEGER")
+            rows = self._conn.execute(f"SELECT {_DOC_COLUMNS} FROM documents").fetchall()
+            for row in rows:
+                doc = self._row_to_doc(row)
+                self._conn.execute(
+                    "UPDATE document_meta SET pending_count = ? WHERE id = ?", (_pending_count(doc.entities), doc.id),
+                )
         self._conn.commit()
 
     def close(self) -> None:
@@ -251,8 +268,11 @@ class HistoryStore:
                 (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, doc.source_text, entities, doc.batch_id),
             )
             self._conn.execute(
-                f"INSERT OR REPLACE INTO document_meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, len(doc.entities), doc.batch_id),
+                f"INSERT OR REPLACE INTO document_meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, len(doc.entities), doc.batch_id,
+                    _pending_count(doc.entities),
+                ),
             )
 
     def delete_doc(self, doc_id: str) -> None:

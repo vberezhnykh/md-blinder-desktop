@@ -210,7 +210,7 @@ def test_history_shows_ten_recent_docs_until_expanded(qtbot, window):
 
     def names():
         return [
-            panel.rows.itemAt(i).widget().findChild(QLabel).text()
+            next(lb for lb in panel.rows.itemAt(i).widget().findChildren(QLabel) if lb.objectName() == "historyName").text()
             for i in range(panel.rows.count())
             if panel.rows.itemAt(i).widget() is not None
         ]
@@ -219,7 +219,7 @@ def test_history_shows_ten_recent_docs_until_expanded(qtbot, window):
     assert names() == [d.name for d in docs[:HISTORY_VISIBLE]]
     assert not panel.more_button.isHidden()
     assert panel.more_button.text() == "Показать еще 5 документов"
-    assert panel.title.text() == f"История ({len(docs)})"
+    assert panel.count.text() == str(len(docs))
 
     qtbot.mouseClick(panel.more_button, Qt.MouseButton.LeftButton)
     assert names() == [d.name for d in docs]
@@ -500,10 +500,10 @@ def test_folder_with_nested_folders_is_one_package(qtbot, window, tmp_path, monk
     assert not any("example.com" in f.read_text(encoding="utf-8") for f in out.rglob("*.md"))
 
     # Повторная выгрузка в ту же папку спрашивает, заменять ли файлы.
-    from PySide6.QtWidgets import QMessageBox
+    from md_blinder.ui import dialogs
 
     asked = []
-    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (asked.append(a[2]), QMessageBox.StandardButton.No)[1])
+    monkeypatch.setattr(dialogs, "ask", lambda parent, title, text, *a, **k: (asked.append(text), False)[1])
     (out / "Клиент" / "договор.md").write_text("старое", encoding="utf-8")
     window.export_batch_folder()
     assert asked and "3 файла" in asked[0]
@@ -838,3 +838,66 @@ def test_long_package_list_scrolls_within_screen(qtbot, window, tmp_path):
     menu.search.returnPressed.emit()
     assert not menu.isVisible()
     assert window.session.doc.name.endswith("договор-07.docx")
+
+
+def test_history_groups_batch_documents_with_review_state(qtbot, window):
+    from md_blinder.storage.history import HistoryDocMeta
+
+    panel = window.start.history
+    docs = [
+        HistoryDocMeta("a", "Клиент/акт.docx", "docx", 1, 100, 5, "b", 2),
+        HistoryDocMeta("x", "скан.pdf", "pdf", 2, 90, 0, None, 0),
+        HistoryDocMeta("c", "Клиент/2024/счет.xlsx", "xlsx", 3, 80, 3, "b", 0),
+        HistoryDocMeta("old", "старый.docx", "docx", 4, 70, 4),  # запись без счетчика проверки
+    ]
+    panel.render(docs, None)
+    rows = [panel.rows.itemAt(i).widget() for i in range(panel.rows.count())]
+    assert [r.objectName() for r in rows] == ["historyGroup", "historyRow", "historyRow", "historyRow", "historyRow"]
+    group_texts = [lb.text() for lb in rows[0].findChildren(QLabel)]
+    assert "Пакет «Клиент»" in group_texts
+
+    def chips(row):
+        return [lb.text() for lb in row.findChildren(QLabel) if lb.objectName() in ("chipPending", "chipReady")]
+
+    names = [next(lb.text() for lb in r.findChildren(QLabel) if lb.objectName() == "historyName") for r in rows[1:]]
+    assert names == ["Клиент/акт.docx", "Клиент/2024/счет.xlsx", "скан.pdf", "старый.docx"]
+    assert [chips(r) for r in rows[1:]] == [["Не проверено: 2"], ["Проверено"], [], []]
+
+    opened = []
+    panel.show_batch.connect(opened.append)
+    button = next(b for b in rows[0].findChildren(QPushButton) if b.text() == "Все замены пакета")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert opened == ["a"]
+
+
+def test_header_switches_between_start_and_document(qtbot, window, tmp_path):
+    header = window.header
+    assert header.start_actions.isVisible() and not header.doc_actions.isVisible()
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert header.doc_actions.isVisible() and header.crumbs.isVisible()
+    assert header.file_label.text() == "contract.docx"
+    qtbot.mouseClick(header.home_button, Qt.MouseButton.LeftButton)
+    assert window.stack.currentWidget() is window.start
+    assert header.start_actions.isVisible() and not header.crumbs.isVisible()
+
+
+def test_overview_label_click_opens_editor(qtbot, window, tmp_path):
+    from md_blinder.ui.widgets import LabelEditor
+
+    first = make_docx(tmp_path / "first.docx", para("Alpha Ltd signs."))
+    second = make_docx(tmp_path / "second.docx", para("Alpha Ltd pays."))
+    process_all(qtbot, window, [first, second])
+    s = window.session.text.index("Alpha Ltd")
+    window._add_entity(s, s + len("Alpha Ltd"), "COMPANY")
+    window.show_batch_overview()
+    overview = window.overview
+    assert not overview.findChildren(LabelEditor)
+    chip = next(b for b in overview.findChildren(QPushButton) if b.objectName() == "labelChip")
+    qtbot.mouseClick(chip, Qt.MouseButton.LeftButton)
+    qtbot.wait(10)
+    [editor] = overview.findChildren(LabelEditor)
+    editor.box.setCurrentText("Поставщик")
+    editor.apply.click()
+    assert window.anonymized_text.startswith("[Поставщик] signs.")
+    assert [x.placeholder for x in overview.targets] == ["[Поставщик]"]
+    overview.close()

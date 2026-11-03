@@ -7,50 +7,38 @@ import threading
 import webbrowser
 from typing import Callable, Optional
 
-from PySide6.QtCore import QObject, QSettings, Qt, Signal
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
+from PySide6.QtCore import QObject, QSettings, Signal
+from PySide6.QtWidgets import QCheckBox, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from .. import __version__, updater
 from ..cancel import CancelToken, Cancelled
 from . import theme as t
+from .icons import pixmap
+from .widgets import Notice, make_button
 
 SETTING_CHECK = "checkUpdates"
 
 
-class UpdateBar(QFrame):
-    """Полоса над содержимым окна: доступна версия, загрузка, готово к перезапуску, ошибка."""
+class UpdateBar(Notice):
+    """Плашка под шапкой окна: доступна версия, загрузка, готово к перезапуску, ошибка."""
 
     def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("updateBar")
-        self.setStyleSheet(
-            f"QFrame#updateBar {{ background: {t.ACCENT_WASH}; border-bottom: 1px solid {t.LINE}; }}"
-            f"QFrame#updateBar QLabel {{ color: {t.INK}; font-size: 13.5px; background: transparent; }}"
-        )
-        row = QHBoxLayout(self)
-        row.setContentsMargins(20, 8, 20, 8)
-        row.setSpacing(10)
-        self.label = QLabel()
-        self.label.setWordWrap(True)
-        self.label.setTextFormat(Qt.TextFormat.RichText)
-        row.addWidget(self.label, 1)
+        super().__init__(tone="info")
+        self.icon.setPixmap(pixmap("download", t.INFO_INK, 16))
         self.buttons: list[QPushButton] = []
-        self._row = row
         self.hide()
 
-    def show_state(self, text: str, actions: list[tuple[str, Callable[[], None], bool]]) -> None:
+    def show_state(self, text: str, actions: list[tuple[str, Callable[[], None], bool]], error: bool = False) -> None:
         for b in self.buttons:
             b.deleteLater()
         self.buttons = []
+        self.set_tone("danger" if error else "info")
+        if not error:
+            self.icon.setPixmap(pixmap("download", t.INFO_INK, 16))
         self.label.setText(text)
-        for title, handler, primary in actions:
-            b = QPushButton(title)
-            if primary:
-                b.setObjectName("primary")
-            b.setStyleSheet("padding: 4px 12px; font-size: 13px;")
-            b.clicked.connect(handler)
-            self._row.addWidget(b)
-            self.buttons.append(b)
+        # Основное действие стоит справа, как в окнах с вопросом.
+        for title, handler, primary in sorted(actions, key=lambda a: a[2]):
+            self.buttons.append(self.add_button(title, handler, link=not primary, primary=primary))
         self.show()
 
 
@@ -117,12 +105,12 @@ class UpdateController(QObject):
         if release is None:
             return
         ok, reason = updater.can_self_update()
-        text = f"<b>Доступна версия {release.version}</b> (у вас {__version__})."
+        text = f"<b>Доступна версия {release.version}</b>, у вас {__version__}."
         actions: list[tuple[str, Callable[[], None], bool]] = []
         if ok:
             actions.append(("Обновить", self.download, True))
         else:
-            text += f" <span style='color:{t.INK_3}'>{reason}</span>"
+            text += f" <span style='color:{t.INK_2}'>{reason}</span>"
         if release.page_url:
             actions.append(("Что нового", lambda: webbrowser.open(release.page_url), False))
         actions.append(("Позже", self.bar.hide, False))
@@ -161,7 +149,7 @@ class UpdateController(QObject):
         if error is not None:
             self.bar.show_state(
                 f"Не удалось скачать обновление: {error}",
-                [("Повторить", self.download, True), ("Скрыть", self.bar.hide, False)],
+                [("Повторить", self.download, True), ("Скрыть", self.bar.hide, False)], error=True,
             )
             return
         version = self.release.version if self.release else ""
@@ -172,23 +160,24 @@ class UpdateController(QObject):
         )
 
 
-def version_footer(controller: UpdateController) -> QWidget:
-    """Строка внизу стартового экрана: версия, проверка обновлений, выключатель."""
-    from PySide6.QtWidgets import QCheckBox
+def header_update_actions(controller: UpdateController) -> list[QWidget]:
+    """Версия и «Проверить обновления» справа в шапке стартового экрана."""
+    version = QLabel(f"Версия {__version__}")
+    version.setObjectName("muted")
+    check = make_button("Проверить обновления", kind="ghost", small=True, icon_name="refresh")
+    check.clicked.connect(lambda: controller.check(manual=True))
+    return [version, check]
 
+
+def settings_footer(controller: UpdateController) -> QWidget:
+    """Настройки внизу стартового экрана: проверка обновлений при запуске и другие флажки.
+    Новые флажки вставляются перед последним элементом, растяжкой."""
     box = QWidget()
     row = QHBoxLayout(box)
-    row.setContentsMargins(0, 24, 0, 0)
-    row.setSpacing(12)
-    label = QLabel(f"MD Blinder {__version__}")
-    label.setObjectName("muted")
-    row.addWidget(label)
-    check = QPushButton("Проверить обновления")
-    check.setObjectName("link")
-    check.setCursor(Qt.CursorShape.PointingHandCursor)
-    check.clicked.connect(lambda: controller.check(manual=True))
-    row.addWidget(check)
-    auto = QCheckBox("Проверять при запуске")
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(20)
+    auto = QCheckBox("Проверять обновления при запуске")
+    auto.setObjectName("small")
     auto.setChecked(controller.auto_check)
     auto.setToolTip("Один запрос к GitHub за номером последней версии. Документы не отправляются.")
     auto.toggled.connect(controller.set_auto_check)

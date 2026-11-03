@@ -1,4 +1,4 @@
-"""Стартовый экран: состояние моделей, выбор файла, история (стартовая часть App.tsx и HistoryPanel.tsx)."""
+"""Стартовый экран: состояние моделей, выбор файлов, история с пакетами документов."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QScrollArea,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -25,9 +23,9 @@ from ..text_utils import plural
 from . import theme as t
 from .icons import icon, pixmap
 from .model_status import ModelStatusBar
-from .widgets import set_prop
+from .widgets import ElidedLabel, Notice, icon_label, make_button, set_prop
 
-MAX_WIDTH = 1320  # .app: max-width 1360px минус поля
+MAX_WIDTH = 1040  # ширина колонки стартового экрана
 HISTORY_VISIBLE = 10  # столько строк истории видно, пока список не раскрыт
 
 
@@ -41,8 +39,12 @@ def dropped_file(event) -> Optional[str]:
     return files[0] if files else None
 
 
+FILE_TYPE_TAGS = {"docx": "DOC", "pdf": "PDF", "xlsx": "XLS"}
+
+
 class DropZone(QFrame):
     clicked = Signal()
+    pick_folder = Signal()
     file_dropped = Signal(list)  # пути файлов
 
     def __init__(self) -> None:
@@ -51,40 +53,53 @@ class DropZone(QFrame):
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        t.add_shadow(self)
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 44, 24, 36)
+        layout.setContentsMargins(24, 32, 24, 32)
         layout.setSpacing(0)
-        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         circle = QLabel()
         circle.setObjectName("dropIcon")
-        circle.setFixedSize(44, 44)
+        circle.setFixedSize(40, 40)
         circle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        circle.setPixmap(pixmap("upload", t.ACCENT, 22))
+        circle.setPixmap(pixmap("upload", t.ACCENT, 20))
         layout.addWidget(circle, 0, Qt.AlignmentFlag.AlignHCenter)
-        layout.addSpacing(10)
-        title = QLabel("Перетащите .docx, .xlsx, .pdf или папку с ними сюда или нажмите, чтобы выбрать файлы")
-        title.setStyleSheet("font-size: 15.5px; font-weight: 500; background: transparent;")
+        layout.addSpacing(12)
+        title = QLabel("Перетащите файлы или папку сюда")
+        title.setObjectName("sectionTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint = QLabel("Поддерживаются текстовые и сканированные PDF (распознавание через OCR)")
-        hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        batch_hint = QLabel(
-            "Несколько файлов или папка, в том числе с вложенными папками, обрабатываются пакетом: одна и та же "
-            "сторона получает одинаковую метку во всех документах"
+        hint = QLabel(
+            ".docx, .xlsx, .pdf, в том числе сканы. Несколько файлов или папка, в том числе с вложенными "
+            "папками, обрабатываются пакетом: одна и та же сторона получает одинаковую метку во всех документах."
         )
-        batch_hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
-        batch_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        batch_hint.setWordWrap(True)
+        hint.setObjectName("secondary")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        hint.setWordWrap(True)
         self.file_label = QLabel()
-        self.file_label.setStyleSheet("font-weight: 600; background: transparent;")
+        self.file_label.setObjectName("strong")
         self.file_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.file_label.hide()
         layout.addWidget(title)
-        layout.addSpacing(6)
-        layout.addWidget(hint)
-        layout.addSpacing(4)
-        layout.addWidget(batch_hint)
+        layout.addSpacing(8)
+        # Перенос строк работает, только если подпись растягивается по ширине строки раскладки.
+        hint_row = QHBoxLayout()
+        hint_row.addStretch(1)
+        hint_row.addWidget(hint, 6)
+        hint_row.addStretch(1)
+        layout.addLayout(hint_row)
+        layout.addSpacing(16)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        buttons.addStretch(1)
+        self.files_button = make_button("Выбрать файлы", kind="primary", icon_name="file", tooltip="Ctrl+O")
+        self.files_button.clicked.connect(self.clicked)
+        self.folder_button = make_button(
+            "Выбрать папку", icon_name="folder",
+            tooltip="Все файлы .docx, .xlsx и .pdf из папки и ее подпапок обрабатываются одним пакетом (Ctrl+Shift+O)",
+        )
+        self.folder_button.clicked.connect(self.pick_folder)
+        buttons.addWidget(self.files_button)
+        buttons.addWidget(self.folder_button)
+        buttons.addStretch(1)
+        layout.addLayout(buttons)
         layout.addSpacing(8)
         layout.addWidget(self.file_label)
         self.enabled_ = True
@@ -148,28 +163,36 @@ class Spinner(QWidget):
 
 
 class LoadingBlock(QWidget):
+    """Карточка обработки: что происходит сейчас, подсказка и «Отменить»."""
+
     cancel = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 16, 0, 0)
-        layout.setSpacing(4)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 16, 0, 0)
+        card = QFrame()
+        card.setObjectName("progressCard")
+        outer.addWidget(card)
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 14, 14, 14)
+        layout.setSpacing(6)
         row = QHBoxLayout()
         row.setSpacing(10)
         row.addWidget(Spinner())
         self.label = QLabel()
+        self.label.setObjectName("strong")
         self.label.setWordWrap(True)
         row.addWidget(self.label, 1)
+        button = make_button("Отменить", small=True, tooltip="Отменить обработку")
+        button.clicked.connect(self.cancel)
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(row)
         self.hint = QLabel()
         self.hint.setObjectName("hint")
         self.hint.setWordWrap(True)
+        self.hint.setContentsMargins(26, 0, 0, 0)
         layout.addWidget(self.hint)
-        button = QPushButton("Отменить обработку")
-        button.clicked.connect(self.cancel)
-        layout.addSpacing(8)
-        layout.addWidget(button, 0, Qt.AlignmentFlag.AlignLeft)
 
     def set_status(self, label: str, hint: Optional[str]) -> None:
         self.label.setText(label)
@@ -177,53 +200,81 @@ class LoadingBlock(QWidget):
         self.hint.setVisible(bool(hint))
 
 
+def _batch_folder(names: list[str]) -> str:
+    """Общая папка документов пакета («Клиент» у «Клиент/акт.docx» и «Клиент/2024/счет.pdf»)."""
+    heads = {name.split("/", 1)[0] for name in names if "/" in name}
+    return heads.pop() if len(heads) == 1 and all("/" in name for name in names) else ""
+
+
+def _when(ms: int) -> str:
+    return dt.datetime.fromtimestamp(ms / 1000).strftime("%d.%m.%Y, %H:%M")
+
+
 class HistoryPanel(QWidget):
     open_doc = Signal(str)
     delete_doc = Signal(str)
+    show_batch = Signal(str)  # id любого документа пакета: открыть его и «Все замены пакета»
     export_history = Signal()
     import_history = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 24, 0, 0)
+        layout.setContentsMargins(0, 28, 0, 0)
         layout.setSpacing(0)
         header = QHBoxLayout()
-        self.title = QLabel()
-        self.title.setStyleSheet("font-size: 16px; font-weight: 600;")
+        header.setSpacing(8)
+        self.title = QLabel("Недавние документы")
+        self.title.setObjectName("sectionTitle")
+        self.count = QLabel()
+        self.count.setObjectName("badge")
         header.addWidget(self.title)
+        header.addWidget(self.count)
         header.addStretch(1)
-        self.export_button = QPushButton("Экспортировать историю")
-        self.export_button.setStyleSheet("padding: 6px 12px; font-size: 13px;")
+        self.export_button = make_button("Экспорт истории", kind="ghost", small=True, icon_name="download")
+        self.export_button.setToolTip("Файл .json со всеми документами. Содержит исходный текст.")
         self.export_button.clicked.connect(self.export_history)
-        import_button = QPushButton("Импортировать историю")
-        import_button.setStyleSheet("padding: 6px 12px; font-size: 13px;")
+        import_button = make_button("Импорт истории", kind="ghost", small=True, icon_name="import")
+        import_button.setToolTip("Документы из файла .json добавятся к этим")
         import_button.clicked.connect(self.import_history)
         header.addWidget(self.export_button)
         header.addWidget(import_button)
         layout.addLayout(header)
+        layout.addSpacing(10)
+        self.error = QLabel()
+        self.error.setObjectName("errorText")
+        self.error.setWordWrap(True)
+        self.error.setContentsMargins(0, 0, 0, 8)
+        self.error.hide()
+        layout.addWidget(self.error)
+        card = QFrame()
+        card.setObjectName("listCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(1, 0, 1, 1)
+        card_layout.setSpacing(0)
+        self.rows = QVBoxLayout()
+        self.rows.setSpacing(0)
+        card_layout.addLayout(self.rows)
+        footer = QFrame()
+        footer.setObjectName("listFooter")
+        foot = QHBoxLayout(footer)
+        foot.setContentsMargins(16, 10, 16, 10)
+        foot.setSpacing(8)
+        foot.addWidget(icon_label("lock", t.INK_3, 14), 0, Qt.AlignmentFlag.AlignTop)
         warning = QLabel(
             "История хранится на этом компьютере вместе с исходным текстом, без шифрования. "
             "Экспорт истории тоже содержит исходные данные."
         )
+        warning.setObjectName("hint")
         warning.setWordWrap(True)
-        warning.setObjectName("warnText")
-        warning.setContentsMargins(0, 6, 0, 4)
-        layout.addWidget(warning)
-        self.error = QLabel()
-        self.error.setObjectName("errorText")
-        self.error.setWordWrap(True)
-        self.error.hide()
-        layout.addWidget(self.error)
-        self.rows = QVBoxLayout()
-        self.rows.setSpacing(0)
-        layout.addLayout(self.rows)
-        self.more_button = QPushButton()
-        self.more_button.setObjectName("link")
+        foot.addWidget(warning, 1)
+        card_layout.addWidget(footer)
+        layout.addWidget(card)
+        self.more_button = make_button(kind="link")
         self.more_button.clicked.connect(lambda: self.set_expanded(not self.expanded))
         self.more_button.hide()
         more_row = QHBoxLayout()
-        more_row.setContentsMargins(0, 6, 0, 0)
+        more_row.setContentsMargins(0, 8, 0, 0)
         more_row.addWidget(self.more_button)
         more_row.addStretch(1)
         layout.addLayout(more_row)
@@ -244,7 +295,7 @@ class HistoryPanel(QWidget):
 
     def render(self, docs: list[HistoryDocMeta], current_id: Optional[str]) -> None:
         self._docs, self._current_id = docs, current_id
-        self.title.setText(f"История ({len(docs)})")
+        self.count.setText(str(len(docs)))
         self.export_button.setEnabled(bool(docs))
         while self.rows.count():
             item = self.rows.takeAt(0)
@@ -255,44 +306,101 @@ class HistoryPanel(QWidget):
         more = f"Показать еще {plural(hidden, ('документ', 'документа', 'документов'))}"
         self.more_button.setText(more if hidden else "Свернуть")
         if not docs:
-            empty = QLabel("История пуста.")
+            empty = QLabel("Здесь появятся обработанные документы.")
             empty.setObjectName("muted")
-            empty.setContentsMargins(0, 8, 0, 0)
+            empty.setContentsMargins(16, 14, 16, 14)
             self.rows.addWidget(empty)
             return
-        batch_sizes: dict[str, int] = {}
+        # Документы пакета идут подряд под общим заголовком, на месте самого свежего из них.
+        batches: dict[str, list[HistoryDocMeta]] = {}
         for doc in docs:
             if doc.batch_id:
-                batch_sizes[doc.batch_id] = batch_sizes.get(doc.batch_id, 0) + 1
-        for doc in docs[:len(docs) - hidden]:
-            row = QFrame()
-            row.setObjectName("historyRow")
-            line = QHBoxLayout(row)
-            line.setContentsMargins(0, 8, 0, 8)
-            line.setSpacing(12)
-            name = QLabel(doc.name)
-            name.setStyleSheet("font-weight: 600; background: transparent;")
-            name.setToolTip(doc.name)
-            name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-            when = dt.datetime.fromtimestamp(doc.updated_at / 1000).strftime("%d.%m.%Y, %H:%M")
-            details = f"{when} · {plural(doc.entity_count, ('находка', 'находки', 'находок'))} · {doc.format}"
-            if doc.batch_id:
-                size = batch_sizes.get(doc.batch_id, 1)
-                details += f" · пакет из {plural(size, ('документа', 'документов', 'документов'))}"
-            meta = QLabel(details)
-            meta.setStyleSheet(f"color: {t.INK_3}; font-size: 12px; background: transparent;")
-            line.addWidget(name, 1)
-            line.addWidget(meta)
-            open_button = QPushButton("Открыт" if doc.id == current_id else "Открыть")
-            open_button.setStyleSheet("padding: 4px 10px; font-size: 13px;")
-            open_button.clicked.connect(lambda _=False, i=doc.id: self.open_doc.emit(i))
-            delete_button = QPushButton("✕")
-            delete_button.setObjectName("ghost")
-            delete_button.setToolTip(f"Удалить «{doc.name}»")
-            delete_button.clicked.connect(lambda _=False, i=doc.id: self.delete_doc.emit(i))
-            line.addWidget(open_button)
-            line.addWidget(delete_button)
-            self.rows.addWidget(row)
+                batches.setdefault(doc.batch_id, []).append(doc)
+        ordered: list[HistoryDocMeta] = []
+        placed: set[str] = set()
+        for doc in docs:
+            if doc.batch_id and len(batches[doc.batch_id]) > 1:
+                if doc.batch_id not in placed:
+                    placed.add(doc.batch_id)
+                    ordered.extend(batches[doc.batch_id])
+            else:
+                ordered.append(doc)
+        shown_groups: set[str] = set()
+        for doc in ordered[:len(docs) - hidden]:
+            grouped = bool(doc.batch_id) and len(batches.get(doc.batch_id or "", [])) > 1
+            if grouped and doc.batch_id not in shown_groups:
+                shown_groups.add(doc.batch_id)
+                self.rows.addWidget(self._group(batches[doc.batch_id]))
+            self.rows.addWidget(self._row(doc, current_id, grouped))
+
+    def _group(self, members: list[HistoryDocMeta]) -> QFrame:
+        group = QFrame()
+        group.setObjectName("historyGroup")
+        group.setFixedHeight(40)
+        line = QHBoxLayout(group)
+        line.setContentsMargins(16, 0, 12, 0)
+        line.setSpacing(10)
+        line.addWidget(icon_label("layers", t.INK_2, 16))
+        folder = _batch_folder([d.name for d in members])
+        title = QLabel(f"Пакет «{folder}»" if folder else "Пакет документов")
+        title.setObjectName("strongSmall")
+        meta = QLabel(
+            f"{plural(len(members), ('документ', 'документа', 'документов'))} · "
+            f"{plural(sum(d.entity_count for d in members), ('находка', 'находки', 'находок'))} · "
+            f"{_when(max(d.updated_at for d in members))}"
+        )
+        meta.setObjectName("hint")
+        line.addWidget(title)
+        line.addWidget(meta)
+        line.addStretch(1)
+        overview = make_button("Все замены пакета", small=True, icon_name="table")
+        overview.setToolTip("Метки всех документов пакета в одном списке")
+        overview.clicked.connect(lambda _=False, i=members[0].id: self.show_batch.emit(i))
+        line.addWidget(overview)
+        return group
+
+    def _row(self, doc: HistoryDocMeta, current_id: Optional[str], grouped: bool) -> QFrame:
+        row = QFrame()
+        row.setObjectName("historyRow")
+        row.setMinimumHeight(52)
+        line = QHBoxLayout(row)
+        line.setContentsMargins(42 if grouped else 16, 8, 12, 8)
+        line.setSpacing(12)
+        tag = QLabel(FILE_TYPE_TAGS.get(doc.format, doc.format.upper()[:3]))
+        tag.setObjectName("fileType")
+        tag.setProperty("kind", doc.format)
+        tag.setFixedSize(28, 28)
+        tag.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        line.addWidget(tag)
+        texts = QVBoxLayout()
+        texts.setSpacing(0)
+        name = ElidedLabel(doc.name, Qt.TextElideMode.ElideMiddle)
+        name.setObjectName("historyName")
+        name.setToolTip(doc.name)
+        found = plural(doc.entity_count, ("находка", "находки", "находок"))
+        meta = QLabel(found if grouped else f"{_when(doc.updated_at)} · {found}")
+        meta.setObjectName("hint")
+        texts.addWidget(name)
+        texts.addWidget(meta)
+        line.addLayout(texts, 1)
+        if doc.pending_count:
+            chip = QLabel(f"Не проверено: {doc.pending_count}")
+            chip.setObjectName("chipPending")
+            chip.setToolTip("Кандидаты, которые еще не приняты и не отклонены: в тексте они без замены")
+            line.addWidget(chip)
+        elif doc.pending_count == 0 and doc.entity_count:
+            chip = QLabel("Проверено")
+            chip.setObjectName("chipReady")
+            line.addWidget(chip)
+        is_current = doc.id == current_id
+        open_button = make_button("Открыт" if is_current else "Открыть", small=True)
+        open_button.clicked.connect(lambda _=False, i=doc.id: self.open_doc.emit(i))
+        delete_button = make_button(kind="iconButton", small=True, tooltip=f"Удалить «{doc.name}» из истории")
+        delete_button.setIcon(icon("x", t.INK_3, 14))
+        delete_button.clicked.connect(lambda _=False, i=doc.id: self.delete_doc.emit(i))
+        line.addWidget(open_button)
+        line.addWidget(delete_button)
+        return row
 
 
 class StartScreen(QScrollArea):
@@ -308,7 +416,7 @@ class StartScreen(QScrollArea):
         body = QWidget()
         body.setObjectName("page")
         outer = QHBoxLayout(body)
-        outer.setContentsMargins(20, 32, 20, 64)
+        outer.setContentsMargins(24, 32, 24, 48)
         container = QWidget()
         container.setMaximumWidth(MAX_WIDTH)
         column = QVBoxLayout(container)
@@ -317,21 +425,15 @@ class StartScreen(QScrollArea):
         outer.addWidget(container)
         self.setWidget(body)
 
-        title_row = QHBoxLayout()
-        title_row.setSpacing(12)
-        mark = QLabel()
-        mark.setPixmap(pixmap("mark", t.INK, 26))
-        title_row.addWidget(mark)
-        title = QLabel("MD Blinder")
-        title.setObjectName("title")
-        title_row.addWidget(title)
-        title_row.addStretch(1)
-        column.addLayout(title_row)
+        title = QLabel("Документы")
+        title.setObjectName("screenTitle")
+        column.addWidget(title)
         column.addSpacing(4)
-        subtitle = QLabel("Конвертация документов (.docx, .xlsx, .pdf) в Markdown с обезличиванием.")
+        subtitle = QLabel("Конвертация .docx, .xlsx и .pdf в Markdown с обезличиванием. Все работает на этом компьютере.")
         subtitle.setObjectName("subtitle")
+        subtitle.setWordWrap(True)
         column.addWidget(subtitle)
-        column.addSpacing(20)
+        column.addSpacing(16)
 
         self.model_status = ModelStatusBar()
         column.addWidget(self.model_status)
@@ -339,39 +441,34 @@ class StartScreen(QScrollArea):
 
         self.dropzone = DropZone()
         self.dropzone.clicked.connect(self.pick_file)
+        self.dropzone.pick_folder.connect(self.pick_folder)
         self.dropzone.file_dropped.connect(self.file_dropped)
+        self.folder_button = self.dropzone.folder_button
         column.addWidget(self.dropzone)
-        options = QHBoxLayout()
-        options.setContentsMargins(0, 12, 0, 0)
-        options.setSpacing(12)
+        column.addSpacing(12)
         self.convert_only_box = QCheckBox("Только конвертировать в Markdown, без поиска персональных данных")
-        self.convert_only_box.setStyleSheet("font-size: 13.5px;")
         self.convert_only_box.setToolTip(
             "Текст документа выгружается как есть, без замен. Модель распознавания имен не нужна; "
             "данные можно отметить вручную в исходнике."
         )
-        options.addWidget(self.convert_only_box)
-        options.addStretch(1)
-        self.folder_button = QPushButton("Выбрать папку…")
-        self.folder_button.setIcon(icon("folder", t.INK, 16, t.ACCENT))
-        self.folder_button.setToolTip(
-            "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок обрабатываются одним пакетом (Ctrl+Shift+O)"
-        )
-        self.folder_button.clicked.connect(self.pick_folder)
-        options.addWidget(self.folder_button)
-        column.addLayout(options)
+        column.addWidget(self.convert_only_box)
         self.loading = LoadingBlock()
         self.loading.hide()
         column.addWidget(self.loading)
-        self.error = QLabel()
-        self.error.setWordWrap(True)
-        self.error.setStyleSheet(f"color: {t.DANGER}; margin-top: 16px;")
-        self.error.hide()
-        column.addWidget(self.error)
+        self.error_notice = Notice(tone="danger")
+        self.error = self.error_notice.label
+        error_slot = QWidget()
+        error_wrap = QVBoxLayout(error_slot)
+        error_wrap.setContentsMargins(0, 16, 0, 0)
+        error_wrap.addWidget(self.error_notice)
+        self.error_notice.slot = error_slot
+        self.error_notice.hide()
+        column.addWidget(error_slot)
         self.history = HistoryPanel()
         column.addWidget(self.history)
-        column.addStretch(1)
+        column.addSpacing(24)
         self.column = column
+        column.addStretch(1)
 
     def add_footer(self, widget: QWidget) -> None:
         self.column.addWidget(widget)
@@ -384,4 +481,4 @@ class StartScreen(QScrollArea):
 
     def set_error(self, text: str) -> None:
         self.error.setText(text)
-        self.error.setVisible(bool(text))
+        self.error_notice.setVisible(bool(text))

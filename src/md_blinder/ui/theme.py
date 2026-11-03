@@ -1,7 +1,7 @@
-"""Токены, шрифты и стили. Источник — src/index.css и src/App.css веб-версии.
+"""Единые цвета, шрифты, размеры и таблица стилей всех экранов.
 
-Названия токенов совпадают с CSS-переменными (--paper → PAPER и т. д.), чтобы
-правку в веб-версии было легко перенести сюда.
+Виджеты не задают собственных стилей: вид определяется именем объекта (objectName)
+и свойствами вроде tone и small, правила для них собраны здесь.
 """
 
 from __future__ import annotations
@@ -17,37 +17,66 @@ SANS = "IBM Plex Sans"
 SERIF = "IBM Plex Serif"
 MONO = "IBM Plex Mono"
 
-# --- токены из src/index.css ---
-PAPER = "#f4f3ee"
-SURFACE = "#fffffe"
-SUNK = "#eceae2"
+# --- цвета ---
+PAPER = "#f4f3ee"  # фон окна
+SURFACE = "#fffffe"  # карточки, панели, меню, окна
+SURFACE_2 = "#faf9f5"  # полоса номеров строк, заголовки групп
+SUNK = "#eceae2"  # наведение, счетчики, метки замен
 INK = "#181b22"
 INK_2 = "#474d5a"
-INK_3 = "#7b8291"
+INK_3 = "#646a78"  # подписи; темнее прежнего #7b8291, чтобы мелкий текст читался (контраст 4,9)
 LINE = "#e4e1d8"
 LINE_2 = "#d6d2c7"
 ACCENT = "#3a3d8f"
 ACCENT_2 = "#4d50a8"
 ACCENT_WASH = "#ecebf6"
+ACCENT_LINE = "#c9c8ea"
 ACCENT_INK = "#ffffff"
-GOOD = "#2c7a58"
-WARN = "#a2691a"
-WARN_WASH = "#f6eddf"
+INFO_INK = "#2e3170"  # текст на плашке-сведении
+# «Внимание» и «не проверено» — один оранжевый тон.
+WARN = "#8a4b06"
+WARN_WASH = "#fff1d6"
+WARN_LINE = "#e7c48b"
+PENDING = WARN
+PENDING_WASH = WARN_WASH
+PENDING_LINE = "#c9821a"  # подчеркивание непроверенного фрагмента в тексте
 DANGER = "#b23a45"
+DANGER_INK = "#8f2833"
 DANGER_WASH = "#f6e7e8"
-REDACT_BG = "#17191e"
-REDACT_INK = "#f3f3f0"
-PENDING = "#8a4b06"
-PENDING_WASH = "#fff1d6"
-PENDING_LINE = "#c9821a"
+DANGER_LINE = "#e3b7bb"
 READY = "#1f7a45"
 READY_WASH = "#eef8f1"
 READY_LINE = "#b9dcc6"
+GOOD = READY
+REDACT_BG = "#17191e"
+REDACT_INK = "#f3f3f0"
 MARK = "#ffe2a8"  # подсветка совпадения в контексте кандидата
 
-RADIUS = 12
-RADIUS_SM = 8
-RADIUS_XS = 5
+# Скругления: кнопки и поля, карточки и окна. Чипы и счетчики — полукругом.
+RADIUS = 10
+RADIUS_SM = 6
+RADIUS_XS = 4
+
+# Шесть размеров шрифта на весь интерфейс; текст документа — Serif 15.
+FS_CAPTION = 12  # подписи, счетчики, даты
+FS_SMALL = 13  # пояснения, плашки, подсказки в меню
+FS_BODY = 14  # основной текст, кнопки, пункты меню
+FS_SECTION = 16  # заголовок раздела
+FS_TITLE = 20  # заголовок окна и карточки
+FS_SCREEN = 28  # заголовок экрана
+FS_DOC = 15
+
+# Высота кнопок и полей: обычная и внутри строк списков.
+CONTROL_H = 32
+CONTROL_H_SM = 26
+
+# Тона плашек: фон, рамка, текст, значок.
+TONES: dict[str, tuple[str, str, str, str]] = {
+    "info": (ACCENT_WASH, ACCENT_LINE, INFO_INK, "info"),
+    "warn": (WARN_WASH, WARN_LINE, WARN, "warn"),
+    "success": (READY_WASH, READY_LINE, READY, "check"),
+    "danger": (DANGER_WASH, DANGER_LINE, DANGER_INK, "error"),
+}
 
 # (r, g, b, alpha) — как --ent-* в App.css.
 ENTITY_RGBA: dict[str, tuple[int, int, int, float]] = {
@@ -118,74 +147,147 @@ def add_shadow(widget: QWidget, pop: bool = False) -> None:
     widget.setGraphicsEffect(effect)
 
 
+def _tone_rules() -> str:
+    """Плашки (Notice) и полоса обновления: фон, рамка и цвет текста по тону."""
+    rules = []
+    for tone, (bg, line, ink, _icon) in TONES.items():
+        rules.append(
+            f'QFrame#notice[tone="{tone}"] {{ background: {bg}; border: 1px solid {line}; border-radius: {RADIUS}px; }}'
+            f'QFrame#notice[tone="{tone}"] QLabel {{ color: {ink}; background: transparent; font-size: {FS_SMALL}px; }}'
+            f'QFrame#notice[tone="{tone}"] QPushButton {{ color: {ink}; border-color: {ink}; background: transparent; }}'
+            f'QFrame#notice[tone="{tone}"] QPushButton:hover {{ background: {SURFACE}; }}'
+            f'QFrame#notice[tone="{tone}"] QPushButton#ghost {{ border-color: transparent; }}'
+            f'QFrame#notice[tone="{tone}"] QPushButton#primary {{ background: {ink}; border-color: {ink}; color: {SURFACE}; }}'
+            f'QFrame#notice[tone="{tone}"] QPushButton#primary:hover {{ background: {ink}; }}'
+        )
+    return "\n".join(rules)
+
+
 STYLESHEET = f"""
 * {{ font-family: "{SANS}"; color: {INK}; }}
-QWidget {{ font-size: 15px; }}
+QWidget {{ font-size: {FS_BODY}px; }}
 QMainWindow, QWidget#page, QScrollArea#page > QWidget > QWidget {{ background: {PAPER}; }}
-QToolTip {{ background: {SURFACE}; color: {INK}; border: 1px solid {LINE_2}; padding: 4px 6px; font-size: 13px; }}
+QToolTip {{ background: {SURFACE}; color: {INK}; border: 1px solid {LINE_2}; padding: 4px 6px; font-size: {FS_SMALL}px; }}
 
-QLabel#muted {{ color: {INK_3}; font-size: 13px; }}
-QLabel#hint {{ color: {INK_3}; font-size: 12px; }}
-QLabel#title {{ font-size: 31px; font-weight: 700; }}
-QLabel#subtitle {{ color: {INK_2}; font-size: 15px; }}
-QLabel#paneTitle {{ font-size: 13px; font-weight: 600; }}
-QLabel#sectionHead {{ color: {INK_3}; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; }}
-QLabel#warnText {{ color: {WARN}; font-size: 12px; }}
-QLabel#errorText {{ color: {DANGER}; font-size: 13px; }}
+/* Текст */
+QLabel {{ background: transparent; }}
+QLabel#screenTitle {{ font-size: {FS_SCREEN}px; font-weight: 600; }}
+QLabel#dialogTitle {{ font-size: {FS_TITLE}px; font-weight: 600; }}
+QLabel#sectionTitle {{ font-size: {FS_SECTION}px; font-weight: 600; }}
+QLabel#subtitle {{ color: {INK_2}; font-size: {FS_BODY}px; }}
+QLabel#body {{ font-size: {FS_BODY}px; }}
+QLabel#secondary {{ color: {INK_2}; font-size: {FS_SMALL}px; }}
+QLabel#muted {{ color: {INK_3}; font-size: {FS_SMALL}px; }}
+QLabel#hint {{ color: {INK_3}; font-size: {FS_CAPTION}px; }}
+QLabel#strong {{ font-size: {FS_BODY}px; font-weight: 600; }}
+QLabel#strongSmall {{ font-size: {FS_SMALL}px; font-weight: 600; }}
+QLabel#historyName {{ font-size: {FS_BODY}px; font-weight: 500; }}
+QLabel#paneTitle {{ font-size: {FS_SMALL}px; font-weight: 600; }}
+QLabel#sectionHead {{ color: {INK_3}; font-size: {FS_CAPTION}px; font-weight: 600; letter-spacing: 0.4px; }}
+QLabel#warnText {{ color: {WARN}; font-size: {FS_CAPTION}px; }}
+QLabel#errorText {{ color: {DANGER}; font-size: {FS_SMALL}px; }}
+QLabel#saveState {{ font-size: {FS_CAPTION}px; color: {INK_3}; }}
+QLabel#saveState[state="saved"] {{ color: {READY}; }}
+QLabel#saveState[state="error"] {{ color: {DANGER}; }}
+QLabel#brand {{ font-size: {FS_SECTION}px; font-weight: 600; }}
+QLabel#crumb {{ font-size: {FS_BODY}px; font-weight: 600; }}
+QLabel#kbd {{ font-family: "{MONO}"; font-size: 11px; border: 1px solid {INK_3}; border-radius: {RADIUS_XS}px; padding: 0 4px; color: {INK_2}; }}
+QLabel#kbdOnPrimary {{ font-family: "{MONO}"; font-size: 11px; border: 1px solid rgba(255,255,255,170); border-radius: {RADIUS_XS}px; padding: 0 4px; color: {ACCENT_INK}; }}
+QLabel#onPrimary {{ color: {ACCENT_INK}; font-size: {FS_BODY}px; font-weight: 500; }}
+QLabel#buttonText {{ font-size: {FS_BODY}px; font-weight: 500; }}
 
+/* Кнопки: обычная, основная (#primary), тихая (#ghost), опасная (#danger, #dangerPrimary).
+   Высота 32 px, с small="true" — 26 px. */
 QPushButton, QToolButton {{
-  font-size: 14px; font-weight: 500; color: {INK}; background: {SURFACE};
-  border: 1px solid {LINE_2}; border-radius: {RADIUS_SM}px; padding: 7px 13px;
+  font-size: {FS_BODY}px; font-weight: 500; color: {INK}; background: {SURFACE};
+  border: 1px solid {LINE_2}; border-radius: {RADIUS_SM}px; padding: 0 12px; min-height: {CONTROL_H - 2}px;
 }}
 QPushButton:hover, QToolButton:hover {{ border-color: {ACCENT}; color: {ACCENT}; background: {ACCENT_WASH}; }}
 QPushButton:disabled, QToolButton:disabled {{ color: {INK_3}; background: {SURFACE}; border-color: {LINE}; }}
-QPushButton#primary, QToolButton#primary {{ background: {ACCENT}; border-color: {ACCENT}; color: {ACCENT_INK}; }}
-QPushButton#primary:hover, QToolButton#primary:hover {{ background: {ACCENT_2}; border-color: {ACCENT_2}; color: {ACCENT_INK}; }}
-QPushButton#small {{ padding: 3px 10px; font-size: 13px; border-radius: {RADIUS_XS}px; }}
-QPushButton#ghost {{ border: none; background: transparent; color: {INK_3}; padding: 2px 6px; }}
-QPushButton#ghost:hover {{ background: {SUNK}; color: {INK}; }}
-QPushButton#iconButton {{ border: none; background: transparent; padding: 0; min-width: 32px; min-height: 32px; max-width: 32px; max-height: 32px; }}
+QPushButton[small="true"], QPushButton#small {{ padding: 0 9px; min-height: {CONTROL_H_SM - 2}px; font-size: {FS_SMALL}px; }}
+QPushButton#primary, QPushButton#splitMain {{ background: {ACCENT}; border-color: {ACCENT}; color: {ACCENT_INK}; }}
+QPushButton#primary:hover, QPushButton#splitMain:hover {{ background: {ACCENT_2}; border-color: {ACCENT_2}; color: {ACCENT_INK}; }}
+QPushButton#primary:disabled {{ background: {mix(ACCENT, SURFACE, 0.45).name()}; border-color: {mix(ACCENT, SURFACE, 0.45).name()}; color: {ACCENT_INK}; }}
+QPushButton#ghost {{ border-color: transparent; background: transparent; color: {INK_2}; }}
+QPushButton#ghost:hover {{ background: {SUNK}; color: {INK}; border-color: transparent; }}
+QPushButton#ghost:disabled {{ background: transparent; border-color: transparent; color: {LINE_2}; }}
+QPushButton#danger {{ color: {DANGER}; }}
+QPushButton#danger:hover {{ border-color: {DANGER}; background: {DANGER_WASH}; color: {DANGER}; }}
+QPushButton#dangerPrimary {{ background: {DANGER}; border-color: {DANGER}; color: {ACCENT_INK}; }}
+QPushButton#dangerPrimary:hover {{ background: {DANGER_INK}; border-color: {DANGER_INK}; color: {ACCENT_INK}; }}
+QPushButton#iconButton {{
+  border: none; background: transparent; padding: 0;
+  min-width: {CONTROL_H}px; max-width: {CONTROL_H}px; min-height: {CONTROL_H}px; max-height: {CONTROL_H}px;
+}}
+QPushButton#iconButton[small="true"] {{
+  min-width: {CONTROL_H_SM}px; max-width: {CONTROL_H_SM}px; min-height: {CONTROL_H_SM}px; max-height: {CONTROL_H_SM}px;
+}}
 QPushButton#iconButton:hover {{ background: {SUNK}; }}
 QPushButton#link {{
-  border: none; background: transparent; color: {ACCENT}; padding: 0; font-size: 13px;
+  border: none; background: transparent; color: {ACCENT}; padding: 0; min-height: 0; font-size: {FS_SMALL}px;
   text-decoration: underline; text-align: left;
 }}
 QPushButton#link:hover {{ color: {ACCENT_2}; background: transparent; }}
-QPushButton#danger {{ color: {DANGER}; padding: 3px 10px; font-size: 13px; border-radius: {RADIUS_XS}px; }}
-QPushButton#danger:hover {{ border-color: {DANGER}; background: {DANGER_WASH}; color: {DANGER}; }}
-QPushButton#chipPending {{
-  background: {PENDING_WASH}; border: 1px solid {PENDING_LINE}; color: {PENDING};
-  border-radius: 13px; padding: 4px 12px; font-size: 13px; font-weight: 500;
-}}
-QPushButton#chipPending:hover {{ border-color: {PENDING}; color: {INK}; background: {PENDING_WASH}; }}
-QLabel#chipReady {{
-  background: {READY_WASH}; border: 1px solid {READY_LINE}; color: {READY};
-  border-radius: 13px; padding: 4px 12px; font-size: 13px; font-weight: 500;
-}}
+QPushButton#textAction {{ border: none; background: transparent; color: {ACCENT}; padding: 0 4px; font-size: {FS_SMALL}px; text-align: left; }}
+QPushButton#textAction:hover {{ background: {ACCENT_WASH}; color: {ACCENT_2}; }}
 QPushButton#splitMain {{ border-top-right-radius: 0; border-bottom-right-radius: 0; }}
 QPushButton#splitToggle {{
+  background: {ACCENT}; border-color: {ACCENT}; color: {ACCENT_INK};
   border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: 1px solid rgba(255,255,255,90);
-  padding-left: 9px; padding-right: 9px;
+  padding: 0; min-width: {CONTROL_H}px; max-width: {CONTROL_H}px;
 }}
-QPushButton#viewToggle {{ border: none; border-radius: 0; background: transparent; color: {INK_3}; padding: 6px 14px; font-size: 13px; }}
-QPushButton#viewToggle:checked {{ background: {ACCENT}; color: {ACCENT_INK}; }}
-QFrame#viewToggleBox {{ border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; background: {SURFACE}; }}
+QPushButton#splitToggle:hover {{ background: {ACCENT_2}; border-color: {ACCENT_2}; }}
 
+/* Чипы и счетчики */
+QPushButton#chipPending, QLabel#chipPending {{
+  background: {WARN_WASH}; border: 1px solid {WARN_LINE}; color: {WARN};
+  border-radius: 12px; padding: 0 10px; min-height: 22px; max-height: 22px; font-size: {FS_CAPTION}px; font-weight: 500;
+}}
+QPushButton#chipPending:hover {{ border-color: {WARN}; color: {WARN}; background: {WARN_WASH}; }}
+QPushButton#chipReady, QLabel#chipReady {{
+  background: {READY_WASH}; border: 1px solid {READY_LINE}; color: {READY};
+  border-radius: 12px; padding: 0 10px; min-height: 22px; max-height: 22px; font-size: {FS_CAPTION}px; font-weight: 500;
+}}
+QLabel#badge, QLabel#badgePending, QLabel#badgeDone {{
+  border-radius: 10px; padding: 0 7px; min-height: 20px; max-height: 20px; font-size: {FS_CAPTION}px; font-weight: 600;
+}}
+QLabel#badge {{ background: {SUNK}; color: {INK_2}; }}
+QLabel#badgePending {{ background: {WARN_WASH}; color: {WARN}; }}
+QLabel#badgeDone {{ background: {READY_WASH}; color: {READY}; }}
+QLabel#placeholder, QLabel#cellPlaceholder {{
+  background: {SUNK}; color: {INK_2}; font-family: "{MONO}"; font-size: {FS_CAPTION}px; font-weight: 500;
+  border-radius: {RADIUS_XS}px; padding: 1px 6px;
+}}
+QLabel#fileType {{
+  font-family: "{MONO}"; font-size: 10px; font-weight: 600; border-radius: {RADIUS_SM}px;
+  min-width: 30px; max-width: 30px; min-height: 28px; max-height: 28px; qproperty-alignment: AlignCenter;
+}}
+QLabel#fileType[kind="docx"] {{ background: #e3ecfa; color: #2a5fa8; }}
+QLabel#fileType[kind="pdf"] {{ background: {DANGER_WASH}; color: {DANGER_INK}; }}
+QLabel#fileType[kind="xlsx"] {{ background: #e4f3e8; color: {READY}; }}
+
+/* Поля ввода и списки */
+QLineEdit {{
+  font-size: {FS_BODY}px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
+  border-radius: {RADIUS_SM}px; padding: 0 8px; min-height: {CONTROL_H - 2}px;
+}}
+QLineEdit:focus {{ border-color: {ACCENT}; }}
+QComboBox QLineEdit {{ border: none; padding: 0; min-height: 0; background: transparent; }}
 QComboBox {{
-  font-size: 14px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
-  border-radius: {RADIUS_SM}px; padding: 5px 28px 5px 8px; combobox-popup: 0;
+  font-size: {FS_BODY}px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
+  border-radius: {RADIUS_SM}px; padding: 0 28px 0 10px; min-height: {CONTROL_H - 2}px; combobox-popup: 0;
 }}
 QComboBox:hover {{ border-color: {INK_3}; }}
 QComboBox:focus {{ border-color: {ACCENT}; }}
 QComboBox:disabled {{ color: {INK_3}; border-color: {LINE}; }}
-QComboBox#mono {{ font-family: "{MONO}"; font-size: 12px; padding: 3px 26px 3px 6px; }}
-QComboBox#compact {{ font-size: 12px; padding: 2px 24px 2px 6px; }}
+QComboBox#mono {{ font-family: "{MONO}"; font-size: {FS_CAPTION}px; padding: 0 26px 0 8px; min-height: {CONTROL_H_SM - 2}px; }}
+QComboBox#compact {{ font-size: {FS_SMALL}px; padding: 0 24px 0 8px; min-height: {CONTROL_H_SM - 2}px; }}
 /* Стрелку рисует Select.paintEvent значком chevron-down. */
 QComboBox::drop-down {{ border: none; width: 24px; }}
 QComboBox::down-arrow {{ image: none; width: 0; height: 0; }}
 QComboBoxPrivateContainer {{ background: {SURFACE}; border: none; }}
 QListView#selectList {{
-  background: {SURFACE}; border: 1px solid {LINE_2}; outline: 0; padding: 4px; color: {INK};
+  background: {SURFACE}; border: 1px solid {LINE_2}; border-radius: {RADIUS_SM}px; outline: 0; padding: 4px; color: {INK};
 }}
 QListView#selectList::item {{ padding: 6px 10px; border-radius: {RADIUS_XS}px; border: none; }}
 QListView#selectList::item:hover {{ background: {SUNK}; }}
@@ -194,92 +296,140 @@ QListView#selectList QScrollBar:vertical {{ background: transparent; width: 8px;
 QListView#selectList QScrollBar::handle:vertical {{ background: {LINE_2}; border-radius: 3px; min-height: 24px; }}
 QListView#selectList QScrollBar::add-line:vertical, QListView#selectList QScrollBar::sub-line:vertical {{ height: 0; }}
 QListView#selectList QScrollBar::add-page:vertical, QListView#selectList QScrollBar::sub-page:vertical {{ background: transparent; }}
-QCheckBox {{ font-size: 13px; spacing: 8px; }}
-QCheckBox::indicator {{ width: 15px; height: 15px; }}
+QCheckBox {{ font-size: {FS_BODY}px; spacing: 8px; }}
+QCheckBox#small {{ font-size: {FS_SMALL}px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px; }}
 
-QFrame#card {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
-QFrame#topbar {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
-QFrame#topbar[dragging="true"] {{ background: {ACCENT_WASH}; border-color: {ACCENT}; }}
+/* Шапка окна */
+QFrame#appHeader {{ background: {SURFACE}; border: none; border-bottom: 1px solid {LINE}; }}
+QFrame#appHeader[dragging="true"] {{ background: {ACCENT_WASH}; }}
+QPushButton#brandButton {{ border: none; background: transparent; padding: 0 6px; }}
+QPushButton#brandButton:hover {{ background: {SUNK}; }}
+QPushButton#crumbLink {{ border: none; background: transparent; color: {INK_2}; padding: 0 6px; font-weight: 400; }}
+QPushButton#crumbLink:hover {{ background: {SUNK}; color: {INK}; }}
+QPushButton#menuButton {{ padding: 0; }}
 QFrame#divider {{ background: {LINE}; }}
-QFrame#modelStatus {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; }}
-QFrame#modelStatus QLabel {{ background: transparent; }}
-QLabel#modelStatusText {{ color: {INK_2}; font-size: 13.5px; }}
-QLabel#modelStatusHint {{ color: {INK_3}; font-size: 12.5px; }}
-QFrame#modelStatus QPushButton {{ padding: 4px 11px; font-size: 13px; border-radius: {RADIUS_XS}px; }}
+
+/* Плашки */
+{_tone_rules()}
+
+/* Карточки и панели */
+QFrame#card, QFrame#listCard, QFrame#pane, QFrame#entityPane {{
+  background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px;
+}}
+QFrame#paneHead {{ background: transparent; border: none; border-bottom: 1px solid {LINE}; }}
+QFrame#segmented {{ background: {SUNK}; border: none; border-radius: 8px; }}
+QPushButton#segment {{
+  border: none; background: transparent; color: {INK_2}; padding: 0 12px; min-height: {CONTROL_H_SM}px;
+  max-height: {CONTROL_H_SM}px; font-size: {FS_SMALL}px; border-radius: {RADIUS_SM}px;
+}}
+QPushButton#segment:hover {{ color: {INK}; background: transparent; }}
+QPushButton#segment:checked {{ background: {SURFACE}; color: {INK}; }}
 QFrame#upload {{ background: {SURFACE}; border: 1.5px dashed {LINE_2}; border-radius: {RADIUS}px; }}
 QFrame#upload[dragging="true"], QFrame#upload:hover {{ border-color: {ACCENT}; }}
 QFrame#upload[dragging="true"] {{ background: {ACCENT_WASH}; }}
-QLabel#dropIcon {{ background: {ACCENT_WASH}; border-radius: 22px; }}
-QFrame#historyRow {{ border: none; border-bottom: 1px solid {LINE}; background: transparent; }}
-QFrame#notice {{ background: {WARN_WASH}; border: 1px solid {WARN}; border-radius: 6px; }}
-QFrame#notice QLabel {{ color: {WARN}; font-size: 13px; }}
-QFrame#noticeError {{ background: {DANGER_WASH}; border: 1px solid {DANGER}; border-radius: 6px; }}
-QFrame#noticeError QLabel {{ color: {DANGER}; font-size: 13px; }}
-QFrame#plainNotice QLabel {{ color: {INK_2}; font-size: 13px; }}
+QLabel#dropIcon {{ background: {ACCENT_WASH}; border-radius: 20px; }}
+QFrame#historyRow {{ border: none; border-top: 1px solid {LINE}; background: transparent; }}
+QFrame#historyRow:hover {{ background: {SURFACE_2}; }}
+QFrame#historyGroup {{ border: none; border-top: 1px solid {LINE}; background: {SURFACE_2}; }}
+QFrame#listFooter {{ border: none; border-top: 1px solid {LINE}; background: transparent; }}
+QFrame#progressCard {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
+QProgressBar {{ background: {SUNK}; border: none; border-radius: 2px; max-height: 4px; min-height: 4px; }}
+QProgressBar::chunk {{ background: {ACCENT}; border-radius: 2px; }}
 
-QFrame#menuPanel {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; }}
-QPushButton#menuItem {{ border: none; background: transparent; border-radius: {RADIUS_XS}px; padding: 0; text-align: left; }}
+/* Меню */
+QFrame#menuPanel {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
+QPushButton#menuItem {{ border: none; background: transparent; border-radius: {RADIUS_SM}px; padding: 0; min-height: 0; text-align: left; }}
 QPushButton#menuItem:hover {{ background: {SUNK}; }}
 QPushButton#menuItem[current="true"] {{ background: {SUNK}; }}
-QLabel#menuTitle {{ font-size: 14px; font-weight: 500; color: {INK}; background: transparent; }}
-QLabel#menuHint {{ font-size: 12px; color: {INK_3}; background: transparent; }}
-QLabel#menuHintWarn {{ font-size: 12px; color: {WARN}; background: transparent; }}
+QLabel#menuTitle {{ font-size: {FS_BODY}px; font-weight: 500; color: {INK}; }}
+QLabel#menuHint {{ font-size: {FS_CAPTION}px; color: {INK_3}; }}
+QLabel#menuHintWarn {{ font-size: {FS_CAPTION}px; color: {WARN}; }}
+QLabel#menuSection {{ font-size: {FS_CAPTION}px; font-weight: 600; color: {INK_3}; letter-spacing: 0.4px; }}
+QLabel#menuShortcut {{ font-family: "{MONO}"; font-size: {FS_CAPTION}px; color: {INK_3}; }}
 QScrollArea#menuList, QWidget#menuListBody {{ background: transparent; border: none; }}
-QLineEdit#menuSearch {{
-  font-size: 13px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
-  border-radius: {RADIUS_SM}px; padding: 5px 8px;
-}}
-QLineEdit#menuSearch:focus {{ border-color: {ACCENT}; }}
 
-QFrame#editorBox, QFrame#previewBox {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
-QTextEdit#sourceEditor, QTextBrowser#resultPreview {{ font-family: "{SERIF}"; font-size: 15px; }}
+/* Окна */
+QDialog#dialog {{ background: {SURFACE}; }}
+QFrame#dialogFooter {{ background: transparent; border: none; border-top: 1px solid {LINE}; }}
+QScrollArea#dialogBody {{ background: {SURFACE}; border: none; border-top: 1px solid {LINE}; }}
+QMessageBox, QProgressDialog {{ background: {SURFACE}; }}
+QMessageBox QLabel {{ font-size: {FS_BODY}px; }}
+
+/* Уведомление внизу окна */
+QFrame#toast {{ background: {INK}; border-radius: {RADIUS}px; }}
+QFrame#toast QLabel {{ color: {PAPER}; font-size: {FS_SMALL}px; }}
+QFrame#toast QPushButton {{
+  background: transparent; color: {ACCENT_INK}; border: 1px solid rgba(244,243,238,90);
+  padding: 0 10px; min-height: {CONTROL_H_SM - 2}px; font-size: {FS_SMALL}px;
+}}
+QFrame#toast QPushButton:hover {{ background: rgba(244,243,238,36); border-color: {PAPER}; color: {ACCENT_INK}; }}
+QFrame#toast QPushButton#iconButton {{ border: none; }}
+
+/* Редактор и результат */
+QTextEdit#sourceEditor, QTextBrowser#resultPreview {{ font-family: "{SERIF}"; font-size: {FS_DOC}px; }}
 QWidget#panelBody {{ background: {SURFACE}; }}
-QWidget#clickable {{ background: transparent; border-radius: {RADIUS_XS}px; }}
+QWidget#clickable {{ background: transparent; border-radius: {RADIUS_SM}px; }}
 QWidget#clickable[hover="true"] {{ background: {SUNK}; }}
 QPlainTextEdit, QTextEdit, QTextBrowser {{ background: transparent; border: none; selection-background-color: {mix(ACCENT, SURFACE, 0.28).name()}; selection-color: {INK}; }}
-QFrame#popup {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; }}
-QPushButton#mergeOpen {{ font-size: 12px; padding: 3px 9px; border: 1px solid transparent; background: {ACCENT_WASH}; color: {ACCENT}; border-radius: {RADIUS_XS}px; }}
+QLabel#redactSample {{
+  background: {REDACT_BG}; color: {REDACT_INK}; font-family: "{MONO}"; font-size: {FS_CAPTION - 1}px; font-weight: 500;
+  padding: 1px 6px; border-radius: {RADIUS_XS}px;
+}}
+QLabel#keepSample {{
+  background: {PENDING_WASH}; font-size: {FS_CAPTION}px; padding: 0 1px; border-bottom: 1px dotted {PENDING_LINE};
+}}
+QFrame#popup {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
+QPushButton#mergeOpen {{ font-size: {FS_SMALL}px; padding: 0 9px; min-height: {CONTROL_H_SM}px; border: 1px solid transparent; background: {ACCENT_WASH}; color: {ACCENT}; border-radius: {RADIUS_SM}px; }}
 QPushButton#mergeOpen:hover {{ background: {ACCENT}; color: {ACCENT_INK}; }}
 
-QFrame#entityPane {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
+/* Боковая панель */
 QFrame#sideTabs {{ background: transparent; border: none; border-bottom: 1px solid {LINE}; }}
-QPushButton#sideTab {{ border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: {INK_3}; font-size: 14px; padding: 0 8px; min-height: 42px; }}
-QPushButton#sideTab:hover {{ border-bottom-color: {LINE_2}; color: {INK}; background: transparent; }}
-QPushButton#sideTab[selected="true"] {{ border-bottom-color: {ACCENT}; color: {INK}; font-weight: 600; }}
-QLabel#badge {{ background: {SUNK}; color: {INK_2}; border-radius: 9px; padding: 0 7px; min-height: 18px; max-height: 18px; font-size: 12px; font-weight: 600; }}
-QLabel#badgePending {{ background: {PENDING_WASH}; color: {PENDING}; border-radius: 9px; padding: 0 7px; min-height: 18px; max-height: 18px; font-size: 12px; font-weight: 600; }}
-QLabel#badgeDone {{ background: {READY_WASH}; color: {READY}; border-radius: 9px; padding: 0 7px; min-height: 18px; max-height: 18px; font-size: 12px; font-weight: 600; }}
+QPushButton#sideTab {{ border: none; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: {INK_2}; padding: 0 8px; min-height: 45px; max-height: 45px; }}
+QPushButton#sideTab:hover {{ border-bottom-color: {LINE_2}; background: transparent; }}
+QPushButton#sideTab[selected="true"] {{ border-bottom-color: {ACCENT}; }}
+QLabel#tabTitle {{ font-size: {FS_BODY}px; color: {INK_2}; }}
+QLabel#tabTitle[selected="true"] {{ color: {INK}; font-weight: 600; }}
 
-QFrame#candidateCard {{ background: {mix(PENDING_WASH, SURFACE, 0.55).name()}; border: 1px solid {PENDING_LINE}; border-radius: {RADIUS_SM}px; }}
+QFrame#candidateCard {{ background: {mix(WARN_WASH, SURFACE, 0.45).name()}; border: 1px solid {PENDING_LINE}; border-radius: {RADIUS}px; }}
 QFrame#candidateCard[focused="true"] {{ border: 2px solid {ACCENT}; }}
-QLabel#cardCount {{ color: {PENDING}; font-size: 13px; font-weight: 500; }}
-QLabel#cardValue {{ font-size: 19px; font-weight: 600; }}
-QLabel#cardContext {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_XS}px; padding: 9px 11px; font-family: "{SERIF}"; font-size: 14px; color: {INK_2}; }}
-QLabel#cardReason {{ font-size: 13px; font-weight: 500; }}
-QLabel#cardLink {{ font-size: 13px; }}
-QLabel#fieldLabel {{ color: {INK_3}; font-size: 13px; }}
-QFrame#reviewDone {{ background: {READY_WASH}; border: 1px solid {READY_LINE}; border-radius: {RADIUS_SM}px; }}
-QLabel#doneTitle {{ color: {READY}; font-weight: 600; font-size: 14px; }}
-QFrame#candidateItem {{ border-radius: {RADIUS_XS}px; background: transparent; }}
+QLabel#pairTitle {{ color: {INFO_INK}; font-size: {FS_SMALL}px; font-weight: 600; }}
+QLabel#pairNote {{ color: {INFO_INK}; font-size: {FS_CAPTION}px; }}
+QPushButton#labelChip {{
+  background: {SUNK}; border: 1px solid transparent; border-radius: {RADIUS_XS}px; padding: 0; min-height: 0;
+}}
+QPushButton#labelChip:hover {{ background: {SURFACE}; border-color: {LINE_2}; }}
+QLabel#labelChipText {{ color: {INK_2}; font-family: "{MONO}"; font-size: {FS_CAPTION}px; font-weight: 500; }}
+QFrame#pairCard {{ background: {ACCENT_WASH}; border: 1px solid {ACCENT_LINE}; border-radius: {RADIUS}px; }}
+QLabel#cardCount {{ color: {WARN}; font-size: {FS_CAPTION}px; font-weight: 600; }}
+QLabel#cardValue {{ font-size: {FS_TITLE}px; font-weight: 600; }}
+QLabel#cardContext {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS_SM}px; padding: 9px 11px; font-family: "{SERIF}"; font-size: {FS_BODY}px; color: {INK_2}; }}
+QLabel#cardReason {{ font-size: {FS_SMALL}px; color: {INK_2}; }}
+QLabel#cardLink {{ font-size: {FS_SMALL}px; }}
+QLabel#fieldLabel {{ color: {INK_3}; font-size: {FS_SMALL}px; }}
+QLabel#doneTitle {{ color: {READY}; font-weight: 600; font-size: {FS_BODY}px; }}
+QFrame#candidateItem {{ border-radius: {RADIUS_SM}px; background: transparent; }}
 QFrame#candidateItem[current="true"] {{ background: {ACCENT_WASH}; }}
-QLabel#itemNum {{ background: {PENDING_WASH}; color: {PENDING}; border-radius: 11px; font-size: 11px; font-weight: 600; }}
-QLabel#itemValue {{ font-size: 13px; font-weight: 500; }}
-QLabel#itemReason {{ font-size: 12px; color: {INK_3}; }}
-QLabel#itemReasonCurrent {{ font-size: 12px; color: {ACCENT}; }}
-QPushButton#disclosure {{ border: none; background: transparent; color: {INK_2}; font-size: 13px; font-weight: 500; padding: 4px; text-align: left; }}
+QLabel#itemNum {{ background: {WARN_WASH}; color: {WARN}; border-radius: 11px; font-size: 11px; font-weight: 600; }}
+QLabel#itemValue {{ font-size: {FS_BODY}px; font-weight: 500; }}
+QLabel#itemReason {{ font-size: {FS_CAPTION}px; color: {INK_3}; }}
+QLabel#itemReasonCurrent {{ font-size: {FS_CAPTION}px; color: {ACCENT}; }}
+QPushButton#disclosure {{ border: none; background: transparent; color: {INK_2}; font-size: {FS_SMALL}px; font-weight: 500; padding: 0 4px; text-align: left; }}
+QPushButton#disclosure:hover {{ background: {SUNK}; color: {INK}; }}
 
-QFrame#groupHeader {{ background: {SURFACE}; border-radius: {RADIUS_XS}px; }}
+QFrame#groupHeader {{ background: {SURFACE}; border-radius: {RADIUS_SM}px; }}
 QFrame#groupHeader[highlighted="true"] {{ border: 2px solid {ACCENT}; }}
 QFrame#groupSep {{ background: {LINE}; }}
-QLabel#groupName {{ font-family: "{MONO}"; font-size: 12px; font-weight: 500; }}
-QLabel#groupCount {{ color: {INK_3}; font-size: 12px; }}
-QFrame#entityRow {{ border-radius: {RADIUS_XS}px; background: transparent; }}
+QLabel#groupName {{ font-family: "{MONO}"; font-size: {FS_CAPTION}px; font-weight: 600; }}
+QLabel#groupCount {{ color: {INK_3}; font-size: {FS_CAPTION}px; }}
+QLabel#typeDot {{ border-radius: 4px; min-width: 8px; max-width: 8px; min-height: 8px; max-height: 8px; }}
+QFrame#entityRow {{ border-radius: {RADIUS_SM}px; background: transparent; }}
 QFrame#entityRow[selected="true"] {{ background: {ACCENT_WASH}; }}
 QFrame#entityRow[highlighted="true"] {{ background: {ACCENT_WASH}; border-left: 3px solid {ACCENT}; }}
-QLabel#cellValue {{ font-size: 13px; font-weight: 500; }}
-QLabel#cellValueOff {{ font-size: 13px; font-weight: 500; color: {INK_3}; text-decoration: line-through; }}
-QLabel#cellPlaceholder {{ background: {SUNK}; color: {INK_2}; font-family: "{MONO}"; font-size: 11px; border-radius: 4px; padding: 1px 6px; }}
-QLabel#cellCount {{ color: {INK_3}; font-size: 12px; }}
+QFrame#overviewRow {{ border: none; border-top: 1px solid {LINE}; border-radius: 0; background: transparent; }}
+QLabel#cellValue {{ font-size: {FS_BODY}px; font-weight: 500; }}
+QLabel#cellValueOff {{ font-size: {FS_BODY}px; font-weight: 500; color: {INK_3}; text-decoration: line-through; }}
+QLabel#cellCount {{ color: {INK_3}; font-size: {FS_CAPTION}px; }}
 
 QScrollArea {{ background: transparent; border: none; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 0; }}
@@ -290,5 +440,4 @@ QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; }}
 QScrollBar::handle:horizontal {{ background: {LINE_2}; border-radius: 4px; min-width: 30px; margin: 2px; }}
 QSplitter::handle {{ background: transparent; }}
-QMessageBox QLabel {{ font-size: 14px; }}
 """

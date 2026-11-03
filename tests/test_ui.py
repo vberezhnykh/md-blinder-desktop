@@ -427,6 +427,69 @@ def test_files_opened_together_share_labels_across_the_package(qtbot, window, tm
     assert "example.com" not in text and ".docx" not in text
 
 
+def test_folder_with_nested_folders_is_one_package(qtbot, window, tmp_path, monkeypatch):
+    root = tmp_path / "Клиент"
+    (root / "2024" / "март").mkdir(parents=True)
+    make_docx(root / "договор.docx", para("Пишите на alice@example.com или bob@example.com."))
+    make_docx(root / "2024" / "март" / "акт.docx", para("Копия bob@example.com и carol@example.com."))
+    make_xlsx(root / "2024" / "контакты.xlsx", {"Лист": {"A1": "alice@example.com"}})
+    (root / "старый.doc").write_bytes(b"\xd0\xcf\x11\xe0")
+    (root / "заметки.txt").write_text("не документ", encoding="utf-8")
+    process_all(qtbot, window, [root])
+    assert window.stack.currentWidget() is window.page
+    assert window.session.doc.name == "Клиент/договор.docx"
+    assert window.page.topbar.batch_label.text() == "Пакет · 3"
+    assert "старый" not in window.start.error.text()
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    metas = {m.name: m for m in window.store.load_metadata()}
+    assert set(metas) == {"Клиент/договор.docx", "Клиент/2024/контакты.xlsx", "Клиент/2024/март/акт.docx"}
+    assert len({m.batch_id for m in metas.values()}) == 1
+    window.open_doc(metas["Клиент/2024/март/акт.docx"].id)
+    assert "Копия [EMAIL_2] и [EMAIL_3]." in window.anonymized_text
+
+    out = tmp_path / "выгрузка"
+    out.mkdir()
+    monkeypatch.setattr(window, "_pick_folder", lambda title: out)
+    window.export_batch_folder()
+    assert (out / "Клиент" / "договор.md").read_text(encoding="utf-8").startswith("Пишите на [EMAIL_1] или [EMAIL_2].")
+    assert (out / "Клиент" / "2024" / "март" / "акт.md").read_text(encoding="utf-8").startswith("Копия [EMAIL_2] и [EMAIL_3].")
+    assert "[EMAIL_1]" in (out / "Клиент" / "2024" / "контакты.md").read_text(encoding="utf-8")
+    assert not any("example.com" in f.read_text(encoding="utf-8") for f in out.rglob("*.md"))
+
+    # Повторная выгрузка в ту же папку спрашивает, заменять ли файлы.
+    from PySide6.QtWidgets import QMessageBox
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (asked.append(a[2]), QMessageBox.StandardButton.No)[1])
+    (out / "Клиент" / "договор.md").write_text("старое", encoding="utf-8")
+    window.export_batch_folder()
+    assert asked and "3 файла" in asked[0]
+    assert (out / "Клиент" / "договор.md").read_text(encoding="utf-8") == "старое"
+
+
+def test_folder_without_documents_shows_error(qtbot, window, tmp_path):
+    empty = tmp_path / "пусто"
+    (empty / "внутри").mkdir(parents=True)
+    (empty / "старый.doc").write_bytes(b"\xd0\xcf\x11\xe0")
+    window.process_files([empty])
+    assert window.run is None and window.job is None
+    assert "В папке нет файлов .docx, .xlsx или .pdf." in window.start.error.text()
+    assert ".doc и .xls из папки пропущены (1)" in window.start.error.text()
+
+
+def test_add_folder_to_open_document(qtbot, window, tmp_path, monkeypatch):
+    open_docx(qtbot, window, tmp_path, para("Пишите на alice@example.com."))
+    folder = tmp_path / "Приложения"
+    (folder / "внутри").mkdir(parents=True)
+    make_docx(folder / "внутри" / "письмо.docx", para("Ответ от alice@example.com."))
+    monkeypatch.setattr(window, "_pick_folder", lambda title: folder)
+    window.add_folder_to_batch()
+    qtbot.waitUntil(lambda: window.job is None and window.run is None, timeout=20000)
+    assert window.session.doc.name == "Приложения/внутри/письмо.docx"
+    assert "Ответ от [EMAIL_1]." in window.anonymized_text
+    assert window.page.topbar.batch_label.text() == "Пакет · 2"
+
+
 def _assert_menu_items_readable(menu):
     items = [b for b in menu.findChildren(QPushButton) if b.objectName() == "menuItem"]
     assert items

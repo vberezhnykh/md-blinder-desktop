@@ -24,7 +24,7 @@ from PySide6.QtWidgets import (
 from ..storage.history import HistoryDocMeta
 from ..text_utils import plural
 from . import theme as t
-from .icons import pixmap
+from .icons import icon, pixmap
 from .widgets import icon_label, set_prop
 
 MAX_WIDTH = 1320  # .app: max-width 1360px минус поля
@@ -62,15 +62,15 @@ class DropZone(QFrame):
         circle.setPixmap(pixmap("upload", t.ACCENT, 22))
         layout.addWidget(circle, 0, Qt.AlignmentFlag.AlignHCenter)
         layout.addSpacing(10)
-        title = QLabel("Перетащите .docx, .xlsx или .pdf сюда или нажмите, чтобы выбрать")
+        title = QLabel("Перетащите .docx, .xlsx, .pdf или папку с ними сюда или нажмите, чтобы выбрать файлы")
         title.setStyleSheet("font-size: 15.5px; font-weight: 500; background: transparent;")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hint = QLabel("Поддерживаются текстовые и сканированные PDF (распознавание через OCR)")
         hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         batch_hint = QLabel(
-            "Несколько файлов сразу обрабатываются пакетом: одна и та же сторона получает одинаковую метку "
-            "во всех документах"
+            "Несколько файлов или папка, в том числе с вложенными папками, обрабатываются пакетом: одна и та же "
+            "сторона получает одинаковую метку во всех документах"
         )
         batch_hint.setStyleSheet(f"font-size: 13px; color: {t.INK_3}; background: transparent;")
         batch_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -290,7 +290,8 @@ def _fact(icon_name: str, bold: str, text: str, privacy: bool) -> QFrame:
 
 class StartScreen(QScrollArea):
     pick_file = Signal()
-    file_dropped = Signal(list)  # пути файлов
+    pick_folder = Signal()
+    file_dropped = Signal(list)  # пути файлов и папок
 
     def __init__(self) -> None:
         super().__init__()
@@ -345,13 +346,25 @@ class StartScreen(QScrollArea):
         self.dropzone.clicked.connect(self.pick_file)
         self.dropzone.file_dropped.connect(self.file_dropped)
         column.addWidget(self.dropzone)
+        options = QHBoxLayout()
+        options.setContentsMargins(0, 12, 0, 0)
+        options.setSpacing(12)
         self.convert_only_box = QCheckBox("Только конвертировать в Markdown, без поиска персональных данных")
-        self.convert_only_box.setStyleSheet("font-size: 13.5px; margin-top: 12px;")
+        self.convert_only_box.setStyleSheet("font-size: 13.5px;")
         self.convert_only_box.setToolTip(
             "Текст документа выгружается как есть, без замен. Модель распознавания имен не нужна; "
             "данные можно отметить вручную в исходнике."
         )
-        column.addWidget(self.convert_only_box)
+        options.addWidget(self.convert_only_box)
+        options.addStretch(1)
+        self.folder_button = QPushButton("Выбрать папку…")
+        self.folder_button.setIcon(icon("folder", t.INK, 16, t.ACCENT))
+        self.folder_button.setToolTip(
+            "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок обрабатываются одним пакетом (Ctrl+Shift+O)"
+        )
+        self.folder_button.clicked.connect(self.pick_folder)
+        options.addWidget(self.folder_button)
+        column.addLayout(options)
         self.loading = LoadingBlock()
         self.loading.hide()
         column.addWidget(self.loading)
@@ -368,9 +381,9 @@ class StartScreen(QScrollArea):
     def add_footer(self, widget: QWidget) -> None:
         self.column.addWidget(widget)
 
-    def set_file_name(self, name: str) -> None:
-        """Имя файла или готовая подпись вроде «3 файла»."""
-        label = f"Файл: {Path(name).name}" if Path(name).suffix else name
+    def set_file_name(self, name: str, plain: bool = False) -> None:
+        """Имя файла или готовая подпись вроде «3 файла» (plain — подпись как есть)."""
+        label = f"Файл: {Path(name).name}" if Path(name).suffix and not plain else name
         self.dropzone.file_label.setText(label if name else "")
         self.dropzone.file_label.setVisible(bool(name))
 

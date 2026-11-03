@@ -127,3 +127,30 @@ def test_acronym_matches_only_in_capitals():
     assert acronym is not None and len(acronym.positions) == 2
     assert find(result, lambda e: e.value == "upg") is None
 
+
+
+def test_phone_repeat_with_other_separators_is_found():
+    source_text = "Тел.: +7 (903) 796-12-34. Звоните по номеру 8 - 903 - 796 12 34 или +7 903 7961234."
+    entity = make_entity("PHONE", "+7 (903) 796-12-34", "[PHONE_1]", [(6, 24)])
+    result = find_related_occurrences(source_text, [entity])
+    values = sorted(v for e in result for v in [source_text[p.start:p.end] for p in e.positions])
+    assert values == ["+7 903 7961234"]
+
+
+def test_long_masked_image_does_not_stall_the_search():
+    # Картинка документа (data URI в сотни тысяч символов) маскируется пробелами той же
+    # длины. Неограниченный разделитель телефона перебирал такую строку квадратично:
+    # документ на 350 КБ с одной картинкой искался 9 минут.
+    import time
+
+    head = "Тел. +7 (903) 796-12-34, e-mail ivan.petrov@example.com, И. И. Иванов.\n"
+    image = "![фото](data:image/jpeg;base64," + "A" * 300_000 + ")"
+    source_text = head + image + "\n7 ivan Иванов\n"
+    entities = [
+        make_entity("PHONE", "+7 (903) 796-12-34", "[PHONE_1]", [(5, 23)]),
+        make_entity("EMAIL", "ivan.petrov@example.com", "[EMAIL_1]", [(32, 55)]),
+        make_entity("PERSON", "Иванов Иван Иванович", "[PERSON_1]", [(63, 69)]),
+    ]
+    started = time.perf_counter()
+    find_related_occurrences(source_text, entities)
+    assert time.perf_counter() - started < 3

@@ -45,6 +45,13 @@ _NOT_PHONE_CHAR_RE = regex.compile(r"[^0-9+]")
 
 _FLAGS_IU = regex.IGNORECASE | regex.V0
 
+# Сколько пробелов и знаков «-().» допускается между цифрами телефона, вокруг «@» и
+# точек e-mail и между инициалами и фамилией. В TS повторитель не ограничен, но картинка документа маскируется
+# пробелами той же длины (data URI в сотни тысяч символов), и на такой строке
+# неограниченный повторитель перебирает квадратично: документ на 350 КБ с одной
+# картинкой искался 9 минут. «+7 (903) 796-12-34» и «8 - 903» укладываются в 3.
+_MAX_GAP = 5
+
 
 def _escape(s: str) -> str:
     return regex.escape(s)
@@ -98,9 +105,10 @@ def _initials_forms(words: list[str]) -> list[_Form]:
     def push(initial_words: list[str], surname: str, initials_first: bool) -> None:
         if not initial_words:
             return
-        inits = rf"{_WS}*".join(rf"{_escape(w[0])}\.?" for w in initial_words)
+        gap = rf"{_WS}{{0,{_MAX_GAP}}}"
+        inits = gap.join(rf"{_escape(w[0])}\.?" for w in initial_words)
         sur = _escape(surname)
-        inner = rf"{inits}{_WS}*{sur}" if initials_first else rf"{sur}{_WS}*{inits}"
+        inner = rf"{inits}{gap}{sur}" if initials_first else rf"{sur}{gap}{inits}"
         forms.append(_Form(regex.compile(_bounded_word(inner), _FLAGS_IU), len(surname)))
 
     # первое слово как фамилия (рус. порядок «Фамилия Имя Отчество»)
@@ -167,8 +175,9 @@ def _company_forms(value: str) -> list[_Form]:
 
 def _email_forms(value: str) -> list[_Form]:
     # TS: escapeRegExp(value), затем «@» → \s*@\s* и «\.» → \s*\.\s*. Здесь то же
-    # строится посимвольно (см. отчет: TS ломается на «\» перед точкой).
-    gap = rf"{_WS}*"
+    # строится посимвольно (см. отчет: TS ломается на «\» перед точкой). Промежуток
+    # ограничен, как разделитель телефона (_MAX_GAP).
+    gap = rf"{_WS}{{0,{_MAX_GAP}}}"
     parts: list[str] = []
     for ch in value:
         if ch == "@":
@@ -186,7 +195,7 @@ def _phone_forms(value: str) -> list[_Form]:
         core = core[1:]
     if len(core) < 7:
         return []
-    sep = r"(?:" + _WS + r"|[\-().])*"
+    sep = r"(?:" + _WS + r"|[\-().])" + f"{{0,{_MAX_GAP}}}"
     body = sep.join(_escape(c) for c in core)
     # Флаги TS: только g (без i и u); \d в JS — ASCII.
     return [_Form(regex.compile(rf"(?<![0-9])\+?{sep}{body}(?![0-9])", regex.V0), 7)]

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from md_blinder.anonymize.stitch_address import stitch_address_runs, stitch_person_runs
+from md_blinder.anonymize.stitch_address import close_company_quotes, stitch_address_runs, stitch_person_runs
 from md_blinder.anonymize.types import RawMatch
 
 
@@ -190,3 +190,23 @@ def test_does_not_join_people_separated_by_comma_newline_or_word():
     for text in ("John Smith, Jane Doe", "John Smith\nJane Doe", "John Smith and Jane Doe"):
         people = [_person(text, "John Smith", 0.9), _person(text, "Jane Doe", 0.9)]
         assert [m.value for m in stitch_person_runs(people, text)] == ["John Smith", "Jane Doe"]
+
+
+def _company(text: str, value: str) -> RawMatch:
+    start = text.index(value)
+    return RawMatch("COMPANY", value, start, start + len(value), 0.9)
+
+
+def test_company_span_takes_the_missing_quote():
+    text = "Арендатор: ООО «Альфа», ИНН; “Beta” Ltd и ООО «Гамма»"
+    found = close_company_quotes(
+        [_company(text, "ООО «Альфа"), _company(text, "Beta” Ltd"), _company(text, "ООО «Гамма»")], text
+    )
+    assert [m.value for m in found] == ["ООО «Альфа»", "“Beta” Ltd", "ООО «Гамма»"]
+    assert all(text[m.start:m.end] == m.value for m in found)
+
+
+def test_company_span_without_a_neighbouring_quote_stays():
+    text = "ООО «Альфа и партнеры"
+    [m] = close_company_quotes([_company(text, "ООО «Альфа")], text)
+    assert m.value == "ООО «Альфа"

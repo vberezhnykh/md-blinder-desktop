@@ -18,7 +18,7 @@ from .config import NER_CONFIRM_THRESHOLD, NER_GRAY_ZONE_LOW
 from .ner_filter import filter_generic_ner_matches
 from .normalize import normalize_value
 from .regex_detectors import detect_structural
-from .stitch_address import stitch_address_runs, stitch_person_runs
+from .stitch_address import close_company_quotes, stitch_address_runs, stitch_person_runs
 from .types import AnonymizationResult, Entity, EntityType, Position, RawMatch
 
 NerDetect = Callable[[str], list[RawMatch]]
@@ -98,6 +98,7 @@ def anonymize_markdown(
     check(cancel)
 
     stitched = stitch_person_runs(stitch_address_runs(filter_generic_ner_matches(ner), markdown), markdown)
+    stitched = close_company_quotes(stitched, markdown)
     accepted = [
         m for m in resolve_overlaps(structural, stitched)
         if not (m.score is not None and m.score < NER_GRAY_ZONE_LOW)

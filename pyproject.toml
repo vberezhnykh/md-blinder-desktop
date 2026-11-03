@@ -21,8 +21,8 @@ dependencies = [
   "markdownify>=1.1",
   "beautifulsoup4>=4.12",
   # На Windows — сборка с DirectML: NER считается на видеокарте, если она проходит
-  # калибровку, иначе на CPU (ner/engine.py). pymupdf-layout тянет обычный onnxruntime,
-  # который затирает файлы DirectML: build.bat и CI переставляют onnxruntime-directml.
+  # калибровку, иначе на CPU (ner/engine.py). Обычный onnxruntime, который тянут
+  # pymupdf-layout и indra-ocr, на Windows убран через [tool.uv] ниже.
   "onnxruntime>=1.20; sys_platform != 'win32'",
   "onnxruntime-directml>=1.24; sys_platform == 'win32'",
   "tokenizers>=0.20",
@@ -32,7 +32,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-qt>=4.4", "pyinstaller>=6.10"]
+dev = ["pytest>=8", "pytest-qt>=4.4", "pyinstaller>=6.10", "ruff>=0.16"]
 
 [project.gui-scripts]
 md-blinder = "md_blinder.__main__:main"
@@ -53,3 +53,25 @@ markers = [
   "model: нужен скачанный файл модели GLiNER",
   "ocr: нужны модели Indra OCR",
 ]
+
+[tool.uv]
+# Версии всех зависимостей закреплены в uv.lock: CI и build.bat ставят ровно их
+# (uv export --frozen), обновление — `uv lock --upgrade` отдельным PR.
+# pymupdf-layout и indra-ocr зависят от обычного onnxruntime. На Windows вместо него
+# стоит onnxruntime-directml с теми же модулями, и обычный затер бы его файлы,
+# поэтому на Windows обычный onnxruntime не ставится.
+override-dependencies = ["onnxruntime>=1.20; sys_platform != 'win32'"]
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["md_blinder.spec"]
+
+[tool.ruff.lint]
+# Набор правил ruff по умолчанию: синтаксис, неиспользуемые импорты и имена,
+# неопределенные имена. Форматирование не проверяется.
+select = ["E4", "E7", "E9", "F"]

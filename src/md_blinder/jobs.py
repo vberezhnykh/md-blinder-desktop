@@ -34,7 +34,7 @@ from .cancel import AnyToken, CancelToken, Cancelled, check
 from .components import model_asset, ocr_models
 from .convert.docx import docx_to_markdown
 from .convert.file_type import detect_file_kind
-from .convert.ocr import OcrProgress, ocr_pdf_pages
+from .convert.ocr import ocr_pdf_pages
 from .convert.pdf import analyze_pdf, assemble_markdown
 from .convert.xlsx import xlsx_to_markdown
 from .ui.progress_label import UiProgress

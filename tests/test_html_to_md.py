@@ -32,7 +32,7 @@ def test_cell_content_order():
     assert "Contact Alice Smith" in md
     assert "After list<br>Second line" in md
     assert "![Signature](data:image/png;base64,c3ludGhldGlj)" in md
-    line = next(l for l in md.split("\n") if "Obligations:" in l)
+    line = next(row for row in md.split("\n") if "Obligations:" in row)
     assert line.index("Obligations:") < line.index("Pay 1000 EUR")
     assert line.index("Contact Alice Smith") < line.index("After list")
     assert "![Signature]" in line

@@ -28,6 +28,7 @@ from .icons import icon, pixmap
 from .widgets import icon_label, set_prop
 
 MAX_WIDTH = 1320  # .app: max-width 1360px минус поля
+HISTORY_VISIBLE = 10  # столько строк истории видно, пока список не раскрыт
 
 
 def dropped_files(event) -> list[str]:
@@ -217,18 +218,42 @@ class HistoryPanel(QWidget):
         self.rows = QVBoxLayout()
         self.rows.setSpacing(0)
         layout.addLayout(self.rows)
+        self.more_button = QPushButton()
+        self.more_button.setObjectName("link")
+        self.more_button.clicked.connect(lambda: self.set_expanded(not self.expanded))
+        self.more_button.hide()
+        more_row = QHBoxLayout()
+        more_row.setContentsMargins(0, 6, 0, 0)
+        more_row.addWidget(self.more_button)
+        more_row.addStretch(1)
+        layout.addLayout(more_row)
+        self.expanded = False
+        self._docs: list[HistoryDocMeta] = []
+        self._current_id: Optional[str] = None
+
+    def set_expanded(self, expanded: bool) -> None:
+        """Показать всю историю или только последние HISTORY_VISIBLE документов."""
+        if expanded == self.expanded:
+            return
+        self.expanded = expanded
+        self.render(self._docs, self._current_id)
 
     def set_error(self, text: str) -> None:
         self.error.setText(text)
         self.error.setVisible(bool(text))
 
     def render(self, docs: list[HistoryDocMeta], current_id: Optional[str]) -> None:
+        self._docs, self._current_id = docs, current_id
         self.title.setText(f"История ({len(docs)})")
         self.export_button.setEnabled(bool(docs))
         while self.rows.count():
             item = self.rows.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
+        hidden = 0 if self.expanded else max(0, len(docs) - HISTORY_VISIBLE)
+        self.more_button.setVisible(len(docs) > HISTORY_VISIBLE)
+        more = f"Показать еще {plural(hidden, ('документ', 'документа', 'документов'))}"
+        self.more_button.setText(more if hidden else "Свернуть")
         if not docs:
             empty = QLabel("История пуста.")
             empty.setObjectName("muted")
@@ -239,7 +264,7 @@ class HistoryPanel(QWidget):
         for doc in docs:
             if doc.batch_id:
                 batch_sizes[doc.batch_id] = batch_sizes.get(doc.batch_id, 0) + 1
-        for doc in docs:
+        for doc in docs[:len(docs) - hidden]:
             row = QFrame()
             row.setObjectName("historyRow")
             line = QHBoxLayout(row)

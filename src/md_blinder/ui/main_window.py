@@ -21,10 +21,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QProgressDialog,
     QPushButton,
-    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -73,17 +71,17 @@ from ..editing import resize_occurrence
 from ..text_utils import plural
 from . import theme as t
 from .autosave import Autosave
-from .icons import icon, pixmap
 from .progress_label import UiProgress, status_hint, status_label
 from .result_preview import ResultPane
 from .session import DocumentSession
 from .side_panel import SidePanel
 from .source_editor import EditorPane
 from .start_screen import StartScreen, dropped_files
-from .theme import add_shadow
-from .update_ui import UpdateBar, UpdateController, version_footer
+from .header import AppHeader
+from . import dialogs
+from .update_ui import UpdateBar, UpdateController, header_update_actions, settings_footer
 from .batch_overview import BatchOverview
-from .widgets import BATCH_PREFIX, Notice, PopupMenu, StatusStrip, Toast
+from .widgets import BATCH_PREFIX, Notice, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
 SETTING_CONVERT_ONLY = "convertOnly"
@@ -116,154 +114,59 @@ def split_doc_name(name: str, hint: str) -> tuple[str, str]:
     return file_name, (f"{folder} · {hint}" if folder else hint)
 
 
-class TopBar(QFrame):
-    """Верхняя панель экрана документа (TopBar.tsx)."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.setObjectName("topbar")
-        self.setAcceptDrops(True)
-        add_shadow(self)
-        row = QHBoxLayout(self)
-        row.setContentsMargins(14, 8, 10, 8)
-        row.setSpacing(14)
-        brand = QHBoxLayout()
-        brand.setSpacing(8)
-        mark = QLabel()
-        mark.setPixmap(pixmap("mark", t.INK, 20))
-        brand.addWidget(mark)
-        name = QLabel("MD Blinder")
-        name.setStyleSheet("font-size: 15px; font-weight: 600; background: transparent;")
-        brand.addWidget(name)
-        row.addLayout(brand)
-        divider = QFrame()
-        divider.setObjectName("divider")
-        divider.setFixedSize(1, 22)
-        row.addWidget(divider)
-        self.file_label = QLabel()
-        self.file_label.setStyleSheet("font-size: 15px; font-weight: 500; background: transparent;")
-        self.file_label.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
-        row.addWidget(self.file_label)
-        self.save_icon = QLabel()
-        self.save_icon.setFixedSize(14, 14)
-        self.save_label = QLabel()
-        save = QHBoxLayout()
-        save.setSpacing(5)
-        save.addWidget(self.save_icon)
-        save.addWidget(self.save_label)
-        row.addLayout(save)
-        row.addStretch(1)
-        self.home_button = QPushButton("На главную")
-        self.home_button.setIcon(icon("home", t.INK, 16, t.ACCENT))
-        self.home_button.setToolTip("Стартовый экран со всеми документами")
-        self.new_button = QPushButton("Новый файл")
-        self.new_button.setIcon(icon("upload", t.INK, 16, t.ACCENT))
-        self.new_button.setToolTip("Или перетащите файлы или папку на эту панель")
-        self.history_button = QPushButton()
-        hrow = QHBoxLayout(self.history_button)
-        hrow.setContentsMargins(13, 0, 11, 0)
-        hrow.setSpacing(7)
-        for widget in (QLabel(), QLabel("История"), QLabel()):
-            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            widget.setStyleSheet("background: transparent; color: inherit; font-size: 14px; font-weight: 500;")
-            hrow.addWidget(widget)
-        hrow.itemAt(0).widget().setPixmap(pixmap("clock", t.INK, 16))
-        hrow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
-        self.history_button.setMinimumWidth(130)
-        self.history_button.setMinimumHeight(self.new_button.sizeHint().height())
-        self.batch_button = QPushButton()
-        brow = QHBoxLayout(self.batch_button)
-        brow.setContentsMargins(13, 0, 11, 0)
-        brow.setSpacing(7)
-        self.batch_label = QLabel("Пакет")
-        for widget in (QLabel(), self.batch_label, QLabel()):
-            widget.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-            widget.setStyleSheet("background: transparent; color: inherit; font-size: 14px; font-weight: 500;")
-            brow.addWidget(widget)
-        brow.itemAt(0).widget().setPixmap(pixmap("layers", t.INK, 16))
-        brow.itemAt(2).widget().setPixmap(pixmap("chevron-down", t.INK_3, 14))
-        self.batch_button.setToolTip("Связанные документы с одинаковыми метками сторон")
-        self.batch_button.setMinimumWidth(130)
-        self.batch_button.setMinimumHeight(self.new_button.sizeHint().height())
-        row.addWidget(self.home_button)
-        row.addWidget(self.new_button)
-        row.addWidget(self.history_button)
-        row.addWidget(self.batch_button)
-        self.history_menu = PopupMenu(self, 340)
-        self.batch_menu = PopupMenu(self, 340)
-        self.set_save_state("saved")
-
-    def set_save_state(self, state: str) -> None:
-        if state == "error":
-            self.save_icon.setPixmap(pixmap("alert", t.DANGER, 14))
-            self.save_icon.show()
-            text, color = "Ошибка сохранения", t.DANGER
-        elif state == "saving":
-            self.save_icon.hide()
-            text, color = "Сохранение…", t.INK_3
-        else:
-            self.save_icon.setPixmap(pixmap("check", t.GOOD, 14))
-            self.save_icon.show()
-            text, color = "Сохранено на компьютере", t.GOOD
-        self.save_label.setText(text)
-        self.save_label.setStyleSheet(f"font-size: 12.5px; color: {color}; background: transparent;")
-
-
 class DocumentPage(QWidget):
-    """Экран документа: верхняя панель, статус, уведомления, исходник, результат и боковая панель."""
+    """Экран документа: строка статуса, плашки, исходник, результат и боковая панель.
+
+    Шапка окна общая с другими экранами (AppHeader); ее кнопки и меню доступны и
+    отсюда, через attach_header.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("page")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setContentsMargins(24, 14, 24, 24)
         layout.setSpacing(0)
-        self.topbar = TopBar()
-        self.home_button = self.topbar.home_button
-        self.new_button = self.topbar.new_button
-        self.history_button = self.topbar.history_button
-        self.history_menu = self.topbar.history_menu
-        self.batch_button = self.topbar.batch_button
-        self.batch_menu = self.topbar.batch_menu
-        self.file_label = self.topbar.file_label
-        layout.addWidget(self.topbar)
-        layout.addSpacing(16)
-
-        self.save_error = Notice(error=True)
-        self.retry_save = self.save_error.add_button("Повторить сохранение", lambda: None)
-        self.save_error.hide()
-        layout.addWidget(self.save_error)
 
         self.status = StatusStrip()
         layout.addWidget(self.status)
+        self.convert_only_box = QCheckBox("Только конвертация")
+        self.convert_only_box.setToolTip(
+            "Только конвертация в Markdown: копирование и экспорт без замен, документ выгружается как есть"
+        )
+        self.status.add_option(self.convert_only_box)
 
         self.notices = QVBoxLayout()
         self.notices.setContentsMargins(0, 0, 0, 0)
         self.notices.setSpacing(0)
         layout.addLayout(self.notices)
-        self.ocr_retry = Notice(plain=True)
+        self.save_error = Notice(error=True)
+        self.retry_save = self.save_error.add_button("Повторить сохранение", lambda: None)
+        self.ocr_retry = Notice(tone="info", closable=True)
         self.ocr_retry.label.setText("Текст выглядит битым или с ошибками?")
-        self.ocr_retry.layout().setStretch(0, 0)
-        self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None, link=True)
         self.ocr_retry_hint = QLabel()
         self.ocr_retry_hint.setObjectName("muted")
-        self.ocr_retry.layout().addWidget(self.ocr_retry_hint, 1)
-        self.ner_notice = Notice()
+        self.ocr_retry.row.insertWidget(2, self.ocr_retry_hint, 1)
+        self.ocr_retry.row.setStretch(1, 0)
+        self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None)
+        self.ner_notice = Notice(closable=True)
         self.convert_notice = Notice(
             "Включена только конвертация в Markdown: копирование и экспорт дают текст без замен. Отмеченные "
-            "данные сохраняются и снова заменяются, если снять флажок «Только конвертация в Markdown»."
+            "данные сохраняются и снова заменяются, если снять флажок «Только конвертация».",
+            tone="info",
         )
-        self.detect_notice = Notice("В документе нет автоматически найденных персональных данных.")
-        self.detect_button = self.detect_notice.add_button("Найти персональные данные", lambda: None, link=True)
-        self.ocr_notice = Notice()
-        self.image_notice = Notice()
+        self.detect_notice = Notice("В документе нет автоматически найденных персональных данных.", tone="info")
+        self.detect_button = self.detect_notice.add_button("Найти персональные данные", lambda: None)
+        self.ocr_notice = Notice(closable=True)
+        self.image_notice = Notice(closable=True)
         self.collision_notice = Notice(
             "В документе уже есть текст вида [PERSON_1], похожий на метки замены. В итоговом тексте "
-            "такие фрагменты экранируются, чтобы их нельзя было спутать."
+            "такие фрагменты экранируются, чтобы их нельзя было спутать.",
+            closable=True,
         )
         for notice in (
-            self.ocr_retry, self.ner_notice, self.convert_notice, self.detect_notice, self.ocr_notice,
-            self.image_notice, self.collision_notice,
+            self.save_error, self.ocr_retry, self.ner_notice, self.convert_notice, self.detect_notice,
+            self.ocr_notice, self.image_notice, self.collision_notice,
         ):
             slot = QWidget()
             wrap = QVBoxLayout(slot)
@@ -273,37 +176,25 @@ class DocumentPage(QWidget):
             notice.hide()
             self.notices.addWidget(slot)
 
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(0, 16, 0, 6)
-        toolbar.setSpacing(12)
+        # Переключатель «Исходник / Результат» и флажок «Результат рядом» стоят в заголовке
+        # видимой колонки: _apply_layout в MainWindow переносит их туда.
         self.view_box = QFrame()
-        self.view_box.setObjectName("viewToggleBox")
+        self.view_box.setObjectName("segmented")
         view_row = QHBoxLayout(self.view_box)
-        view_row.setContentsMargins(0, 0, 0, 0)
-        view_row.setSpacing(0)
+        view_row.setContentsMargins(3, 3, 3, 3)
+        view_row.setSpacing(2)
         self.source_button = QPushButton("Исходник")
         self.result_button = QPushButton("Результат")
         for b in (self.source_button, self.result_button):
-            b.setObjectName("viewToggle")
+            b.setObjectName("segment")
             b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
             view_row.addWidget(b)
-        toolbar.addWidget(self.view_box)
-        self.side_hint = QLabel("Правки в исходнике сразу видны в результате справа")
-        self.side_hint.setObjectName("muted")
-        toolbar.addWidget(self.side_hint)
-        toolbar.addStretch(1)
-        self.convert_only_box = QCheckBox("Только конвертация в Markdown")
-        self.convert_only_box.setStyleSheet("font-size: 13.5px;")
-        self.convert_only_box.setToolTip("Копирование и экспорт без замен: документ выгружается как есть")
-        toolbar.addWidget(self.convert_only_box)
-        toolbar.addSpacing(8)
         self.side_by_side_box = QCheckBox("Результат рядом")
-        self.side_by_side_box.setStyleSheet("font-size: 13.5px;")
-        toolbar.addWidget(self.side_by_side_box)
-        layout.addLayout(toolbar)
+        self.side_by_side_box.setObjectName("small")
 
         work = QHBoxLayout()
-        work.setContentsMargins(0, 6, 0, 0)
+        work.setContentsMargins(0, 16, 0, 0)
         work.setSpacing(16)
         self.editor_pane = EditorPane()
         self.result_pane = ResultPane()
@@ -315,6 +206,16 @@ class DocumentPage(QWidget):
         self.side.setFixedWidth(440)
         work.addWidget(self.side)
         layout.addLayout(work, 1)
+
+    def attach_header(self, header: AppHeader) -> None:
+        self.topbar = header
+        self.home_button = header.home_button
+        self.new_button = header.new_button
+        self.history_button = header.history_button
+        self.history_menu = header.history_menu
+        self.batch_button = header.batch_button
+        self.batch_menu = header.batch_menu
+        self.file_label = header.file_label
 
 
 @dataclass
@@ -390,21 +291,34 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.start = StartScreen()
         self.page = DocumentPage()
+        self.header = AppHeader()
+        self.page.attach_header(self.header)
         self.stack.addWidget(self.start)
         self.stack.addWidget(self.page)
+        self.stack.currentChanged.connect(self._screen_changed)
         central = QWidget()
         column = QVBoxLayout(central)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(0)
+        column.addWidget(self.header)
         self.update_bar = UpdateBar()
-        column.addWidget(self.update_bar)
+        bar_wrap = QWidget()
+        bar_wrap.setObjectName("page")
+        bar_row = QVBoxLayout(bar_wrap)
+        bar_row.setContentsMargins(24, 12, 24, 0)
+        bar_row.addWidget(self.update_bar)
+        self.update_bar.slot = bar_wrap
+        bar_wrap.hide()
+        column.addWidget(bar_wrap)
         column.addWidget(self.stack, 1)
         self.setCentralWidget(central)
         self.toast = Toast(self.stack)
         self.updates = UpdateController(self.update_bar, self.settings, self)
         self.updates.toast.connect(lambda text, tone: self.toast.show_message(text, 5000, tone=tone))
         self.updates.restart_requested.connect(self._restart_for_update)
-        footer = version_footer(self.updates)
+        for widget in header_update_actions(self.updates):
+            self.header.start_row.addWidget(widget)
+        footer = settings_footer(self.updates)
         if shell.available():
             footer.layout().insertWidget(footer.layout().count() - 1, self._explorer_menu_box())
             self._sync_explorer_menu(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
@@ -424,6 +338,7 @@ class MainWindow(QMainWindow):
         s.loading.cancel.connect(self.cancel_job)
         s.history.open_doc.connect(self.open_doc)
         s.history.delete_doc.connect(self.request_delete)
+        s.history.show_batch.connect(self.show_batch_from_history)
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
         convert_only = self.settings.value(SETTING_CONVERT_ONLY, False, type=bool)
@@ -432,7 +347,7 @@ class MainWindow(QMainWindow):
             box.toggled.connect(self.set_convert_only)
         p.detect_button.clicked.connect(self.find_entities)
 
-        p.home_button.clicked.connect(self.show_all_docs)
+        self.header.home.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
         p.retry_save.clicked.connect(self.autosave.flush)
         p.ocr_retry_button.clicked.connect(self.retry_with_ocr)
@@ -674,37 +589,31 @@ class MainWindow(QMainWindow):
             return
         if kind == "ocr-download":
             pages = int(payload or 0)
-            box = QMessageBox(self)
-            box.setWindowTitle("Распознавание сканов")
-            box.setText(
+            answer = dialogs.choose(
+                self, "Скачать модель для распознавания сканов?",
                 f"В документе {plural(pages, ('страница-скан', 'страницы-скана', 'страниц-сканов'))}. "
-                "Для распознавания нужно один раз скачать модель распознавания текста Indra OCR "
-                f"с Hugging Face, около {ocr_models.TOTAL_MB} МБ."
+                "Чтобы распознать текст, нужно один раз скачать модель Indra OCR с Hugging Face, "
+                f"около {ocr_models.TOTAL_MB} МБ.",
+                "Это публичные файлы, текст документа никуда не отправляется.",
+                [("skip", "Продолжить без распознавания", "ghost", True), ("download", "Скачать", "primary", False)],
             )
-            box.setInformativeText("Это публичные файлы; текст документа никуда не отправляется.")
-            download = box.addButton("Скачать", QMessageBox.ButtonRole.AcceptRole)
-            box.addButton("Продолжить без OCR", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            job.answer(DOWNLOAD if box.clickedButton() is download else SKIP)
+            job.answer(DOWNLOAD if answer == "download" else SKIP)
         elif kind == "ner-model":
-            box = QMessageBox(self)
-            box.setWindowTitle("Модель распознавания имен")
-            box.setText(
-                "Для поиска имен, компаний и адресов нужна модель распознавания (около 580 МБ). "
-                "Она скачивается один раз с Hugging Face и хранится на этом компьютере."
+            answer = dialogs.choose(
+                self, "Скачать модель для поиска имен?",
+                "Чтобы находить имена, компании и адреса, нужна модель GLiNER, около 580 МБ. Она скачивается "
+                "один раз с Hugging Face и хранится на этом компьютере.",
+                "Без модели найдутся только телефоны, email, реквизиты и номера документов. Если сайт закрыт "
+                "в вашей сети, укажите заранее скачанный файл model_fp16.onnx.",
+                [
+                    ("skip", "Продолжить без модели", "ghost", True),
+                    ("file", "Указать файл…", "", False),
+                    ("download", "Скачать", "primary", False),
+                ],
             )
-            box.setInformativeText(
-                "Если сайт закрыт в вашей сети, укажите заранее скачанный файл model_fp16.onnx. "
-                "Без модели будут найдены только данные по шаблонам: телефоны, email, реквизиты, номера документов."
-            )
-            download = box.addButton("Скачать", QMessageBox.ButtonRole.AcceptRole)
-            choose = box.addButton("Указать файл…", QMessageBox.ButtonRole.ActionRole)
-            box.addButton("Продолжить без модели", QMessageBox.ButtonRole.RejectRole)
-            box.exec()
-            clicked = box.clickedButton()
-            if clicked is download:
+            if answer == "download":
                 job.answer(DOWNLOAD)
-            elif clicked is choose:
+            elif answer == "file":
                 path, _ = QFileDialog.getOpenFileName(self, "Файл модели", "", "ONNX (*.onnx);;Все файлы (*)")
                 job.answer(f"file:{path}" if path else SKIP)
             else:
@@ -788,7 +697,7 @@ class MainWindow(QMainWindow):
             notice.label.setText(
                 "Модель распознавания имен, компаний и адресов не загрузилась. Найдены только данные, которые "
                 "определяются по шаблону: телефоны, email, реквизиты, номера документов."
-                + (f"<br><span style='color:#5b6474'>Причина: {result.ner_error}</span>" if result.ner_error else "")
+                + (f"<br><span style='color:{t.INK_2}'>Причина: {result.ner_error}</span>" if result.ner_error else "")
             )
             notice.show()
         elif result is not None and result.ner_skipped:
@@ -971,7 +880,7 @@ class MainWindow(QMainWindow):
 
     def _update_batch_button(self) -> None:
         docs = self._batch_docs()
-        self.page.topbar.batch_label.setText(f"Пакет · {len(docs)}" if docs else "Пакет")
+        self.header.set_batch_size(len(docs))
 
     def _open_batch_menu(self) -> None:
         menu = self.page.batch_menu
@@ -979,14 +888,14 @@ class MainWindow(QMainWindow):
         doc = self.session.doc
         docs = self._batch_docs()
         if docs:
+            menu.add_section(f"Документы пакета · {len(docs)}")
             menu.add_note("Одинаковые значения получают одинаковые метки во всех документах пакета.")
+            menu.begin_list("Найти документ" if len(docs) >= BATCH_SEARCH_FROM else "")
         else:
             menu.add_note(
                 "Добавьте связанные документы, например договоры с теми же сторонами, чтобы одинаковые "
                 "значения получили одинаковые метки во всех файлах."
             )
-        if docs:
-            menu.begin_list("Найти документ" if len(docs) >= BATCH_SEARCH_FROM else "")
         for i, meta in enumerate(docs):
             is_current = doc is not None and meta.id == doc.id
             hint = "Открыт сейчас" if is_current else plural(len(meta.entities), ("находка", "находки", "находок"))
@@ -996,11 +905,17 @@ class MainWindow(QMainWindow):
                 (lambda: None) if is_current else (lambda i=meta.id: self.open_doc(i)),
                 hint, current=is_current, elide=True, tooltip=meta.name, search_text=meta.name,
             )
-        menu.end_list()
-        menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus")
-        menu.add_item("Добавить папку в пакет", self.add_folder_to_batch, "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок", "folder")
         if docs:
-            menu.add_separator()
+            menu.end_list()
+        menu.add_item(
+            "Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus",
+        )
+        menu.add_item(
+            "Добавить папку в пакет", self.add_folder_to_batch, "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок",
+            "folder",
+        )
+        if docs:
+            menu.add_section("Пакет целиком")
             menu.add_item(
                 "Все замены пакета", self.show_batch_overview,
                 "Метки всех документов в одном списке; похожие написания можно объединить", "table",
@@ -1057,6 +972,12 @@ class MainWindow(QMainWindow):
         self.overview.show()
         self.overview.raise_()
         self.overview.activateWindow()
+
+    def show_batch_from_history(self, doc_id: str) -> None:
+        """«Все замены пакета» из истории: открывает документ пакета и окно с его метками."""
+        self.open_doc(doc_id)
+        if self.session.doc is not None and self.session.doc.id == doc_id:
+            self.show_batch_overview()
 
     def _merge_batch_labels(self, keep: str, absorb: str) -> None:
         """Объединяет две метки во всех документах пакета."""
@@ -1188,12 +1109,12 @@ class MainWindow(QMainWindow):
         plan = export_plan([d.name for d in members])
         existing = [rel for rel in plan if target.joinpath(*rel.parts).exists()]
         if existing:
-            answer = QMessageBox.question(
-                self, "Файлы уже есть",
+            if not dialogs.ask(
+                self, "Заменить файлы в папке?",
                 f"В выбранной папке уже есть {plural(len(existing), ('файл', 'файла', 'файлов'))} с такими именами, "
-                f"например «{shorten(str(existing[0]), 60)}». Заменить?",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+                f"например «{shorten(str(existing[0]), 60)}». Они будут перезаписаны.",
+                "Заменить", danger=True,
+            ):
                 return
         try:
             for doc, rel in zip(members, plan):
@@ -1383,17 +1304,22 @@ class MainWindow(QMainWindow):
         p = self.page
         wide = self.width() >= WIDE_WINDOW
         side_by_side = wide and p.side_by_side_box.isChecked()
-        p.side_by_side_box.setVisible(wide)
-        p.side_hint.setVisible(side_by_side)
-        p.view_box.setVisible(not side_by_side)
         p.source_button.setChecked(self.view == "source")
         p.result_button.setChecked(self.view == "result")
         p.editor_pane.setVisible(side_by_side or self.view == "source")
         p.result_pane.setVisible(side_by_side or self.view == "result")
-        # В одной колонке вид уже назван переключателем, заголовок колонки не нужен.
+        # В одной колонке вид выбирается переключателем в ее заголовке; рядом обе колонки
+        # подписаны, а флажок «Результат рядом» стоит в заголовке исходника.
+        p.view_box.setVisible(not side_by_side)
         p.editor_pane.title.setVisible(side_by_side)
         p.result_pane.title.setVisible(side_by_side)
+        visible = p.editor_pane if side_by_side or self.view == "source" else p.result_pane
+        visible.put_view_controls(p.view_box, p.side_by_side_box if wide else None)
+        p.side_by_side_box.setVisible(wide)
         p.side.setFixedWidth(360 if side_by_side else 440)
+
+    def _screen_changed(self, _index: int) -> None:
+        self.header.set_mode("doc" if self.stack.currentWidget() is self.page else "start")
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
@@ -1543,17 +1469,13 @@ class MainWindow(QMainWindow):
     def _pdf_need_ocr(self) -> None:
         request = self.pdf_request
         self._pdf_done()
-        box = QMessageBox(self)
-        box.setWindowTitle("Распознавание сканов")
-        box.setText(
-            "В PDF есть страницы-сканы. Чтобы найти на них данные, нужно один раз скачать модель "
-            f"распознавания текста Indra OCR с Hugging Face, около {ocr_models.TOTAL_MB} МБ."
-        )
-        box.setInformativeText("Это публичные файлы; текст документа никуда не отправляется.")
-        download = box.addButton("Скачать", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Отмена", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is download:
+        if dialogs.ask(
+            self, "Скачать модель для распознавания сканов?",
+            "В PDF есть страницы-сканы. Чтобы найти на них данные, нужно один раз скачать модель распознавания "
+            f"текста Indra OCR с Hugging Face, около {ocr_models.TOTAL_MB} МБ. Это публичные файлы, текст "
+            "документа никуда не отправляется.",
+            "Скачать",
+        ):
             self._start_pdf_job(replace(request, download_ocr=True))
 
     def _pdf_failed(self, message: str) -> None:
@@ -1595,7 +1517,9 @@ class MainWindow(QMainWindow):
         menu.clear()
         current = self.session.doc.id if self.session.doc else None
         recent = getattr(self, "history_meta", [])[:5]
-        if not recent:
+        if recent:
+            menu.add_section("Недавние")
+        else:
             menu.add_note("История пуста.")
         for meta in recent:
             is_current = meta.id == current
@@ -1609,12 +1533,13 @@ class MainWindow(QMainWindow):
                 current=is_current, elide=True, tooltip=meta.name,
             )
         menu.add_separator()
-        menu.add_note("История хранится на этом компьютере вместе с исходным текстом, без шифрования.", warn=True)
-        menu.add_row([
-            ("Все документы", self._show_full_history, True),
-            ("Экспорт", self.export_history, bool(recent)),
-            ("Импорт", self.import_history, True),
-        ])
+        menu.add_item("Все документы", self._show_full_history, "Стартовый экран со всей историей", "list")
+        if recent:
+            menu.add_item("Экспорт истории…", self.export_history, "Файл .json с исходным текстом документов", "download")
+        menu.add_item("Импорт истории…", self.import_history, "Документы из файла добавятся к этим", "import")
+        menu.add_note(
+            "История хранится на этом компьютере вместе с исходным текстом, без шифрования.", icon_name="lock",
+        )
         menu.show_under(self.page.history_button)
 
     def _show_full_history(self) -> None:
@@ -1731,11 +1656,11 @@ class MainWindow(QMainWindow):
     def _save_state_changed(self) -> None:
         p = self.page
         if self.autosave.error:
-            p.topbar.set_save_state("error")
+            self.header.set_save_state("error")
             self._show_save_error()
         else:
             p.save_error.hide()
-            p.topbar.set_save_state("saving" if self.autosave.saving else "saved")
+            self.header.set_save_state("saving" if self.autosave.saving else "saved")
 
     def _show_save_error(self) -> None:
         p = self.page
@@ -1762,6 +1687,7 @@ class MainWindow(QMainWindow):
 
     def _explorer_menu_box(self) -> QCheckBox:
         box = QCheckBox("Пункт в меню проводника")
+        box.setObjectName("small")
         box.setChecked(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
         box.setToolTip(
             f"«{shell.LABEL}» в меню файлов .docx, .xlsx, .pdf и папок по правой кнопке мыши. "
@@ -1823,11 +1749,11 @@ class MainWindow(QMainWindow):
             self.pdf_job.cancel()
         self._commit_delete()
         if not self.autosave.flush():
-            answer = QMessageBox.question(
-                self, "Изменения не сохранены",
-                f"{self.autosave.error}\n\nЗакрыть программу и потерять несохраненные изменения?",
-            )
-            if answer != QMessageBox.StandardButton.Yes:
+            if not dialogs.ask(
+                self, "Закрыть без сохранения?",
+                f"{self.autosave.error} Если закрыть программу, несохраненные изменения пропадут.",
+                "Закрыть без сохранения", danger=True, cancel="Не закрывать",
+            ):
                 event.ignore()
                 return
         for thread in list(self._threads):

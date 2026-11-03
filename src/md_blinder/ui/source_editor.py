@@ -31,7 +31,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QPushButton,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -43,7 +42,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from ..editing import TextChange, active_span_at, drag_span, hovered_entity_at, replace_position
 from ..storage.offsets import OffsetMap
 from . import theme as t
-from .widgets import BATCH_PREFIX, Select
+from .widgets import BATCH_PREFIX, Pane, Select, make_button
 
 _TABLE_LINE = re.compile(r"^\s*\|")
 LINE_HEIGHT = 130  # процентов от высоты строки шрифта: так выходит line-height 1.7 из веб-версии
@@ -92,8 +91,17 @@ class AddEntityPopup(QFrame):
     def __init__(self, parent: QWidget) -> None:
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
         self.setObjectName("popup")
-        row = QHBoxLayout(self)
-        row.setContentsMargins(6, 5, 6, 5)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(12, 10, 12, 12)
+        column.setSpacing(6)
+        caption = QLabel("Добавить в замены")
+        caption.setObjectName("muted")
+        self.value_label = QLabel()
+        self.value_label.setObjectName("strong")
+        column.addWidget(caption)
+        column.addWidget(self.value_label)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 4, 0, 0)
         row.setSpacing(6)
         self.type_box = Select()
         self.type_box.setObjectName("compact")
@@ -102,12 +110,11 @@ class AddEntityPopup(QFrame):
         self.target_box.setObjectName("compact")
         self.target_box.setMinimumContentsLength(13)
         self.target_box.setSizeAdjustPolicy(Select.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
-        self.add_button = QPushButton("Добавить")
-        self.add_button.setObjectName("primary")
-        self.add_button.setStyleSheet("font-size: 12px; padding: 2px 8px;")
+        self.add_button = make_button("Добавить", kind="primary", small=True)
         row.addWidget(self.type_box)
         row.addWidget(self.target_box)
         row.addWidget(self.add_button)
+        column.addLayout(row)
         self._range = (0, 0)
         self._entities: list[Entity] = []
         self._text = ""
@@ -119,6 +126,7 @@ class AddEntityPopup(QFrame):
         self._range = (start, end)
         self._entities = entities
         self._text = text
+        self.value_label.setText(_truncate(" ".join(text[start:end].split()), 48))
         self.type_box.blockSignals(True)
         self.type_box.setCurrentText(type_)
         self.type_box.blockSignals(False)
@@ -166,9 +174,8 @@ class MergePopup(QFrame):
         self.setObjectName("popup")
         row = QHBoxLayout(self)
         row.setContentsMargins(3, 3, 3, 3)
-        self.open_button = QPushButton("↦ Объединить")
+        self.open_button = make_button("Объединить с…", small=True)
         self.open_button.setObjectName("mergeOpen")
-        self.open_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.select = Select()
         self.select.setObjectName("compact")
         self.select.setMaximumWidth(220)
@@ -639,28 +646,13 @@ class SourceEditor(QTextEdit):
             self.merge_popup.hide()
 
 
-class EditorPane(QWidget):
-    """Колонка «Исходник»: заголовок с подсказкой и редактор в рамке."""
+class EditorPane(Pane):
+    """Колонка «Исходник»: карточка с заголовком, подсказкой и редактором."""
 
     def __init__(self) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        head = QHBoxLayout()
-        head.setContentsMargins(2, 0, 2, 0)
-        self.title = QLabel("Исходник")
-        self.title.setObjectName("paneTitle")
+        super().__init__("Исходник")
         hint = QLabel("Выделите текст, чтобы добавить его в замены")
         hint.setObjectName("hint")
-        head.addWidget(self.title)
-        head.addStretch(1)
-        head.addWidget(hint)
-        layout.addLayout(head)
-        box = QFrame()
-        box.setObjectName("editorBox")
-        inner = QVBoxLayout(box)
-        inner.setContentsMargins(1, 1, 1, 1)
+        self.add_head_widget(hint)
         self.editor = SourceEditor()
-        inner.addWidget(self.editor)
-        layout.addWidget(box, 1)
+        self.body.addWidget(self.editor)

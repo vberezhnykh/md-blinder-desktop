@@ -31,7 +31,10 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import BATCH_PREFIX, ElidedLabel, LabelEditor, Select, icon_label, set_prop
+from .widgets import BATCH_PREFIX, ElidedLabel, LabelEditor, Select, icon_label, make_button, set_prop
+
+
+FIELD_LABEL_W = 44  # подписи «Тип» и «Метка» в строке выбранной замены
 
 
 def _label_order(label: str) -> tuple[int, int, str]:
@@ -82,24 +85,20 @@ def _kbd_button(text: str, key: str, primary: bool) -> QPushButton:
     button = QPushButton()
     if primary:
         button.setObjectName("primary")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
     row = QHBoxLayout(button)
-    row.setContentsMargins(13, 7, 13, 7)
+    row.setContentsMargins(12, 0, 12, 0)
     row.setSpacing(8)
     row.addStretch(1)
-    color = t.ACCENT_INK if primary else t.INK
     label = QLabel(text)
-    label.setStyleSheet(f"color: {color}; font-size: 14px; font-weight: 500; background: transparent;")
+    label.setObjectName("onPrimary" if primary else "buttonText")
     kbd = QLabel(key)
-    kbd.setStyleSheet(
-        f"color: {color}; border: 1px solid {color}; border-radius: 4px; padding: 0 5px; font-size: 11px;"
-        " background: transparent;"
-    )
-    kbd.setGraphicsEffect(None)
+    kbd.setObjectName("kbdOnPrimary" if primary else "kbd")
     row.addWidget(label)
     row.addWidget(kbd)
     row.addStretch(1)
     _transparent_labels(button)
-    button.setMinimumHeight(36)
+    button.setMinimumHeight(t.CONTROL_H)
     # QPushButton считает размер по своему тексту, а не по вложенной раскладке.
     button.setMinimumWidth(row.sizeHint().width())
     return button
@@ -206,11 +205,9 @@ class ReviewPanel(QWidget):
             title_row.addStretch(1)
             box.addLayout(title_row)
             note = QLabel("В результате не осталось непроверенных фрагментов.")
-            note.setStyleSheet(f"color: {t.INK_2}; font-size: 13.5px; background: transparent;")
+            note.setObjectName("secondary")
             box.addWidget(note)
-            export = QPushButton("Экспортировать .md")
-            export.setObjectName("primary")
-            export.setIcon(icon("download", t.ACCENT_INK))
+            export = make_button("Экспортировать .md", kind="primary", icon_name="download")
             export.clicked.connect(self.export)
             box.addWidget(export, 0, Qt.AlignmentFlag.AlignLeft)
             self.layout_.addWidget(done)
@@ -347,7 +344,7 @@ class ReviewPanel(QWidget):
             "Backspace отклоняет, стрелки ↑ ↓ переходят к соседнему кандидату."
         )
         hint.setWordWrap(True)
-        hint.setStyleSheet(f"color: {t.INK_3}; font-size: 12.5px; background: transparent;")
+        hint.setObjectName("hint")
         hint.setContentsMargins(4, 0, 4, 0)
         self.layout_.addWidget(hint)
         self.area.verticalScrollBar().setValue(scroll)
@@ -549,10 +546,8 @@ class FoundPanel(QWidget):
                             self.set_anonymize.emit(ids, value))
         row.addWidget(box)
         dot = QLabel()
-        dot.setFixedSize(10, 10)
-        dot.setStyleSheet(
-            f"background: {t.entity_solid(type_).name()}; border-radius: 5px; border: 1px solid rgba(0,0,0,30);"
-        )
+        dot.setObjectName("typeDot")
+        dot.setStyleSheet(f"background: {t.entity_solid(type_).name()};")
         row.addWidget(dot)
         toggle = _Clickable()
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -645,8 +640,7 @@ class FoundPanel(QWidget):
             f"Документы: {', '.join(target.docs[:5])}{'…' if len(target.docs) > 5 else ''}"
         )
         row.addWidget(label, 1)
-        button = QPushButton("Объединить")
-        button.setObjectName("small")
+        button = make_button("Объединить", small=True)
         button.setToolTip(f"Заменять это значение на {target.placeholder} во всем пакете")
         button.clicked.connect(lambda _=False, eid=entity.id, ph=target.placeholder: self._link(eid, ph))
         row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
@@ -678,13 +672,10 @@ class FoundPanel(QWidget):
             # Замены из других документов пакета: их метку получит эта сущность.
             for bt in elsewhere:
                 target.addItem(f"{bt.placeholder} · {_truncate(bt.value, 24)} · другой документ", BATCH_PREFIX + bt.placeholder)
-            ok = QPushButton("Объединить")
-            ok.setObjectName("primary")
-            ok.setStyleSheet("padding: 3px 10px; font-size: 13px;")
+            ok = make_button("Объединить", kind="primary", small=True)
             ok.setEnabled(False)
             target.currentIndexChanged.connect(lambda _i: ok.setEnabled(bool(target.currentData())))
-            cancel = QPushButton("Отмена")
-            cancel.setObjectName("small")
+            cancel = make_button("Отмена", kind="ghost", small=True)
 
             def do_merge() -> None:
                 chosen = target.currentData()
@@ -714,6 +705,7 @@ class FoundPanel(QWidget):
             return area
         label = QLabel("Тип")
         label.setObjectName("fieldLabel")
+        label.setFixedWidth(FIELD_LABEL_W)
         row.addWidget(label)
         type_box = Select()
         type_box.setObjectName("mono")
@@ -721,9 +713,13 @@ class FoundPanel(QWidget):
         type_box.setCurrentText(entity.type)
         type_box.currentTextChanged.connect(lambda tp, eid=entity.id: self.change_type.emit(eid, tp))
         row.addWidget(type_box)
+        row.addStretch(1)
+        rows.addWidget(self._label_editor(entity, same_type))
+        buttons = QHBoxLayout()
+        buttons.setContentsMargins(0, 2, 0, 0)
+        buttons.setSpacing(6)
         if others or elsewhere:
-            merge = QPushButton("Объединить…")
-            merge.setObjectName("small")
+            merge = make_button("Объединить с…", small=True)
             merge.setToolTip(
                 "Объединить с другой заменой того же типа" + (", в том числе из других документов пакета" if elsewhere else "")
             )
@@ -733,18 +729,18 @@ class FoundPanel(QWidget):
                 self.render(self._entities, self._text, self._batch)
 
             merge.clicked.connect(start_merge)
-            row.addWidget(merge)
-        row.addStretch(1)
-        rows.addWidget(self._label_editor(entity, same_type))
-        delete = QPushButton("Удалить")
-        delete.setObjectName("danger")
+            buttons.addWidget(merge)
+        delete = make_button("Удалить", kind="danger", small=True)
+        delete.setToolTip("Убрать замену: значение останется в тексте как есть")
 
         def do_delete() -> None:
             self._selected = None
             self.delete.emit(entity.id)
 
         delete.clicked.connect(do_delete)
-        rows.addWidget(delete, 0, Qt.AlignmentFlag.AlignLeft)
+        buttons.addWidget(delete)
+        buttons.addStretch(1)
+        rows.addLayout(buttons)
         return area
 
     def _label_editor(self, entity: Entity, same_type: list[Entity]) -> QWidget:
@@ -760,6 +756,7 @@ class FoundPanel(QWidget):
         row.setSpacing(6)
         caption = QLabel("Метка")
         caption.setObjectName("fieldLabel")
+        caption.setFixedWidth(FIELD_LABEL_W)
         row.addWidget(caption)
         editor = LabelEditor(entity.placeholder, labels)
         editor.chosen.connect(lambda text, old=entity.placeholder: self._relabel(old, text))
@@ -824,6 +821,7 @@ class _Tab(QPushButton):
         row.setSpacing(6)
         row.addStretch(1)
         self.title = QLabel(title)
+        self.title.setObjectName("tabTitle")
         self.title.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Preferred)
         self.badge = QLabel()
         self.badge.setObjectName("badge")
@@ -833,7 +831,7 @@ class _Tab(QPushButton):
         row.addStretch(1)
         _transparent_labels(self)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setFixedHeight(44)
+        self.setFixedHeight(47)
         self._row = row
 
     def _fit(self) -> None:
@@ -841,10 +839,7 @@ class _Tab(QPushButton):
 
     def set_selected(self, selected: bool) -> None:
         set_prop(self, "selected", "true" if selected else "false")
-        self.title.setStyleSheet(
-            f"background: transparent; font-size: 13.5px; color: {t.INK if selected else t.INK_3};"
-            f" font-weight: {600 if selected else 400};"
-        )
+        set_prop(self.title, "selected", "true" if selected else "false")
         self._fit()
 
     def set_badge(self, text: str, kind: str = "badge") -> None:
@@ -862,10 +857,11 @@ class SidePanel(QFrame):
         super().__init__()
         self.setObjectName("entityPane")
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setContentsMargins(1, 0, 1, 1)
         layout.setSpacing(0)
         tabs = QFrame()
         tabs.setObjectName("sideTabs")
+        tabs.setFixedHeight(48)  # как заголовки колонок исходника и результата
         tab_row = QHBoxLayout(tabs)
         tab_row.setContentsMargins(8, 0, 8, 0)
         tab_row.setSpacing(0)

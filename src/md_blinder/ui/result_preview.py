@@ -14,10 +14,11 @@ from typing import Optional
 
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QTextBrowser, QWidget
 
 from ..anonymize.types import Entity
 from . import theme as t
+from .widgets import Pane
 
 _TABLE_LINE = re.compile(r"^\s*\|")
 BADGE_GAP = 8
@@ -191,46 +192,26 @@ def _legend() -> QWidget:
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(4)
     sample = QLabel("[ЗАМЕНА]")
-    sample.setStyleSheet(
-        f"background: {t.REDACT_BG}; color: {t.REDACT_INK}; font-family: '{t.MONO}'; font-size: 10px;"
-        " font-weight: 500; padding: 1px 6px; border-radius: 3px;"
-    )
-    row.addWidget(sample)
+    sample.setObjectName("redactSample")
+    row.addWidget(sample, 0, Qt.AlignmentFlag.AlignVCenter)
     closed = QLabel("закрыто")
     closed.setObjectName("hint")
-    row.addWidget(closed)
+    row.addWidget(closed, 0, Qt.AlignmentFlag.AlignVCenter)
     row.addSpacing(10)
     text = QLabel("текст")
-    text.setStyleSheet(
-        f"background: {t.PENDING_WASH}; font-size: 12px; padding: 0 1px; border-bottom: 1.5px dotted {t.PENDING_LINE};"
-    )
-    row.addWidget(text)
+    text.setObjectName("keepSample")
+    row.addWidget(text, 0, Qt.AlignmentFlag.AlignVCenter)
     left = QLabel("осталось как есть")
     left.setObjectName("hint")
-    row.addWidget(left)
+    row.addWidget(left, 0, Qt.AlignmentFlag.AlignVCenter)
     return box
 
 
-class ResultPane(QWidget):
-    """Колонка «Результат»: заголовок с легендой и текст в рамке."""
+class ResultPane(Pane):
+    """Колонка «Результат»: карточка с заголовком, легендой и текстом."""
 
     def __init__(self) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(6)
-        head = QHBoxLayout()
-        head.setContentsMargins(2, 0, 2, 0)
-        self.title = QLabel("Результат")
-        self.title.setObjectName("paneTitle")
-        head.addWidget(self.title)
-        head.addStretch(1)
-        head.addWidget(_legend())
-        layout.addLayout(head)
-        box = QFrame()
-        box.setObjectName("previewBox")
-        inner = QVBoxLayout(box)
-        inner.setContentsMargins(1, 1, 1, 1)
+        super().__init__("Результат")
+        self.add_head_widget(_legend())
         self.preview = ResultPreview()
-        inner.addWidget(self.preview)
-        layout.addWidget(box, 1)
+        self.body.addWidget(self.preview)

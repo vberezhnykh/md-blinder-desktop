@@ -538,10 +538,16 @@ def _detect_us_address(text: str) -> list[RawMatch]:
     return matches
 
 
+# Номер с буквенным префиксом через пробел: «C 62251» (Сент-Китс и Невис),
+# «HE 123456». Префикс только заглавными (флаг i снят внутри группы), иначе
+# «registration number is 12345» дало бы «is 12345». Пробуется раньше слитной
+# формы: та взяла бы одну букву «C» и не дошла до цифр.
+_REG_SPACED_PREFIX = r"(?-i:[A-Z]{1,3})[ \u00a0]\d{4,12}(?![A-Za-z0-9])"
+
 _REG_CONTEXT_RES = (
     JsRegex(
         r"\b(?:company\s+(?:registration\s+)?(?:no|number)|reg(?:istration)?\.?\s*no|CRN|registered\s+number)\b"
-        r"[\s:#.]*([A-Z0-9][A-Z0-9./-]{4,18}[A-Z0-9])",
+        r"[\s:#.]*(" + _REG_SPACED_PREFIX + r"|[A-Z0-9][A-Z0-9./-]{4,18}[A-Z0-9])",
         "gi",
     ),
     JsRegex(r"\bVAT(?:\s*(?:reg(?:istration)?|no|number|id))?\b[\s:#.]*([A-Z]{0,2}[\d][\d ]{6,14}\d)", "gi"),
@@ -550,7 +556,7 @@ _REG_CONTEXT_RES = (
     # «registration number of the Company» дало бы «Company».
     JsRegex(
         r"\b(?:(?:business\s+)?registration\s+(?:no|number|code)|company\s+number|UEN)\b"
-        r"[\s:#.]*((?=[A-Z./-]*\d)[A-Z0-9][A-Z0-9./-]{4,18}[A-Z0-9])",
+        r"[\s:#.]*(" + _REG_SPACED_PREFIX + r"|(?=[A-Z./-]*\d)[A-Z0-9][A-Z0-9./-]{4,18}[A-Z0-9])",
         "gi",
     ),
 )

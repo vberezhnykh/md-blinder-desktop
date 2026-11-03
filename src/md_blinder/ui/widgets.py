@@ -118,6 +118,48 @@ class Select(QComboBox):
         painter.end()
 
 
+
+class LabelEditor(QWidget):
+    """Поле метки значения: другая метка того же типа из списка (метки меняются
+    местами) или свое название. chosen(текст) — после «Применить» или Enter."""
+
+    chosen = Signal(str)
+
+    def __init__(self, current: str, labels: list[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.box = Select()
+        self.box.setObjectName("mono")
+        self.box.setEditable(True)
+        self.box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.box.addItems(labels if current in labels else [current, *labels])
+        self.box.setCurrentText(current)
+        self.box.lineEdit().setCursorPosition(0)  # начало метки видно и в узком поле
+        self.box.setToolTip(
+            "Выберите другую метку, чтобы поменять их местами, или впишите свою, например «Поставщик»"
+        )
+        self.box.setMinimumContentsLength(6)
+        self.box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.apply = QPushButton("Применить")
+        self.apply.setObjectName("small")
+        self.apply.setEnabled(False)
+        self._current = current
+        self._sent = False  # Enter в поле дает и returnPressed, и activated: выбор уходит один раз
+        self.box.currentTextChanged.connect(lambda text: self.apply.setEnabled(text.strip() not in ("", current)))
+        self.box.activated.connect(lambda _i: self._emit())
+        self.box.lineEdit().returnPressed.connect(self._emit)
+        self.apply.clicked.connect(self._emit)
+        row.addWidget(self.box, 1)
+        row.addWidget(self.apply)
+
+    def _emit(self) -> None:
+        text = self.box.currentText().strip()
+        if text and text != self._current and not self._sent:
+            self._sent = True
+            self.chosen.emit(text)
+
 class MenuItem(QPushButton):
     """Пункт меню: подпись и подсказка лежат во вложенной раскладке.
 

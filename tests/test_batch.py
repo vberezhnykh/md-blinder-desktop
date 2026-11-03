@@ -3,10 +3,17 @@
 from dataclasses import dataclass, field
 
 from md_blinder.anonymize.apply import build_anonymized_text
-from md_blinder.anonymize.apply import merge_entities
+from md_blinder.anonymize.apply import (
+    compact_placeholder_numbers,
+    merge_entities,
+    normalize_label,
+    swap_placeholders,
+)
 from md_blinder.anonymize.batch import (
     BatchIndex,
     align_batch,
+    compact_batch_labels,
+    swap_batch_labels,
     batch_targets,
     link_to_batch,
     merge_batch_labels,
@@ -321,7 +328,9 @@ def test_pairs_and_merge_of_labels_across_the_package():
     }
     merged = merge_batch_labels(docs, "[PERSON_1]", "[PERSON_3]")
     assert [d.entities[0].placeholder for d in merged[:3]] == ["[PERSON_1]", "[PERSON_2]", "[PERSON_1]"]
-    assert merged[0] is docs[0] and merged[3] is docs[3]
+    # Метки пакета перенумерованы без пропуска: у John и Jane были 4 и 5.
+    assert merged[0] is docs[0]
+    assert [e.placeholder for e in merged[3].entities] == ["[PERSON_3]", "[PERSON_4]"]
     merged = merge_batch_labels(merged, "[PERSON_1]", "[PERSON_2]")
     assert [d.entities[0].placeholder for d in merged[:3]] == ["[PERSON_1]"] * 3
     assert similar_target_pairs(batch_targets(merged)) == []
@@ -330,3 +339,57 @@ def test_pairs_and_merge_of_labels_across_the_package():
     assert [(e.placeholder, len(e.positions)) for e in same[0].entities] == [("[PERSON_1]", 2)]
     # Разные типы не объединяются.
     assert merge_batch_labels(docs, "[PERSON_1]", "[COMPANY_1]") == list(docs)
+
+
+# --- Номера и свои метки ---
+
+def companies(name: str, values: list[str]) -> Doc:
+    text = ", ".join(values) + "."
+    return doc(text, [("COMPANY", v, f"[COMPANY_{i + 1}]") for i, v in enumerate(values)], name)
+
+
+def labels(d: Doc) -> list[str]:
+    return [e.placeholder for e in d.entities]
+
+
+def by_value(d: Doc) -> dict[str, str]:
+    return {e.value: e.placeholder for e in d.entities}
+
+
+def test_package_labels_renumbered_without_gaps():
+    a = companies("a", ["Alpha Ltd", "Beta Ltd"])
+    b = companies("b", ["Beta Ltd", "Gamma Ltd", "Delta Ltd"])
+    a, b = align_batch([a, b])
+    assert sorted(by_value(b).values()) == ["[COMPANY_2]", "[COMPANY_3]", "[COMPANY_4]"]
+    # Объединение одной из компаний с Alpha оставляет дыру; пакет ее закрывает.
+    gone = by_value(b)["Gamma Ltd"]
+    merged = merge_batch_labels([a, b], "[COMPANY_1]", gone)
+    assert by_value(merged[1])["Gamma Ltd"] == "[COMPANY_1]"
+    assert sorted(by_value(merged[1]).values()) == ["[COMPANY_1]", "[COMPANY_2]", "[COMPANY_3]"]
+    assert compact_batch_labels(merged) == merged
+
+
+def test_swap_and_custom_labels_in_package():
+    a, b = align_batch([companies("a", ["Alpha Ltd", "Beta Ltd"]), companies("b", ["Beta Ltd", "Gamma Ltd"])])
+    swapped = align_batch(swap_batch_labels([a, b], "[COMPANY_1]", "[COMPANY_2]"))
+    assert labels(swapped[0]) == ["[COMPANY_2]", "[COMPANY_1]"] and labels(swapped[1]) == ["[COMPANY_1]", "[COMPANY_3]"]
+    # Своя метка: остается при согласовании, номера остальных закрывают пропуск.
+    named = align_batch(swap_batch_labels(swapped, "[COMPANY_1]", "[Поставщик]"))
+    assert labels(named[0]) == ["[COMPANY_1]", "[Поставщик]"] and labels(named[1]) == ["[Поставщик]", "[COMPANY_2]"]
+    assert build_anonymized_text(named[1].source_text, named[1].entities) == "[Поставщик], [COMPANY_2]."
+    # Новый документ с тем же значением получает ту же свою метку.
+    c = companies("c", ["Beta Ltd"])
+    assert labels(Doc(c.source_text, reconcile_batch_placeholders(c.entities, c.source_text, named))) == ["[Поставщик]"]
+    # Своя метка не перенумеровывается внутри документа.
+    assert compact_placeholder_numbers(named[0].entities) is named[0].entities
+
+
+def test_swap_placeholders_and_label_text():
+    a = companies("a", ["Alpha Ltd", "Beta Ltd"])
+    assert labels(Doc(a.source_text, swap_placeholders(a.entities, "[COMPANY_1]", "[COMPANY_2]"))) == [
+        "[COMPANY_2]", "[COMPANY_1]"]
+    mixed = a.entities + [entity("John Smith", "PERSON", "John Smith", "[PERSON_1]")]
+    assert swap_placeholders(mixed, "[COMPANY_1]", "[PERSON_1]") is mixed
+    assert normalize_label(" Поставщик ") == "[Поставщик]"
+    assert normalize_label("[Сторона  2]") == "[Сторона 2]"
+    assert normalize_label("") is None and normalize_label("[a]b]") is None and normalize_label("x" * 41) is None

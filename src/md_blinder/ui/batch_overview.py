@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
 
 from ..anonymize.batch import BatchMember, BatchTarget, batch_targets, similar_target_pairs
 from ..anonymize.types import ALL_ENTITY_TYPES
-from .widgets import Select
+from .side_panel import _label_order
+from .widgets import LabelEditor, Select
 
 
 def _short_name(name: str) -> str:
@@ -57,6 +58,7 @@ def _clear(layout) -> None:
 
 class BatchOverview(QDialog):
     merge = Signal(str, str)  # метка, которая остается; метка, которая вливается в нее
+    relabel = Signal(str, str)  # текущая метка, новая (своя или другая метка того же типа)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -149,14 +151,21 @@ class BatchOverview(QDialog):
         label.setContentsMargins(0, 8, 0, 2)
         return label
 
-    def _value_line(self, target: BatchTarget) -> QWidget:
+    def _value_line(self, target: BatchTarget, editable: bool = False) -> QWidget:
         line = QWidget()
         row = QHBoxLayout(line)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
-        placeholder = QLabel(target.placeholder)
-        placeholder.setObjectName("cellPlaceholder")
-        row.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignTop)
+        if editable:
+            labels = sorted((t.placeholder for t in self.targets if t.type == target.type), key=_label_order)
+            editor = LabelEditor(target.placeholder, labels)
+            editor.setFixedWidth(260)
+            editor.chosen.connect(lambda text, old=target.placeholder: self.relabel.emit(old, text))
+            row.addWidget(editor, 0, Qt.AlignmentFlag.AlignTop)
+        else:
+            placeholder = QLabel(target.placeholder)
+            placeholder.setObjectName("cellPlaceholder")
+            row.addWidget(placeholder, 0, Qt.AlignmentFlag.AlignTop)
         text = QVBoxLayout()
         text.setSpacing(1)
         value = _wrap(QLabel("; ".join(target.forms[:4]) + ("…" if len(target.forms) > 4 else "")))
@@ -195,7 +204,7 @@ class BatchOverview(QDialog):
         box.setContentsMargins(6, 6, 6, 6)
         box.setSpacing(6)
         head = QHBoxLayout()
-        head.addWidget(self._value_line(target), 1)
+        head.addWidget(self._value_line(target, editable=True), 1)
         others = [t for t in self.targets if t.type == target.type and t.placeholder != target.placeholder]
         if others and self._merging != target.placeholder:
             open_button = QPushButton("Объединить…")

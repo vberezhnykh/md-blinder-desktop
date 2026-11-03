@@ -667,6 +667,62 @@ def test_package_overview_merges_labels_of_documents(qtbot, window, tmp_path):
     overview.close()
 
 
+def test_rename_and_swap_labels(qtbot, window, tmp_path):
+    from md_blinder.ui.widgets import LabelEditor
+
+    first = make_docx(tmp_path / "first.docx", para("Alpha Ltd and Beta Ltd."))
+    second = make_docx(tmp_path / "second.docx", para("Beta Ltd and Gamma Ltd."))
+    process_all(qtbot, window, [first, second])
+    for name in ("Alpha Ltd", "Beta Ltd"):
+        s = window.session.text.index(name)
+        window._add_entity(s, s + len(name), "COMPANY")
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    other = next(m for m in window.store.load_metadata() if m.name == "second.docx")
+    window.open_doc(other.id)
+    for name in ("Beta Ltd", "Gamma Ltd"):
+        s = window.session.text.index(name)
+        window._add_entity(s, s + len(name), "COMPANY")
+    assert window.anonymized_text.startswith("[COMPANY_2] and [COMPANY_3].")
+
+    found = window.page.side.found
+    window.page.side.setCurrentIndex(1)
+    gamma = next(e for e in window.session.entities if e.placeholder == "[COMPANY_3]")
+    found.select_entity(gamma.id)
+    qtbot.wait(10)  # старые строки списка удаляются в цикле событий
+    [editor] = found.findChildren(LabelEditor)
+    # В списке есть и метка первого документа.
+    assert [editor.box.itemText(i) for i in range(editor.box.count())] == ["[COMPANY_1]", "[COMPANY_2]", "[COMPANY_3]"]
+    editor.box.setCurrentText("[COMPANY_1]")
+    editor.apply.click()
+    assert window.anonymized_text.startswith("[COMPANY_2] and [COMPANY_1].")
+    first_meta = next(m for m in window.store.load_metadata() if m.name == "first.docx")
+    stored = window.store.load_doc(first_meta.id)
+    assert [e.placeholder for e in stored.entities if e.type == "COMPANY"] == ["[COMPANY_3]", "[COMPANY_2]"]
+    # Своя метка вместо номера.
+    window._relabel("[COMPANY_2]", "Поставщик")
+    assert window.anonymized_text.startswith("[Поставщик] and [COMPANY_1].")
+    stored = window.store.load_doc(first_meta.id)
+    assert [e.placeholder for e in stored.entities if e.type == "COMPANY"] == ["[COMPANY_2]", "[Поставщик]"]
+    window.toast.action.click()  # отмена из всплывающего сообщения
+    assert window.anonymized_text.startswith("[COMPANY_2] and [COMPANY_1].")
+    assert [e.placeholder for e in window.store.load_doc(first_meta.id).entities] == ["[COMPANY_3]", "[COMPANY_2]"]
+    window._relabel("[COMPANY_1]", "[a]b]")
+    assert window.anonymized_text.startswith("[COMPANY_2] and [COMPANY_1].")
+
+
+def test_rename_label_in_single_document(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para("Alpha Ltd and Beta Ltd."))
+    for name in ("Alpha Ltd", "Beta Ltd"):
+        s = window.session.text.index(name)
+        window._add_entity(s, s + len(name), "COMPANY")
+    window._relabel("[COMPANY_1]", "Заказчик")
+    assert window.anonymized_text.startswith("[Заказчик] and [COMPANY_1].")
+    window._relabel("[COMPANY_1]", "[Заказчик]")  # занятая метка того же типа: меняются местами
+    assert window.anonymized_text.startswith("[COMPANY_1] and [Заказчик].")
+    window.session.undo_stack.undo()
+    assert window.anonymized_text.startswith("[Заказчик] and [COMPANY_1].")
+
+
 def test_add_files_to_open_document_makes_a_package(qtbot, window, tmp_path):
     open_docx(qtbot, window, tmp_path, para("Пишите на alice@example.com."))
     assert window.session.doc.batch_id is None

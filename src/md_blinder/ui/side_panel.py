@@ -31,7 +31,13 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
 from .icons import icon, pixmap
-from .widgets import BATCH_PREFIX, ElidedLabel, Select, icon_label, set_prop
+from .widgets import BATCH_PREFIX, ElidedLabel, LabelEditor, Select, icon_label, set_prop
+
+
+def _label_order(label: str) -> tuple[int, int, str]:
+    """Метки вида [TYPE_n] по номеру, свои метки после них по алфавиту."""
+    m = re.search(r"_([0-9]+)\]$", label)
+    return (0, int(m.group(1)), label) if m else (1, 0, label.lower())
 
 
 def _min_start(e: Entity) -> int:
@@ -463,6 +469,7 @@ class FoundPanel(QWidget):
     change_type = Signal(str, str)
     merge = Signal(str, str)  # источник, цель
     link_batch = Signal(str, str)  # сущность, метка замены из другого документа пакета
+    relabel = Signal(str, str)  # текущая метка, новая (своя или другая метка того же типа)
     delete = Signal(str)
     row_hovered = Signal(object)
 
@@ -728,6 +735,7 @@ class FoundPanel(QWidget):
             merge.clicked.connect(start_merge)
             row.addWidget(merge)
         row.addStretch(1)
+        rows.addWidget(self._label_editor(entity, same_type))
         delete = QPushButton("Удалить")
         delete.setObjectName("danger")
 
@@ -738,6 +746,29 @@ class FoundPanel(QWidget):
         delete.clicked.connect(do_delete)
         rows.addWidget(delete, 0, Qt.AlignmentFlag.AlignLeft)
         return area
+
+    def _label_editor(self, entity: Entity, same_type: list[Entity]) -> QWidget:
+        """Метка значения: поменять местами с другой меткой того же типа (в пакете —
+        и из других документов) или вписать свою."""
+        labels = [x.placeholder for x in same_type]
+        if self._batch is not None:
+            labels += [t.placeholder for t in self._batch.targets if t.type == entity.type]
+        labels = sorted(dict.fromkeys(labels), key=_label_order)
+        area = QWidget()
+        row = QHBoxLayout(area)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        caption = QLabel("Метка")
+        caption.setObjectName("fieldLabel")
+        row.addWidget(caption)
+        editor = LabelEditor(entity.placeholder, labels)
+        editor.chosen.connect(lambda text, old=entity.placeholder: self._relabel(old, text))
+        row.addWidget(editor, 1)
+        return area
+
+    def _relabel(self, old: str, text: str) -> None:
+        self._merging = None
+        self.relabel.emit(old, text)
 
     def _click(self, entity_id: str) -> None:
         self._merging = None

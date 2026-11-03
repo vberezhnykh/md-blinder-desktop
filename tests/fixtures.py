@@ -48,7 +48,8 @@ def draw_table(page, x0, y0, widths, texts, row_height=24, merged_below=()):
                 page.insert_text((xs[c] + 4, top + 16), text, fontsize=10, fontname="helv")
 
 
-def make_docx(path: Path, body_xml: str) -> Path:
+def make_docx(path: Path, body_xml: str, numbering_xml: str = "", styles_xml: str = "") -> Path:
+    """numbering_xml и styles_xml — содержимое <w:numbering> и <w:styles> без корневого элемента."""
     content_types = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
@@ -56,7 +57,13 @@ def make_docx(path: Path, body_xml: str) -> Path:
         '<Default Extension="xml" ContentType="application/xml"/>'
         '<Override PartName="/word/document.xml" '
         'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>'
-        "</Types>"
+        + "".join(
+            f'<Override PartName="/word/{name}.xml" '
+            f'ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.{name}+xml"/>'
+            for name, xml in (("numbering", numbering_xml), ("styles", styles_xml))
+            if xml
+        )
+        + "</Types>"
     )
     rels = (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
@@ -69,20 +76,54 @@ def make_docx(path: Path, body_xml: str) -> Path:
         '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
         f"<w:body>{body_xml}</w:body></w:document>"
     )
+    parts = {"numbering": numbering_xml, "styles": styles_xml}
+    w_ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+    doc_rels = "".join(
+        f'<Relationship Id="rId{i}" Target="{name}.xml" '
+        f'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{name}"/>'
+        for i, (name, xml) in enumerate(parts.items(), 1)
+        if xml
+    )
     with zipfile.ZipFile(path, "w") as zf:
         zf.writestr("[Content_Types].xml", content_types)
         zf.writestr("_rels/.rels", rels)
         zf.writestr("word/document.xml", document)
+        for name, xml in parts.items():
+            if xml:
+                zf.writestr(f"word/{name}.xml", f"<w:{name} {w_ns}>{xml}</w:{name}>")
+        if doc_rels:
+            zf.writestr(
+                "word/_rels/document.xml.rels",
+                '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                f"{doc_rels}</Relationships>",
+            )
     return path
 
 
-def para(text: str) -> str:
-    return f'<w:p><w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
+def para(text: str, num: tuple[int, int] | None = None, style: str = "") -> str:
+    """Абзац; num — (numId, ilvl) автонумерации, style — стиль абзаца."""
+    props = f'<w:pStyle w:val="{style}"/>' if style else ""
+    if num is not None:
+        props += f'<w:numPr><w:ilvl w:val="{num[1]}"/><w:numId w:val="{num[0]}"/></w:numPr>'
+    ppr = f"<w:pPr>{props}</w:pPr>" if props else ""
+    return f'<w:p>{ppr}<w:r><w:t xml:space="preserve">{escape(text)}</w:t></w:r></w:p>'
 
 
-def table(rows: list[list[str]]) -> str:
+def numbering_level(ilvl: int, text: str, fmt: str = "decimal", start: int = 1, extra: str = "") -> str:
+    return (
+        f'<w:lvl w:ilvl="{ilvl}"><w:start w:val="{start}"/><w:numFmt w:val="{fmt}"/>'
+        f'<w:lvlText w:val="{text}"/>{extra}</w:lvl>'
+    )
+
+
+def numbering_num(num_id: int, abstract_id: int, overrides: str = "") -> str:
+    return f'<w:num w:numId="{num_id}"><w:abstractNumId w:val="{abstract_id}"/>{overrides}</w:num>'
+
+
+def table(rows: list[list[str]], raw: bool = False) -> str:
+    """raw — ячейки уже в разметке абзацев (para), а не текст."""
     cells = "".join(
-        "<w:tr>" + "".join(f"<w:tc>{para(c)}</w:tc>" for c in row) + "</w:tr>" for row in rows
+        "<w:tr>" + "".join(f"<w:tc>{c if raw else para(c)}</w:tc>" for c in row) + "</w:tr>" for row in rows
     )
     return f"<w:tbl>{cells}</w:tbl>"
 

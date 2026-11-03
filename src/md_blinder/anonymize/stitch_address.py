@@ -97,3 +97,27 @@ def stitch_person_runs(matches: list[RawMatch], text: str) -> list[RawMatch]:
         else:
             merged.append(m)
     return [*others, *merged]
+
+
+# Кавычки названия компании. Модель иногда обрывает спан перед закрывающей
+# кавычкой («ООО «Альфа» → «ООО «Альфа»), и такое значение получает отдельную
+# метку, а кавычка остается в тексте.
+_QUOTE_PAIRS = (("«", "»"), ("“", "”"))
+
+
+def close_company_quotes(matches: list[RawMatch], text: str) -> list[RawMatch]:
+    """Добавляет к спану COMPANY соседнюю кавычку, если в спане ее пары не хватает."""
+    out: list[RawMatch] = []
+    for m in matches:
+        if m.type == "COMPANY":
+            start, end = m.start, m.end
+            for opening, closing in _QUOTE_PAIRS:
+                value = text[start:end]
+                if value.count(opening) > value.count(closing) and text[end:end + 1] == closing:
+                    end += 1
+                elif value.count(closing) > value.count(opening) and start > 0 and text[start - 1] == opening:
+                    start -= 1
+            if (start, end) != (m.start, m.end):
+                m = RawMatch(type=m.type, value=text[start:end], start=start, end=end, score=m.score)
+        out.append(m)
+    return out

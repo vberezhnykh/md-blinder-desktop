@@ -1499,11 +1499,16 @@ class MainWindow(QMainWindow):
         menu.add_separator()
         menu.add_note("История хранится на этом компьютере вместе с исходным текстом, без шифрования.", warn=True)
         menu.add_row([
-            ("Все документы", self.show_all_docs, True),
+            ("Все документы", self._show_full_history, True),
             ("Экспорт", self.export_history, bool(recent)),
             ("Импорт", self.import_history, True),
         ])
         menu.show_under(self.page.history_button)
+
+    def _show_full_history(self) -> None:
+        """«Все документы» из меню истории: стартовый экран с раскрытым списком."""
+        self.start.history.set_expanded(True)
+        self.show_all_docs()
 
     def show_all_docs(self) -> None:
         if not self.autosave.flush():

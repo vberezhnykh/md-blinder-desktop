@@ -201,6 +201,49 @@ def test_history_reopen(qtbot, window, tmp_path):
     assert window.stack.currentWidget() is window.page
 
 
+def test_history_shows_ten_recent_docs_until_expanded(qtbot, window):
+    from md_blinder.storage.history import HistoryDocMeta
+    from md_blinder.ui.start_screen import HISTORY_VISIBLE
+
+    panel = window.start.history
+    docs = [HistoryDocMeta(f"d{i}", f"doc{i}.docx", "docx", i, 100 - i, 0) for i in range(HISTORY_VISIBLE + 5)]
+
+    def names():
+        return [
+            panel.rows.itemAt(i).widget().findChild(QLabel).text()
+            for i in range(panel.rows.count())
+            if panel.rows.itemAt(i).widget() is not None
+        ]
+
+    panel.render(docs, None)
+    assert names() == [d.name for d in docs[:HISTORY_VISIBLE]]
+    assert not panel.more_button.isHidden()
+    assert panel.more_button.text() == "Показать еще 5 документов"
+    assert panel.title.text() == f"История ({len(docs)})"
+
+    qtbot.mouseClick(panel.more_button, Qt.MouseButton.LeftButton)
+    assert names() == [d.name for d in docs]
+    assert panel.more_button.text() == "Свернуть"
+    # Обновление списка (автосохранение, удаление) не сворачивает раскрытую историю.
+    panel.render(docs[1:], None)
+    assert len(names()) == len(docs) - 1
+
+    qtbot.mouseClick(panel.more_button, Qt.MouseButton.LeftButton)
+    assert len(names()) == HISTORY_VISIBLE
+
+    panel.render(docs[:HISTORY_VISIBLE], None)
+    assert len(names()) == HISTORY_VISIBLE
+    assert panel.more_button.isHidden()
+
+
+def test_history_menu_all_docs_expands_list(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert not window.start.history.expanded
+    window._show_full_history()
+    assert window.stack.currentWidget() is window.start
+    assert window.start.history.expanded
+
+
 def test_full_pipeline_with_real_model(qtbot, tmp_path, monkeypatch):
     """Сквозной прогон с настоящей моделью: имена и компании находит NER."""
     from md_blinder.components import model_asset

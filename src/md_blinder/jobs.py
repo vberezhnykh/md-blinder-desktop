@@ -11,14 +11,13 @@
 OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
 потока. Отмена через CancelToken прерывает и ожидание ответа.
 
-Загруженная модель живет в ModelHolder и переиспользуется следующими задачами:
-разворачивание графа занимает десятки секунд.
+Загруженная модель живет в ModelHolder (model_holder.py) и переиспользуется
+следующими задачами: разворачивание графа занимает десятки секунд.
 """
 
 from __future__ import annotations
 
 import queue
-import threading
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -37,6 +36,7 @@ from .convert.file_type import detect_file_kind
 from .convert.ocr import ocr_pdf_pages
 from .convert.pdf import analyze_pdf, assemble_markdown
 from .convert.xlsx import xlsx_to_markdown
+from .model_holder import ModelHolder
 from .ui.progress_label import UiProgress
 
 # Ответы на вопросы задачи.
@@ -62,27 +62,7 @@ class UserFacingError(Exception):
     """Ошибка с готовым текстом для пользователя."""
 
 
-class ModelHolder:
-    """Одна загруженная модель на все задачи."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._model: Any = None
-
-    def get(self, on_progress=None) -> Any:
-        with self._lock:
-            if self._model is None:
-                from .ner.engine import load_model
-
-                self._model = load_model(model_asset.model_dir(), on_progress)
-            return self._model
-
-    @property
-    def loaded(self) -> bool:
-        return self._model is not None
-
-
-MODEL = ModelHolder()
+MODEL = ModelHolder()  # одна модель на все задачи
 
 
 def _normalize_newlines(text: str) -> str:
@@ -245,17 +225,17 @@ class ProcessingJob(QObject):
         ner_skipped = False
         if MODEL.loaded or model_asset.is_model_present():
             ner_detect = self._ner_detect
+        elif MODEL.downloading:
+            # Модель уже качается по кнопке на стартовом экране: ждем ее, не спрашивая.
+            ner_detect = self._download_then_detect
         else:
             choice = self._ask("ner-model")
             if choice == DOWNLOAD:
                 ner_detect = self._download_then_detect
             elif choice.startswith("file:"):
-                model_asset.import_model_file(choice[5:], cancel=cancel)
-                if not model_asset.is_model_present():
-                    # Остальные файлы модели небольшие, докачиваем их.
-                    ner_detect = self._download_then_detect
-                else:
-                    ner_detect = self._ner_detect
+                # Файлы копируются с проверкой, недостающие (токенизатор, ~16 МБ) докачиваются.
+                MODEL.download(cancel=cancel, source=choice[5:])
+                ner_detect = self._ner_detect
             else:
                 ner_skipped = True
 
@@ -273,7 +253,7 @@ class ProcessingJob(QObject):
         )
 
     def _download_then_detect(self, md: str):
-        model_asset.download_model(
+        MODEL.download(
             on_progress=lambda got, total: self._emit(phase="ner-download", pct=int(got * 100 / max(1, total))),
             cancel=self._detect_cancel,
         )
@@ -282,7 +262,7 @@ class ProcessingJob(QObject):
     def _ner_detect(self, md: str):
         from .ner.engine import detect_entities_ner
 
-        model = MODEL.get(self._on_ner_progress)
+        model = MODEL.get(self._on_ner_progress, self._detect_cancel)
         check(self._detect_cancel)
         return detect_entities_ner(md, model, on_progress=self._on_ner_progress, cancel=self._detect_cancel)
 

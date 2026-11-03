@@ -19,6 +19,7 @@ from ..cancel import CancelToken, check
 from .downloader import CHUNK_SIZE, DownloadError, download_file, part_path, sha256_file
 
 MODEL_REPO = "onnx-community/gliner_multi-v2.1"
+MODEL_TITLE = "GLiNER multi v2.1"  # название для интерфейса
 MODEL_REVISION = "6ddaeb9413b0e71ad8457da1aab378a165b24058"
 MODEL_BASE_URL = f"https://huggingface.co/{MODEL_REPO}/resolve/{MODEL_REVISION}"
 MODEL_FILE = "model_fp16.onnx"
@@ -181,7 +182,7 @@ def remove_model(directory: Optional[Path] = None) -> None:
 
 
 __all__ = [
-    "ASSETS", "MODEL_ASSET", "MODEL_BASE_URL", "MODEL_BYTES_FP16", "MODEL_FILE", "MODEL_REVISION",
+    "ASSETS", "MODEL_ASSET", "MODEL_BASE_URL", "MODEL_BYTES_FP16", "MODEL_FILE", "MODEL_REVISION", "MODEL_TITLE",
     "MODEL_SHA256_FP16", "MODEL_URL_FP16", "ModelAsset", "TOKENIZER_ASSET", "TOKENIZER_CONFIG_ASSET",
     "download_model", "import_model_file", "is_model_present", "missing_assets", "model_dir",
     "remove_model", "sha256_file",

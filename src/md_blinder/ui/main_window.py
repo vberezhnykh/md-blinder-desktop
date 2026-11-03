@@ -105,6 +105,17 @@ def shorten(s: str, n: int) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+# С этого числа документов над списком пакета появляется поиск.
+BATCH_SEARCH_FROM = 8
+
+
+def split_doc_name(name: str, hint: str) -> tuple[str, str]:
+    """Имя документа из папки («Клиент/2024/акт.docx») для пункта меню: заголовок — имя
+    файла, путь к нему уходит в подсказку перед ее текстом."""
+    folder, _, file_name = name.rpartition("/")
+    return file_name, (f"{folder} · {hint}" if folder else hint)
+
+
 class TopBar(QFrame):
     """Верхняя панель экрана документа (TopBar.tsx)."""
 
@@ -974,14 +985,18 @@ class MainWindow(QMainWindow):
                 "Добавьте связанные документы, например договоры с теми же сторонами, чтобы одинаковые "
                 "значения получили одинаковые метки во всех файлах."
             )
+        if docs:
+            menu.begin_list("Найти документ" if len(docs) >= BATCH_SEARCH_FROM else "")
         for i, meta in enumerate(docs):
             is_current = doc is not None and meta.id == doc.id
             hint = "Открыт сейчас" if is_current else plural(len(meta.entities), ("находка", "находки", "находок"))
+            file_name, hint = split_doc_name(meta.name, hint)
             menu.add_item(
-                shorten(f"{i + 1}. {meta.name}", 44),
+                f"{i + 1}. {file_name}",
                 (lambda: None) if is_current else (lambda i=meta.id: self.open_doc(i)),
-                hint, current=is_current,
+                hint, current=is_current, elide=True, tooltip=meta.name, search_text=meta.name,
             )
+        menu.end_list()
         menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus")
         menu.add_item("Добавить папку в пакет", self.add_folder_to_batch, "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок", "folder")
         if docs:
@@ -1588,7 +1603,11 @@ class MainWindow(QMainWindow):
             hint = "Открыт сейчас" if is_current else (
                 f"{when} · {plural(meta.entity_count, ('находка', 'находки', 'находок'))}"
             )
-            menu.add_item(shorten(meta.name, 44), lambda i=meta.id: self.open_doc(i), hint, current=is_current)
+            file_name, hint = split_doc_name(meta.name, hint)
+            menu.add_item(
+                file_name, lambda i=meta.id: self.open_doc(i), hint,
+                current=is_current, elide=True, tooltip=meta.name,
+            )
         menu.add_separator()
         menu.add_note("История хранится на этом компьютере вместе с исходным текстом, без шифрования.", warn=True)
         menu.add_row([

@@ -791,3 +791,50 @@ def test_redacted_pdf_not_offered_for_docx(qtbot, window, tmp_path):
     qtbot.waitUntil(window.page.status.menu.isVisible)
     assert "Обезличенный PDF" not in _menu_titles(window.page.status.menu)
     window.page.status.menu.hide()
+
+
+def test_long_package_list_scrolls_within_screen(qtbot, window, tmp_path):
+    """Список пакета из 24 документов не уходит за край экрана: он прокручивается,
+    пункты пакета под ним видны, имя файла не обрезается длинным путем."""
+    from PySide6.QtGui import QGuiApplication
+
+    root = tmp_path / "Agreements"
+    folder = root / "Заказчики-Ресселеры" / "Очень длинное название папки с договорами клиента"
+    folder.mkdir(parents=True)
+    for i in range(24):
+        make_docx(folder / f"договор-{i:02d}.docx", para(f"Пишите на a{i}@example.com."))
+    process_all(qtbot, window, [root])
+    assert window.page.topbar.batch_label.text() == "Пакет · 24"
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    last = next(m for m in window.store.load_metadata() if m.name.endswith("договор-23.docx"))
+    window.open_doc(last.id)
+
+    window._open_batch_menu()
+    menu = window.page.batch_menu
+    qtbot.waitUntil(menu.isVisible)
+    screen = QGuiApplication.screenAt(menu.pos()) or QGuiApplication.primaryScreen()
+    assert menu.frameGeometry().bottom() <= screen.availableGeometry().bottom()
+    area = menu.list_area
+    assert area.verticalScrollBar().maximum() > 0
+    actions = [b for b in menu.findChildren(QPushButton) if b.objectName() == "menuItem" and not area.isAncestorOf(b)]
+    assert actions and all(b.isVisible() for b in actions)
+    # Открытый документ последний в списке, список прокручен к нему.
+    qtbot.waitUntil(lambda: area.verticalScrollBar().value() > 0)
+    current = next(b for b in menu.visible_list_items() if b.property("current") == "true")
+    top_left = current.mapTo(area.viewport(), current.rect().topLeft())
+    assert area.viewport().rect().contains(top_left)
+    title = next(lbl for lbl in current.findChildren(QLabel) if lbl.objectName() == "menuTitle")
+    assert title.text() == "24. договор-23.docx"
+    assert current.toolTip().startswith("Agreements/Заказчики-Ресселеры/")
+    _assert_menu_items_readable(menu)
+
+    # Поиск по имени: остается один документ, Enter открывает его.
+    assert menu.search is not None
+    menu.search.setText("договор-07")
+    assert len(menu.visible_list_items()) == 1
+    menu.search.setText("нет такого")
+    assert menu.visible_list_items() == []
+    menu.search.setText("ДОГОВОР-07")
+    menu.search.returnPressed.emit()
+    assert not menu.isVisible()
+    assert window.session.doc.name.endswith("договор-07.docx")

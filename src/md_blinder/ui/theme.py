@@ -224,6 +224,12 @@ QPushButton#menuItem[current="true"] {{ background: {SUNK}; }}
 QLabel#menuTitle {{ font-size: 14px; font-weight: 500; color: {INK}; background: transparent; }}
 QLabel#menuHint {{ font-size: 12px; color: {INK_3}; background: transparent; }}
 QLabel#menuHintWarn {{ font-size: 12px; color: {WARN}; background: transparent; }}
+QScrollArea#menuList, QWidget#menuListBody {{ background: transparent; border: none; }}
+QLineEdit#menuSearch {{
+  font-size: 13px; color: {INK}; background: {SURFACE}; border: 1px solid {LINE_2};
+  border-radius: {RADIUS_SM}px; padding: 5px 8px;
+}}
+QLineEdit#menuSearch:focus {{ border-color: {ACCENT}; }}
 
 QFrame#editorBox, QFrame#previewBox {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
 QTextEdit#sourceEditor, QTextBrowser#resultPreview {{ font-family: "{SERIF}"; font-size: 15px; }}

@@ -5,13 +5,15 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import (
     QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QStyledItemDelegate,
     QVBoxLayout,
@@ -55,12 +57,13 @@ class ElidedLabel(QLabel):
     """Однострочная подпись, которая не раздвигает панель: что не влезает по ширине,
     заменяется многоточием (text-overflow: ellipsis в вебе)."""
 
-    def __init__(self, text: str = "") -> None:
+    def __init__(self, text: str = "", mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight) -> None:
         super().__init__(text)
+        self._mode = mode
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
     def elided_text(self) -> str:
-        return self.fontMetrics().elidedText(self.text(), Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        return self.fontMetrics().elidedText(self.text(), self._mode, self.contentsRect().width())
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -189,7 +192,14 @@ class MenuItem(QPushButton):
 
 
 class PopupMenu(QFrame):
-    """Раскрывающееся меню как Menu.tsx: пункты с заголовком и подсказкой, заметки, разделители."""
+    """Раскрывающееся меню как Menu.tsx: пункты с заголовком и подсказкой, заметки, разделители.
+
+    Пункты между begin_list и end_list лежат в прокручиваемом списке: его высота
+    ограничивается местом на экране, остальные пункты меню всегда видны.
+    """
+
+    MIN_LIST_HEIGHT = 120
+    SCREEN_GAP = 8
 
     def __init__(self, parent: QWidget, width: int = 340) -> None:
         super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
@@ -199,6 +209,17 @@ class PopupMenu(QFrame):
         self.box = QVBoxLayout(self)
         self.box.setContentsMargins(6, 6, 6, 6)
         self.box.setSpacing(0)
+        self._reset_list()
+
+    def _reset_list(self) -> None:
+        self._target = self.box
+        self.list_area: Optional[QScrollArea] = None
+        self.search: Optional[QLineEdit] = None
+        self._list_box: Optional[QVBoxLayout] = None
+        self._list_items: list[tuple[QPushButton, str]] = []
+        self._list_current: Optional[QPushButton] = None
+        self._list_empty: Optional[QLabel] = None
+        self._list_max = 0
 
     def clear(self) -> None:
         while self.box.count():
@@ -210,16 +231,59 @@ class PopupMenu(QFrame):
                     sub = item.layout().takeAt(0)
                     if sub.widget():
                         sub.widget().deleteLater()
+        self._reset_list()
+
+    def begin_list(self, search_placeholder: str = "") -> None:
+        """Следующие пункты попадают в прокручиваемый список; с подсказкой в поле
+        над списком появляется поиск по пунктам."""
+        if search_placeholder:
+            self.search = QLineEdit()
+            self.search.setObjectName("menuSearch")
+            self.search.setPlaceholderText(search_placeholder)
+            self.search.setClearButtonEnabled(True)
+            self.search.textChanged.connect(self._filter_list)
+            self.search.returnPressed.connect(self._open_first_match)
+            wrap = QVBoxLayout()
+            wrap.setContentsMargins(4, 0, 4, 6)
+            wrap.addWidget(self.search)
+            self.box.addLayout(wrap)
+        self.list_area = QScrollArea()
+        self.list_area.setObjectName("menuList")
+        self.list_area.setWidgetResizable(True)
+        self.list_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("menuListBody")
+        self._list_box = QVBoxLayout(body)
+        self._list_box.setContentsMargins(0, 0, 0, 0)
+        self._list_box.setSpacing(0)
+        self._list_box.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._list_empty = QLabel("Ничего не найдено.")
+        self._list_empty.setObjectName("menuHint")
+        self._list_empty.setContentsMargins(10, 8, 10, 8)
+        self._list_empty.hide()
+        self._list_box.addWidget(self._list_empty)
+        self.list_area.setWidget(body)
+        self.box.addWidget(self.list_area)
+        self._target = self._list_box
+
+    def end_list(self) -> None:
+        self._target = self.box
 
     def add_item(
         self, title: str, handler: Callable[[], None], hint: str = "", icon_name: Optional[str] = None,
         current: bool = False, sensitive: bool = False, enabled: bool = True,
+        elide: bool = False, tooltip: str = "", search_text: str = "",
     ) -> QPushButton:
+        """Пункт меню. С elide заголовок и подсказка занимают по строке: у заголовка
+        многоточие ставится в середине (видно расширение файла), у подсказки в начале."""
         button = MenuItem()
         button.setObjectName("menuItem")
         button.setProperty("current", "true" if current else "false")
         button.setEnabled(enabled)
         button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            button.setToolTip(tooltip)
         row = QHBoxLayout(button)
         row.setContentsMargins(10, 8, 10, 8)
         row.setSpacing(10)
@@ -232,13 +296,16 @@ class PopupMenu(QFrame):
             row.addLayout(col_icon)
         col = QVBoxLayout()
         col.setSpacing(2)
-        title_label = QLabel(title)
+        title_label = ElidedLabel(title, Qt.TextElideMode.ElideMiddle) if elide else QLabel(title)
         title_label.setObjectName("menuTitle")
         col.addWidget(title_label)
         if hint:
-            hint_label = QLabel(hint)
+            if elide:
+                hint_label = ElidedLabel(hint, Qt.TextElideMode.ElideLeft)
+            else:
+                hint_label = QLabel(hint)
+                hint_label.setWordWrap(True)
             hint_label.setObjectName("menuHintWarn" if sensitive else "menuHint")
-            hint_label.setWordWrap(True)
             col.addWidget(hint_label)
         row.addLayout(col, 1)
         for child in button.findChildren(QLabel):
@@ -249,7 +316,11 @@ class PopupMenu(QFrame):
             handler()
 
         button.clicked.connect(run)
-        self.box.addWidget(button)
+        self._target.addWidget(button)
+        if self._target is self._list_box:
+            self._list_items.append((button, (search_text or title).casefold()))
+            if current:
+                self._list_current = button
         return button
 
     def add_separator(self) -> None:
@@ -259,14 +330,14 @@ class PopupMenu(QFrame):
         wrap = QVBoxLayout()
         wrap.setContentsMargins(0, 6, 0, 6)
         wrap.addWidget(line)
-        self.box.addLayout(wrap)
+        self._target.addLayout(wrap)
 
     def add_note(self, text: str, warn: bool = False) -> None:
         label = QLabel(text)
         label.setObjectName("menuHintWarn" if warn else "menuHint")
         label.setWordWrap(True)
         label.setContentsMargins(10, 4, 10, 8)
-        self.box.addWidget(label)
+        self._target.addWidget(label)
 
     def add_row(self, buttons: list[tuple[str, Callable[[], None], bool]]) -> None:
         row = QHBoxLayout()
@@ -284,15 +355,65 @@ class PopupMenu(QFrame):
             b.clicked.connect(run)
             row.addWidget(b)
         row.addStretch(1)
-        self.box.addLayout(row)
+        self._target.addLayout(row)
+
+    def visible_list_items(self) -> list[QPushButton]:
+        return [button for button, _key in self._list_items if not button.isHidden()]
+
+    def _filter_list(self, text: str) -> None:
+        words = text.casefold().split()
+        for button, key in self._list_items:
+            button.setHidden(not all(w in key for w in words))
+        if self._list_empty is not None:
+            self._list_empty.setHidden(bool(self.visible_list_items()))
+        if self.isVisible():
+            self._fit_list()
+            self.adjustSize()
+
+    def _open_first_match(self) -> None:
+        items = self.visible_list_items()
+        if items and items[0].isEnabled():
+            items[0].click()
+
+    def _list_content_height(self) -> int:
+        assert self.list_area is not None and self._list_box is not None
+        scrollbar = self.list_area.verticalScrollBar().sizeHint().width()
+        width = self.width() - self.box.contentsMargins().left() - self.box.contentsMargins().right() - scrollbar
+        self._list_box.activate()
+        if self._list_box.hasHeightForWidth():
+            return self._list_box.totalHeightForWidth(width)
+        return self._list_box.totalSizeHint().height()
+
+    def _fit_list(self) -> None:
+        """Список во всю высоту содержимого, но не ниже нижнего края экрана."""
+        if self.list_area is None:
+            return
+        height = self._list_content_height()
+        if self._list_max:
+            height = min(height, self._list_max)
+        self.list_area.setFixedHeight(max(height, 1))
 
     def show_under(self, anchor: QWidget, align_right: bool = True) -> None:
+        self._list_max = 0
+        self._fit_list()
         self.adjustSize()
         pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 6))
         if align_right:
             pos.setX(pos.x() + anchor.width() - self.width())
+        if self.list_area is not None:
+            screen = QGuiApplication.screenAt(pos) or anchor.screen() or QGuiApplication.primaryScreen()
+            bottom = screen.availableGeometry().bottom() - self.SCREEN_GAP
+            rest = self.height() - self.list_area.height()
+            self._list_max = max(bottom - pos.y() - rest, self.MIN_LIST_HEIGHT)
+            self._fit_list()
+            self.adjustSize()
         self.move(pos)
         self.show()
+        if self.search is not None:
+            self.search.setFocus()
+        if self._list_current is not None and self.list_area is not None:
+            area, current = self.list_area, self._list_current
+            QTimer.singleShot(0, area, lambda: area.ensureWidgetVisible(current, 0, 40))
 
 
 class StepIndicator(QWidget):

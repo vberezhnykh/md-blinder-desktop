@@ -35,6 +35,7 @@ from ..anonymize.apply import (
     accept_related_candidate,
     add_entity_from_selection,
     add_occurrence_to_entity,
+    build_anonymized_text,
     build_anonymized_text_with_map,
     change_entity_type,
     compact_placeholder_numbers,
@@ -49,6 +50,7 @@ from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
 from ..export_job import PdfExportJob, PdfExportRequest
+from ..folders import collect_files, export_plan
 from .. import shell
 from ..components import ocr_models
 from ..paths import history_db_path
@@ -130,7 +132,7 @@ class TopBar(QFrame):
         self.home_button.setToolTip("Стартовый экран со всеми документами")
         self.new_button = QPushButton("Новый файл")
         self.new_button.setIcon(icon("upload", t.INK, 16, t.ACCENT))
-        self.new_button.setToolTip("Или перетащите файл на эту панель")
+        self.new_button.setToolTip("Или перетащите файлы или папку на эту панель")
         self.history_button = QPushButton()
         hrow = QHBoxLayout(self.history_button)
         hrow.setContentsMargins(13, 0, 11, 0)
@@ -298,6 +300,9 @@ class _Run:
     batch_id: Optional[str]
     members: list[HistoryDoc]  # документы пакета, включая уже обработанные в этом запуске
     convert_only: bool = False  # только Markdown, без поиска персональных данных
+    # Имена документов в истории: у файлов из папки — путь от этой папки.
+    names: dict[Path, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)  # пояснения к итогу, не ошибки
     created: list[tuple[HistoryDoc, ProcessingResult]] = field(default_factory=list)
     failures: list[str] = field(default_factory=list)
     skipped: set[str] = field(default_factory=set)
@@ -380,6 +385,7 @@ class MainWindow(QMainWindow):
     def _wire(self) -> None:
         s, p = self.start, self.page
         s.pick_file.connect(self.pick_file)
+        s.pick_folder.connect(self.pick_folder)
         s.file_dropped.connect(lambda paths: self.process_files([Path(p) for p in paths]))
         s.loading.cancel.connect(self.cancel_job)
         s.history.open_doc.connect(self.open_doc)
@@ -451,7 +457,10 @@ class MainWindow(QMainWindow):
         open_action = QAction("Открыть файл", self)
         open_action.setShortcut(QKeySequence.StandardKey.Open)
         open_action.triggered.connect(self.pick_file)
-        for action in (undo, redo, open_action):
+        folder_action = QAction("Открыть папку", self)
+        folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        folder_action.triggered.connect(self.pick_folder)
+        for action in (undo, redo, open_action, folder_action):
             self.addAction(action)
 
     # ------------------------------------------------------------------ обработка файла
@@ -463,10 +472,26 @@ class MainWindow(QMainWindow):
             self.settings.setValue("lastDir", str(Path(paths[0]).parent))
         return [Path(p) for p in paths]
 
+    def _pick_folder(self, title: str) -> Optional[Path]:
+        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        folder = QFileDialog.getExistingDirectory(self, title, start_dir)
+        if not folder:
+            return None
+        self.settings.setValue("lastDir", str(Path(folder).parent))
+        return Path(folder)
+
     def pick_file(self) -> None:
         if self.job is not None:
             return
         self.process_files(self._pick_paths("Выберите документы"))
+
+    def pick_folder(self) -> None:
+        """Папка с документами, включая вложенные папки, обрабатывается пакетом."""
+        if self.job is not None:
+            return
+        folder = self._pick_folder("Выберите папку с документами")
+        if folder is not None:
+            self.process_files([folder])
 
     def process_file(self, path: Path, force_ocr: bool = False) -> None:
         self.process_files([path], force_ocr=force_ocr)
@@ -474,23 +499,46 @@ class MainWindow(QMainWindow):
     def process_files(
         self, paths: list[Path], force_ocr: bool = False,
         batch_id: Optional[str] = None, members: Optional[list[HistoryDoc]] = None,
+        names: Optional[dict[Path, str]] = None,
     ) -> None:
         """Один файл открывается как отдельный документ. Несколько файлов, а также
         файлы, добавленные к открытому документу, образуют пакет: одинаковые
-        значения получают одинаковые метки во всех его документах. Файл, который
-        не удалось обработать, пропускается, остальные обрабатываются."""
+        значения получают одинаковые метки во всех его документах. Папка
+        раскрывается в файлы .docx, .xlsx и .pdf на любой глубине вложенности.
+        Файл, который не удалось обработать, пропускается, остальные обрабатываются."""
         if self.job is not None or not paths:
             return
+        collected = collect_files(paths)
+        legacy_note = (
+            f"Файлы .doc и .xls из папки пропущены ({collected.legacy}): сохраните их в Word или Excel "
+            "как .docx или .xlsx." if collected.legacy else ""
+        )
+        if not collected.paths:
+            if self.stack.currentWidget() is self.start:
+                self.start.set_error(" ".join(filter(None, ["В папке нет файлов .docx, .xlsx или .pdf.", legacy_note])))
+            else:
+                self.toast.show_message(
+                    " ".join(filter(None, ["В папке нет файлов .docx, .xlsx или .pdf.", legacy_note])), 8000, tone="warn",
+                )
+            return
+        paths = collected.paths
         if not self.autosave.flush():
             self._show_save_error()
         self.session.replace_doc(None)
         self.stack.setCurrentWidget(self.start)
         self.start.set_error("")
-        self.start.set_file_name(paths[0].name if len(paths) == 1 else plural(len(paths), ("файл", "файла", "файлов")))
+        count = plural(len(paths), ("файл", "файла", "файлов"))
+        if len(collected.folders) == 1 and all("/" in collected.name(p) for p in paths):
+            self.start.set_file_name(f"Папка «{collected.folders[0].resolve().name}»: {count}", plain=True)
+        else:
+            self.start.set_file_name(collected.name(paths[0]) if len(paths) == 1 else count)
         self.start.dropzone.set_busy(True)
         if batch_id is None and len(paths) > 1:
             batch_id = str(uuid.uuid4())
-        self.run = _Run(list(paths), force_ocr, batch_id, list(members or []), convert_only=self.convert_only)
+        self.run = _Run(
+            list(paths), force_ocr, batch_id, list(members or []), convert_only=self.convert_only,
+            names={**collected.names, **(names or {})}, notes=[legacy_note] if legacy_note else [],
+        )
         self.job_started = time.monotonic()
         self.start.loading.show()
         self.elapsed_timer.start()
@@ -590,7 +638,8 @@ class MainWindow(QMainWindow):
         self.job = None
         if run is None:
             return
-        name = run.paths[run.index].name
+        path = run.paths[run.index]
+        name = run.names.get(path, path.name)
         run.failures.append(message if len(run.paths) == 1 or name in message else f"«{name}»: {message}")
         self._start_next_file()
 
@@ -606,8 +655,9 @@ class MainWindow(QMainWindow):
         if run is None:
             return
         now = now_ms()
+        path = run.paths[run.index]
         doc = HistoryDoc(
-            id=str(uuid.uuid4()), name=result.path.name, format=result.format, created_at=now, updated_at=now,
+            id=str(uuid.uuid4()), name=run.names.get(path, result.path.name), format=result.format, created_at=now, updated_at=now,
             source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
         )
         run.created.append((doc, result))
@@ -623,7 +673,7 @@ class MainWindow(QMainWindow):
         if run is None:
             return
         if not run.created:
-            self.start.set_error(" ".join(run.failures))
+            self.start.set_error(" ".join([*run.failures, *run.notes]))
             return
         doc, result = run.created[0]
         self.batch_others = [d for d in run.members if d.id != doc.id]
@@ -643,8 +693,9 @@ class MainWindow(QMainWindow):
             self.page.ocr_notice.hide()
         self.set_view("source")
         self.stack.setCurrentWidget(self.page)
-        if run.failures:
-            self.toast.show_message(f"Обработаны не все файлы. {' '.join(run.failures)}", 12000, tone="warn")
+        if run.failures or run.notes:
+            lead = "Обработаны не все файлы. " if run.failures else ""
+            self.toast.show_message(f"{lead}{' '.join([*run.failures, *run.notes])}", 12000, tone="warn")
         elif run.batch_id and len(run.members) > 1:
             count = plural(len(run.members), ('документ', 'документа', 'документов'))
             self.toast.show_message(
@@ -680,9 +731,12 @@ class MainWindow(QMainWindow):
             # Прежняя версия остается в истории, а ее место в пакете занимает новая.
             batch_id, members = doc.batch_id, list(self.batch_others)
             self.session.replace_doc(replace(doc, batch_id=None, entities=list(doc.entities)), dirty=True)
-            self.process_files([self.last_pdf[0]], force_ocr=True, batch_id=batch_id, members=members)
+            self.process_files(
+                [self.last_pdf[0]], force_ocr=True, batch_id=batch_id, members=members, names={self.last_pdf[0]: doc.name},
+            )
             return
-        self.process_file(self.last_pdf[0], force_ocr=True)
+        names = {self.last_pdf[0]: doc.name} if doc is not None and doc.id == self.last_pdf[1] else None
+        self.process_files([self.last_pdf[0]], force_ocr=True, names=names)
 
     # ------------------------------------------------------------------ только конвертация
 
@@ -825,11 +879,16 @@ class MainWindow(QMainWindow):
                 hint, current=is_current,
             )
         menu.add_item("Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus")
+        menu.add_item("Добавить папку в пакет", self.add_folder_to_batch, "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок", "folder")
         if docs:
             menu.add_separator()
             menu.add_item(
                 "Экспортировать пакет одним .md", self.export_batch_md,
                 "Документы под заголовками «Документ 1», «Документ 2» без имен файлов", "download",
+            )
+            menu.add_item(
+                "Экспортировать пакет в папку", self.export_batch_folder,
+                "Отдельный .md на каждый документ, подпапки и имена файлов как в исходной папке", "download",
             )
             menu.add_item(
                 "Таблица замен пакета (.csv)", self.export_batch_csv,
@@ -853,6 +912,13 @@ class MainWindow(QMainWindow):
             self.session.replace_doc(joined, dirty=True)
         members = sorted([*self.batch_others, joined], key=lambda d: d.created_at)
         self.process_files(paths, batch_id=batch_id, members=members)
+
+    def add_folder_to_batch(self) -> None:
+        if self.session.doc is None or self.job is not None:
+            return
+        folder = self._pick_folder("Добавить папку в пакет")
+        if folder is not None:
+            self.add_to_batch([folder])
 
     def _collect_batch(self) -> Optional[list[HistoryDoc]]:
         """Документы пакета с согласованными метками, в порядке загрузки."""
@@ -883,6 +949,44 @@ class MainWindow(QMainWindow):
             return
         pending = 0 if self.convert_only else sum(len(pending_candidates(d.entities)) for d in members)
         done = f"Пакет из {plural(len(members), ('документа', 'документов', 'документов'))} сохранен одним файлом."
+        if pending:
+            self.toast.show_message(
+                f"{done} Не проверено: {plural(pending, ('кандидат', 'кандидата', 'кандидатов'))} — "
+                "в тексте они остались без замены.", 8000, tone="warn",
+            )
+        else:
+            self.toast.show_message(done, 4000)
+
+    def export_batch_folder(self) -> None:
+        """Каждый документ пакета отдельным .md в выбранную папку. Документы из
+        папки ложатся по тем же подпапкам и под теми же именами, что исходники."""
+        members = self._collect_batch()
+        if not members:
+            return
+        target = self._pick_folder("Папка для Markdown-файлов пакета")
+        if target is None:
+            return
+        plan = export_plan([d.name for d in members])
+        existing = [rel for rel in plan if target.joinpath(*rel.parts).exists()]
+        if existing:
+            answer = QMessageBox.question(
+                self, "Файлы уже есть",
+                f"В выбранной папке уже есть {plural(len(existing), ('файл', 'файла', 'файлов'))} с такими именами, "
+                f"например «{shorten(str(existing[0]), 60)}». Заменить?",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            for doc, rel in zip(members, plan):
+                out = target.joinpath(*rel.parts)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                text = build_anonymized_text(doc.source_text, [] if self.convert_only else doc.entities)
+                out.write_text(text, encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файлы: {exc}", 6000, tone="error")
+            return
+        pending = 0 if self.convert_only else sum(len(pending_candidates(d.entities)) for d in members)
+        done = f"Сохранено {plural(len(members), ('файл', 'файла', 'файлов'))} в папку «{shorten(target.name, 40)}»."
         if pending:
             self.toast.show_message(
                 f"{done} Не проверено: {plural(pending, ('кандидат', 'кандидата', 'кандидатов'))} — "
@@ -1432,7 +1536,7 @@ class MainWindow(QMainWindow):
         box = QCheckBox("Пункт в меню проводника")
         box.setChecked(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
         box.setToolTip(
-            f"«{shell.LABEL}» в меню файлов .docx, .xlsx и .pdf по правой кнопке мыши. "
+            f"«{shell.LABEL}» в меню файлов .docx, .xlsx, .pdf и папок по правой кнопке мыши. "
             "В Windows 11 — в разделе «Показать дополнительные параметры»."
         )
         box.toggled.connect(self._explorer_menu_toggled)
@@ -1448,7 +1552,7 @@ class MainWindow(QMainWindow):
             self.toast.show_message(error, 8000, tone="error")
 
     def open_external(self, path: str) -> None:
-        """Файл из меню проводника или из повторного запуска программы."""
+        """Файл или папка из меню проводника или из повторного запуска программы."""
         if self.isMinimized():
             self.showNormal()
         self.raise_()

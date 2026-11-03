@@ -52,6 +52,9 @@ def test_register_adds_verb_for_docx_xlsx_and_pdf():
         assert reg.keys[base][None] == "Анонимизировать в MD Blinder"
         assert reg.keys[base]["MultiSelectModel"] == "Single"
         assert reg.keys[base + r"\command"][None] == f'"{exe}" "%1"'
+    folder = r"Software\Classes\Directory\shell\MDBlinder"
+    assert reg.keys[folder][None] == "Анонимизировать в MD Blinder"
+    assert reg.keys[folder + r"\command"][None] == f'"{exe}" "%1"'
 
 
 def test_unregister_removes_keys_and_tolerates_missing():
@@ -73,6 +76,7 @@ def test_file_argument_skips_switches(tmp_path):
     assert shell.file_argument(["MD Blinder.exe", "--updated", str(doc)]) == doc
     assert shell.file_argument(["MD Blinder.exe", str(tmp_path / "нет.pdf")]) is None
     assert shell.file_argument(["MD Blinder.exe"]) is None
+    assert shell.file_argument(["MD Blinder.exe", str(tmp_path)]) == tmp_path
 
 
 def _launch(path, name):

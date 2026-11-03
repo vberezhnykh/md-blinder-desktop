@@ -21,7 +21,7 @@ from typing import Iterable, Optional, Protocol, Sequence, TypeVar
 import regex
 
 from ..convert.script_mix import TO_LAT
-from .apply import build_anonymized_text, entity_current_value, next_placeholder_number
+from .apply import build_anonymized_text, entity_current_value, merge_entities, next_placeholder_number
 from .csv_export import _SURROGATE_RE, _csv_escape
 from .image_safety import mask_images_for_detection
 from .normalize import normalize_value
@@ -236,11 +236,29 @@ def reconcile_batch_placeholders(
 
 def align_batch(docs: Sequence[M]) -> list[M]:
     """Согласует весь пакет по порядку: каждый документ — с уже согласованными
-    предыдущими. Документы без изменений возвращаются теми же объектами."""
+    предыдущими. Документы без изменений возвращаются теми же объектами.
+
+    Если пользователь объединял значения разных документов (batch_aliases), одна
+    сущность может связывать две метки: «Kiriakidis» из первого документа и
+    «Kiriakidjs» из второго через «Kirjakidjs» третьего. Второй документ при
+    проходе по порядку третьего еще не видит, поэтому такие пакеты дополнительно
+    согласуются каждый документ со всеми остальными, пока метки меняются.
+    """
     aligned: list[M] = []
     for doc in docs:
         entities = reconcile_batch_placeholders(doc.entities, doc.source_text, list(aligned))
         aligned.append(doc if entities is doc.entities else replace(doc, entities=entities))  # type: ignore[type-var]
+    if not any(e.batch_aliases for doc in aligned for e in doc.entities):
+        return aligned
+    for _ in range(len(aligned)):
+        changed = False
+        for i, doc in enumerate(aligned):
+            entities = reconcile_batch_placeholders(doc.entities, doc.source_text, aligned[:i] + aligned[i + 1:])
+            if entities is not doc.entities:
+                aligned[i] = replace(doc, entities=entities)  # type: ignore[type-var]
+                changed = True
+        if not changed:
+            break
     return aligned
 
 
@@ -426,13 +444,95 @@ def similar_spelling(a: str, b: str, type_: EntityType = "PERSON") -> bool:
 
     В адресе цифры должны совпадать: «12 Main Street» и «14 Main Street» — разные
     адреса. В имени и названии цифра обычно ошибка OCR: «DIALOQ LTD4» вместо «LTDA»."""
-    fa, fb = _fold(a), _fold(b)
+    return _similar_folded(_fold(a), _fold(b), type_)
+
+
+def _edit_limit(length: int) -> int:
+    return max(1, length // SIMILAR_CHARS_PER_EDIT)
+
+
+def _similar_folded(fa: str, fb: str, type_: EntityType) -> bool:
     if min(len(fa), len(fb)) < MIN_SIMILAR_LENGTH:
         return False
     if type_ == "ADDRESS" and _DIGITS_RE.findall(fa) != _DIGITS_RE.findall(fb):
         return False
-    limit = max(1, max(len(fa), len(fb)) // SIMILAR_CHARS_PER_EDIT)
-    return _within_edits(fa, fb, limit)
+    return _within_edits(fa, fb, _edit_limit(max(len(fa), len(fb))))
+
+
+def _trigrams(text: str) -> set[str]:
+    return {text[i:i + 3] for i in range(len(text) - 2)}
+
+
+def similar_target_pairs(targets: Sequence[BatchTarget]) -> list[tuple[BatchTarget, BatchTarget]]:
+    """Пары замен пакета, похожих по написанию: кандидаты на объединение.
+
+    Чтобы не сравнивать все формы со всеми, сначала отбираются формы с общими
+    тройками букв: одна правка портит не больше трех троек, поэтому у похожих
+    форм общих троек не меньше, чем у формы своих, минус три на каждую
+    допустимую правку. Пары идут в порядке типов и номеров меток."""
+    entries: list[tuple[str, int]] = []  # форма, индекс замены
+    for i, target in enumerate(targets):
+        if target.type not in SIMILAR_TYPES:
+            continue
+        for folded in dict.fromkeys(_fold(f) for f in target.forms):
+            if len(folded) >= MIN_SIMILAR_LENGTH:
+                entries.append((folded, i))
+    grams = [_trigrams(folded) for folded, _ in entries]
+    index: dict[str, list[int]] = {}
+    for n, entry_grams in enumerate(grams):
+        for gram in entry_grams:
+            index.setdefault(gram, []).append(n)
+    found: set[tuple[int, int]] = set()
+    for a, (fa, ia) in enumerate(entries):
+        # Наибольшее число правок для пары с формой a: партнер длиннее не больше чем на него.
+        limit = _edit_limit(len(fa) + _edit_limit(len(fa)) + 1)
+        need = len(grams[a]) - 3 * limit
+        shared: dict[int, int] = {}
+        if need > 0:
+            for gram in grams[a]:
+                for b in index[gram]:
+                    if b > a:
+                        shared[b] = shared.get(b, 0) + 1
+            candidates = [b for b, count in shared.items() if count >= need]
+        else:
+            candidates = list(range(a + 1, len(entries)))
+        for b in candidates:
+            fb, ib = entries[b]
+            pair = (min(ia, ib), max(ia, ib))
+            if ia == ib or pair in found or targets[ia].type != targets[ib].type:
+                continue
+            if _similar_folded(fa, fb, targets[ia].type):
+                found.add(pair)
+    return [(targets[i], targets[j]) for i, j in sorted(found)]
+
+
+def merge_batch_labels(docs: Sequence[M], keep: str, absorb: str) -> list[M]:
+    """Объединяет две метки пакета: значение с меткой absorb во всех документах
+    получает метку keep.
+
+    В документе, где есть обе метки, сущности сливаются как при обычном
+    объединении. В остальных сущность с absorb запоминает формы keep
+    (link_to_batch). Затем пакет согласуется заново. Документы без изменений
+    возвращаются теми же объектами.
+    """
+    targets = {t.placeholder: t for t in batch_targets(docs)}
+    kept, absorbed = targets.get(keep), targets.get(absorb)
+    if kept is None or absorbed is None or kept.type != absorbed.type or keep == absorb:
+        return list(docs)
+    changed: list[M] = []
+    for doc in docs:
+        main = [e for e in doc.entities if _is_main(e)]
+        source = next((e for e in main if e.placeholder == absorb), None)
+        if source is None:
+            changed.append(doc)
+            continue
+        target = next((e for e in main if e.placeholder == keep), None)
+        if target is not None:
+            entities = merge_entities(doc.entities, source.id, target.id)
+        else:
+            entities = link_to_batch(doc.entities, source.id, kept)
+        changed.append(replace(doc, entities=entities))  # type: ignore[type-var]
+    return align_batch(changed)
 
 
 class BatchIndex:
@@ -451,9 +551,20 @@ class BatchIndex:
 
     def merge_targets(self, entity: Entity, entities: Iterable[Entity]) -> list[BatchTarget]:
         """Замены других документов того же типа, которых нет в этом документе.
-        Метки, которые есть и здесь, объединяются обычным образом внутри документа."""
-        local = {e.placeholder for e in entities if _is_main(e)}
-        return [t for t in self.targets if t.type == entity.type and t.placeholder not in local]
+
+        Метки, которые есть и здесь, объединяются обычным образом внутри документа.
+        Замена, с которой сущность этого документа уже объединена, тоже не
+        предлагается: если вариантов имени в пакете несколько, после объединения
+        с одним другой еще может показываться под своей меткой, пока документ с
+        ним не согласован заново, но он уже связан."""
+        main = [e for e in entities if _is_main(e)]
+        local = {e.placeholder for e in main}
+        linked = {_key(e.type, alias) for e in main for alias in e.batch_aliases}
+        return [
+            t for t in self.targets
+            if t.type == entity.type and t.placeholder not in local
+            and not any(_key(t.type, form) in linked for form in t.forms)
+        ]
 
     def similar(self, entity: Entity, source_text: str, entities: Iterable[Entity]) -> list[BatchTarget]:
         """Замены других документов, похожие на сущность по написанию."""

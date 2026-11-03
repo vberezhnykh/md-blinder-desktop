@@ -589,6 +589,41 @@ def test_merge_findings_from_different_documents_of_a_package(qtbot, window, tmp
     assert "Makedon Kiriakidis; Makedon Kirjakidjs" in table_text
 
 
+def test_package_overview_merges_labels_of_documents(qtbot, window, tmp_path):
+    first = make_docx(tmp_path / "first.docx", para("Agent: Makedon Kiriakidis."))
+    second = make_docx(tmp_path / "second.docx", para("Signed by Makedon Kirjakidjs."))
+    process_all(qtbot, window, [first, second])
+    name = "Makedon Kiriakidis"
+    s = window.session.text.index(name)
+    window._add_entity(s, s + len(name), "PERSON")
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    other = next(m for m in window.store.load_metadata() if m.name == "second.docx")
+    window.open_doc(other.id)
+    name = "Makedon Kirjakidjs"
+    s = window.session.text.index(name)
+    window._add_entity(s, s + len(name), "PERSON")
+    assert "Signed by [PERSON_2]." in window.anonymized_text
+    # Открытый документ — первый: объединение должно поменять сохраненный второй.
+    first_meta = next(m for m in window.store.load_metadata() if m.name == "first.docx")
+    window.open_doc(first_meta.id)
+
+    window.show_batch_overview()
+    overview = window.overview
+    assert overview.isVisible()
+    assert [(x.placeholder, y.placeholder) for x, y in overview.pairs] == [("[PERSON_1]", "[PERSON_2]")]
+    button = next(b for b in overview.findChildren(QPushButton) if b.text() == "Объединить в [PERSON_1]")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    assert overview.pairs == []
+    assert [t.placeholder for t in overview.targets] == ["[PERSON_1]"]
+    stored = window.store.load_doc(other.id)
+    assert [e.placeholder for e in stored.entities if e.type == "PERSON"] == ["[PERSON_1]"]
+    # Отмена из всплывающего сообщения возвращает обе метки.
+    window.toast.action.click()
+    assert [e.placeholder for e in window.store.load_doc(other.id).entities if e.type == "PERSON"] == ["[PERSON_2]"]
+    assert [x.placeholder for x, _ in overview.pairs] == ["[PERSON_1]"]
+    overview.close()
+
+
 def test_add_files_to_open_document_makes_a_package(qtbot, window, tmp_path):
     open_docx(qtbot, window, tmp_path, para("Пишите на alice@example.com."))
     assert window.session.doc.batch_id is None

@@ -50,6 +50,7 @@ from ..anonymize.batch import (
     batch_csv_bytes,
     batch_to_markdown,
     link_to_batch,
+    merge_batch_labels,
     reconcile_batch_placeholders,
 )
 from ..anonymize.csv_export import csv_bytes
@@ -75,6 +76,7 @@ from .source_editor import EditorPane
 from .start_screen import StartScreen, dropped_files
 from .theme import add_shadow
 from .update_ui import UpdateBar, UpdateController, version_footer
+from .batch_overview import BatchOverview
 from .widgets import BATCH_PREFIX, Notice, PopupMenu, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
@@ -334,6 +336,7 @@ class MainWindow(QMainWindow):
         self.batch_others: list[HistoryDoc] = []
         self.session.prepare = self._reconcile_with_batch
         self.run: Optional[_Run] = None
+        self.overview: Optional[BatchOverview] = None
 
         self.job: Optional[ProcessingJob] = None
         self.thread: Optional[QThread] = None
@@ -925,6 +928,10 @@ class MainWindow(QMainWindow):
         if docs:
             menu.add_separator()
             menu.add_item(
+                "Все замены пакета", self.show_batch_overview,
+                "Метки всех документов в одном списке; похожие написания можно объединить", "table",
+            )
+            menu.add_item(
                 "Экспортировать пакет одним .md", self.export_batch_md,
                 "Документы под заголовками «Документ 1», «Документ 2» без имен файлов", "download",
             )
@@ -961,6 +968,68 @@ class MainWindow(QMainWindow):
         folder = self._pick_folder("Добавить папку в пакет")
         if folder is not None:
             self.add_to_batch([folder])
+
+    def show_batch_overview(self) -> None:
+        """Окно со всеми метками пакета и похожими написаниями из разных документов."""
+        members = self._collect_batch()
+        if members is None:
+            return
+        if self.overview is None:
+            self.overview = BatchOverview(self)
+            self.overview.setModal(True)
+            self.overview.merge.connect(self._merge_batch_labels)
+        self.overview.set_docs(members)
+        self.overview.show()
+        self.overview.raise_()
+        self.overview.activateWindow()
+
+    def _merge_batch_labels(self, keep: str, absorb: str) -> None:
+        """Объединяет две метки во всех документах пакета. Остальные документы
+        сохраняются сразу, открытый меняется командой со стеком отмены; во
+        всплывающем сообщении есть отмена всего объединения."""
+        members = self._collect_batch()
+        doc = self.session.doc
+        if members is None or doc is None:
+            return
+        merged = merge_batch_labels(members, keep, absorb)
+        changed = [(before, after) for before, after in zip(members, merged) if after is not before]
+        if not changed:
+            return
+        if not self._put_batch_docs([after for _, after in changed if after.id != doc.id]):
+            return
+        self.batch_others = [d for d in merged if d.id != doc.id]
+        current = next(d for d in merged if d.id == doc.id)
+        if current.entities != doc.entities:
+            self.session.update_entities(lambda _: current.entities, "Объединить метки пакета")
+        self._render_derived()
+        if self.overview is not None and self.overview.isVisible():
+            self.overview.set_docs(merged)
+
+        def undo() -> None:
+            restore = [before for before, _ in changed if before.id != doc.id]
+            if not self._put_batch_docs(restore):
+                return
+            if self.session.doc is None or self.session.doc.id != doc.id:
+                return
+            originals = {d.id: d for d in restore}
+            self.batch_others = [originals.get(d.id, d) for d in self.batch_others]
+            before_current = next((b for b, _ in changed if b.id == doc.id), None)
+            if before_current is not None:
+                self.session.update_entities(lambda _: before_current.entities, "Отменить объединение меток")
+            self._render_derived()
+            if self.overview is not None and self.overview.isVisible():
+                self.overview.set_docs(self._batch_docs())
+
+        self.toast.show_message(f"{absorb} теперь {keep} во всем пакете.", DELETE_UNDO_MS, action=("Отменить", undo))
+
+    def _put_batch_docs(self, docs: list[HistoryDoc]) -> bool:
+        try:
+            for d in docs:
+                self.store.put_doc(d)
+        except Exception as exc:  # noqa: BLE001
+            self.toast.show_message(f"Не удалось сохранить документы пакета: {exc}", 8000, tone="warn")
+            return False
+        return True
 
     def _collect_batch(self) -> Optional[list[HistoryDoc]]:
         """Документы пакета с согласованными метками, в порядке загрузки."""

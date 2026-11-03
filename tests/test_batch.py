@@ -9,7 +9,9 @@ from md_blinder.anonymize.batch import (
     align_batch,
     batch_targets,
     link_to_batch,
+    merge_batch_labels,
     similar_spelling,
+    similar_target_pairs,
     batch_entities_to_csv,
     batch_to_markdown,
     reconcile_batch_placeholders,
@@ -280,3 +282,51 @@ def test_similar_spelling():
     assert not similar_spelling("12 Main Street, London", "14 Main Street, London", "ADDRESS")
     assert similar_spelling("DIALOQ LTDA", "DIALOQ LTD4", "COMPANY")
     assert not similar_spelling("Smith", "Smyth")  # слишком коротко, чтобы судить
+
+
+def three_variants() -> tuple[Doc, Doc, Doc]:
+    a = doc("Agent: Makedon Kiriakidis.", [("PERSON", "Makedon Kiriakidis", "[PERSON_1]")], "a.pdf")
+    c = doc("Agent: Makedon Kiriakidjs.", [("PERSON", "Makedon Kiriakidjs", "[PERSON_1]")], "c.pdf")
+    b = doc("Signed by Makedon Kirjakidjs.", [("PERSON", "Makedon Kirjakidjs", "[PERSON_1]")], "b.pdf")
+    a, c, b = align_batch([a, c, b])
+    return a, c, b
+
+
+def test_second_link_bridges_two_labels_of_other_documents():
+    """Имя написано по-разному в трех документах. Вторая кнопка «Объединить»
+    раньше ничего не меняла и не пропадала."""
+    a, c, b = three_variants()
+    assert [d.entities[0].placeholder for d in (a, c, b)] == ["[PERSON_1]", "[PERSON_2]", "[PERSON_3]"]
+    index = BatchIndex([a, c])
+    entity = b.entities[0]
+    assert [t.placeholder for t in index.similar(entity, b.source_text, b.entities)] == ["[PERSON_1]", "[PERSON_2]"]
+    for placeholder in ("[PERSON_1]", "[PERSON_2]"):
+        linked = link_to_batch(b.entities, b.entities[0].id, index.target(placeholder))
+        b.entities = reconcile_batch_placeholders(linked, b.source_text, [a, c])
+    assert index.similar(b.entities[0], b.source_text, b.entities) == []
+    assert index.merge_targets(b.entities[0], b.entities) == []
+    # Метка общая во всех трех документах при любом порядке согласования.
+    for order in ([a, c, b], [b, a, c], [c, b, a]):
+        assert len({d.entities[0].placeholder for d in align_batch(order)}) == 1
+
+
+def test_pairs_and_merge_of_labels_across_the_package():
+    a, c, b = three_variants()
+    other = doc("Witness: John Smith, Jane Smith.", [("PERSON", "John Smith", "[PERSON_1]"),
+                                                    ("PERSON", "Jane Smith", "[PERSON_2]")], "d.pdf")
+    docs = align_batch([a, c, b, other])
+    pairs = similar_target_pairs(batch_targets(docs))
+    assert {(x.placeholder, y.placeholder) for x, y in pairs} == {
+        ("[PERSON_1]", "[PERSON_2]"), ("[PERSON_1]", "[PERSON_3]"), ("[PERSON_2]", "[PERSON_3]"),
+    }
+    merged = merge_batch_labels(docs, "[PERSON_1]", "[PERSON_3]")
+    assert [d.entities[0].placeholder for d in merged[:3]] == ["[PERSON_1]", "[PERSON_2]", "[PERSON_1]"]
+    assert merged[0] is docs[0] and merged[3] is docs[3]
+    merged = merge_batch_labels(merged, "[PERSON_1]", "[PERSON_2]")
+    assert [d.entities[0].placeholder for d in merged[:3]] == ["[PERSON_1]"] * 3
+    assert similar_target_pairs(batch_targets(merged)) == []
+    # Обе метки в одном документе: сущности сливаются как при обычном объединении.
+    same = merge_batch_labels([other], "[PERSON_1]", "[PERSON_2]")
+    assert [(e.placeholder, len(e.positions)) for e in same[0].entities] == [("[PERSON_1]", 2)]
+    # Разные типы не объединяются.
+    assert merge_batch_labels(docs, "[PERSON_1]", "[COMPANY_1]") == list(docs)

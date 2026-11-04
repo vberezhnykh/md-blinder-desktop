@@ -1072,3 +1072,21 @@ def test_next_batch_document_with_pending_candidates(qtbot, window):
     assert window.session.doc.id == "d"
     window._update(lambda es: [replace(e, candidate=False, anonymize=True) for e in es], "Принять")
     assert window.page.side.review.next_in_batch is None
+
+
+def test_restore_dialog_returns_real_values(qtbot, window, tmp_path, monkeypatch):
+    from md_blinder.ui.restore_dialog import RestoreDialog
+
+    monkeypatch.setattr(RestoreDialog, "exec", lambda self: 0)
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    email = next(e for e in window.session.entities if e.type == "EMAIL")
+    window.open_restore()
+    dialog = window.restore_dialog
+    qtbot.addWidget(dialog)
+    dialog.source.setPlainText(f"Напишите на {email.placeholder}, а не на [EMAIL_99].")
+    assert dialog.output.toPlainText() == "Напишите на ivan@example.com, а не на [EMAIL_99]."
+    assert "[EMAIL_99]" in dialog.status.text()
+    dialog.copy()
+    from PySide6.QtWidgets import QApplication
+
+    assert QApplication.clipboard().text() == dialog.output.toPlainText()

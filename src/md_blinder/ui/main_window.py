@@ -59,6 +59,7 @@ from ..anonymize.batch import (
 )
 from ..anonymize.csv_export import csv_bytes
 from ..anonymize.file_name import anonymize_file_name
+from ..anonymize.restore import restore_map
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
 from ..anonymize.types import Entity
@@ -85,6 +86,7 @@ from .header import AppHeader
 from . import dialogs
 from .update_ui import UpdateBar, UpdateController, header_update_actions, settings_footer
 from .batch_overview import BatchOverview
+from .restore_dialog import RestoreDialog
 from .widgets import BATCH_PREFIX, Notice, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
@@ -377,6 +379,7 @@ class MainWindow(QMainWindow):
         p.status.export_md.connect(self.export_md)
         p.status.copy_text.connect(self.copy_text)
         p.status.export_csv.connect(self.export_csv)
+        p.status.restore_names.connect(self.open_restore)
         p.status.export_pdf.connect(self.export_pdf)
 
         p.editor.edited.connect(self.session.editor_changed)
@@ -983,6 +986,11 @@ class MainWindow(QMainWindow):
                 "Отдельный .md на каждый документ, подпапки и имена файлов как в исходной папке", "download",
             )
             menu.add_item(
+                "Вернуть настоящие данные…", self.open_restore,
+                "Ответ с метками любого документа пакета превращается в текст с настоящими значениями", "refresh",
+                sensitive=True,
+            )
+            menu.add_item(
                 "Таблица замен пакета (.csv)", self.export_batch_csv,
                 "Содержит исходные данные. Не передавайте ее вместе с обезличенным текстом.", "table", sensitive=True,
             )
@@ -1473,6 +1481,24 @@ class MainWindow(QMainWindow):
     def copy_text(self) -> None:
         QApplication.clipboard().setText(self.anonymized_text)
         self._notify_done("Текст скопирован.")
+
+    def open_restore(self) -> None:
+        """Обратная подстановка по таблице замен открытого документа или всего пакета."""
+        doc = self.session.doc
+        if doc is None:
+            return
+        members = self._collect_batch() if doc.batch_id else None
+        if members:
+            current = self.session.doc
+            docs = [current, *[d for d in members if d.id != current.id]]
+            scope = f"документов пакета ({len(docs)})"
+        else:
+            docs = [doc]
+            scope = "этого документа"
+        mapping = restore_map((d.source_text, d.entities) for d in docs)
+        dialog = RestoreDialog(self, mapping, scope, self._save_path)
+        self.restore_dialog = dialog
+        dialog.exec()
 
     def export_csv(self) -> None:
         doc = self.session.doc

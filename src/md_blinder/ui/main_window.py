@@ -57,8 +57,10 @@ from ..anonymize.batch import (
     swap_batch_labels,
 )
 from ..anonymize.csv_export import csv_bytes
+from ..anonymize.file_name import anonymize_file_name
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
+from ..anonymize.types import Entity
 from .. import jobs as jobs_module
 from ..cancel import CancelToken
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
@@ -1109,7 +1111,10 @@ class MainWindow(QMainWindow):
         target = self._pick_folder("Папка для Markdown-файлов пакета")
         if target is None:
             return
-        plan = export_plan([d.name for d in members])
+        # Метки пакета согласованы, поэтому имя клиента в папке «Клиент/2024» заменяется
+        # одной и той же меткой у всех документов, и структура папок сохраняется.
+        batch_entities = [] if self.convert_only else [e for d in members for e in d.entities]
+        plan = export_plan([anonymize_file_name(d.name, batch_entities) for d in members])
         existing = [rel for rel in plan if target.joinpath(*rel.parts).exists()]
         if existing:
             if not dialogs.ask(
@@ -1195,7 +1200,7 @@ class MainWindow(QMainWindow):
         unreviewed = len(pending_candidates(output))
         active = [e for e in output if e.anonymize]
         p.status.update_state(
-            unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md",
+            unreviewed, len(active), sum(len(e.positions) for e in active), f"{self._export_base(doc.name, output)}.md",
             pdf=doc.format == "pdf" and not self.convert_only,
         )
         # Без обезличивания проверка не нужна: остаются исходник, результат и выгрузка.
@@ -1344,6 +1349,10 @@ class MainWindow(QMainWindow):
             8000, action=("Показать", self.show_candidates), tone="warn",
         )
 
+    def _export_base(self, name: str, entities: list[Entity]) -> str:
+        """Имя выгрузки без расширения: найденные в имени исходника данные заменены метками."""
+        return base_name(name if self.convert_only else anonymize_file_name(name, entities))
+
     def _save_path(self, default_name: str, filter_: str) -> Optional[Path]:
         start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
         path, _ = QFileDialog.getSaveFileName(self, "Сохранить", str(Path(start_dir) / default_name), filter_)
@@ -1356,7 +1365,7 @@ class MainWindow(QMainWindow):
         doc = self.session.doc
         if doc is None:
             return
-        name = f"{base_name(doc.name)}.md"
+        name = f"{self._export_base(doc.name, self.session.entities)}.md"
         path = self._save_path(name, "Markdown (*.md)")
         if path is None:
             return
@@ -1422,7 +1431,7 @@ class MainWindow(QMainWindow):
                 return
             source = Path(picked)
             self._remember_pdf_source(doc.id, source, force_ocr)
-        target = self._save_path(f"{base_name(doc.name)} (обезличенный).pdf", "PDF (*.pdf)")
+        target = self._save_path(f"{self._export_base(doc.name, doc.entities)} (обезличенный).pdf", "PDF (*.pdf)")
         if target is None:
             return
         if target.resolve() == source.resolve():

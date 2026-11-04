@@ -52,6 +52,10 @@ class _Line:
     table_cols: int = 0
     x1: float = 0.0
     yBottom: float = 0.0
+    # Края видимых знаков строки без ведущих и хвостовых пробелов: в PDF из текстовых
+    # приложений EDGAR номер страницы центрирован пробелами внутри фрагмента.
+    glyph_x0: float = 0.0
+    glyph_x1: float = 0.0
 
 
 PAGE_NUMBER_RE = re.compile(r"^[\s\-–—]*(\d{1,4})[\s\-–—]*$")
@@ -126,10 +130,17 @@ def _build_lines(items: Sequence[PdfTextItem], body_size: float) -> list[_Line]:
         max_font = 0.0
         x0 = math.inf
         y_top = -math.inf
+        glyph_x0 = math.inf
+        glyph_x1 = -math.inf
         for i, item in enumerate(line_items):
             max_font = max(max_font, item.fontSize)
             x0 = min(x0, item.x)
             y_top = max(y_top, item.y)
+            stripped = item.str.strip()
+            if stripped:
+                char_w = item.w / len(item.str)
+                glyph_x0 = min(glyph_x0, item.x + (len(item.str) - len(item.str.lstrip())) * char_w)
+                glyph_x1 = max(glyph_x1, item.x + item.w - (len(item.str) - len(item.str.rstrip())) * char_w)
             if i == 0:
                 text = item.str
                 continue
@@ -143,7 +154,7 @@ def _build_lines(items: Sequence[PdfTextItem], body_size: float) -> list[_Line]:
         text = re.sub(r"\s+", " ", text).strip()
         if not text:
             continue
-        lines.append(_Line(text, max_font, x0, y_top))
+        lines.append(_Line(text, max_font, x0, y_top, glyph_x0=glyph_x0, glyph_x1=glyph_x1))
     return _attach_markers(lines, body_size)
 
 
@@ -165,7 +176,7 @@ def _attach_markers(lines: list[_Line], body_size: float) -> list[_Line]:
         ):
             result.append(_Line(
                 f"{line.text} {following.text}", max(line.fontSize, following.fontSize), line.x0,
-                max(line.yTop, following.yTop),
+                max(line.yTop, following.yTop), glyph_x0=line.glyph_x0, glyph_x1=following.glyph_x1,
             ))
             index += 2
             continue
@@ -225,6 +236,116 @@ def _strip_explicit_page_labels(pages_lines: list[list[T]], get_text: Callable[[
             lines.pop(0)
 
 
+def _page_number_chains(candidates: Sequence[tuple[int, int, int, bool]], min_length: int) -> set[int]:
+    """Номера, идущие подряд (N, N+1, …) в порядке чтения, — признак нумерации страниц.
+
+    candidates — (страница, ключ строки, число, без предела на лист). Возвращает ключи строк из цепочек
+    длиной от min_length. Одиночное число на краю или посреди страницы бывает суммой,
+    номером пункта или счета, а ряд 3, 4, 5 по разным страницам — нет."""
+    chains: list[list[tuple[int, int, int, bool]]] = []
+    for candidate in candidates:
+        value = candidate[2]
+        target = next((chain for chain in reversed(chains) if chain[-1][2] == value - 1), None)
+        if target is None:
+            chains.append([candidate])
+        else:
+            target.append(candidate)
+    found: set[int] = set()
+    for chain in chains:
+        pages = [c[0] for c in chain]
+        # Голый номер страницы — один-два на лист; заголовки «1», «2», «3» стоят чаще.
+        # «-5-» номером пункта не бывает, и в нем предела нет.
+        unlimited = all(c[3] for c in chain)
+        if len(chain) >= min_length and len(set(pages)) >= 2 and (unlimited or max(map(pages.count, pages)) <= 2):
+            found.update(c[1] for c in chain)
+    return found
+
+
+def _strip_edge_page_number_chain(pages_lines: list[list[T]], get_text: Callable[[T], str]) -> None:
+    """Голое число первой или последней строкой на соседних страницах, растущее на 1.
+
+    Ловит номера страниц, которые стоят сразу под текстом посреди листа (короткие
+    страницы EDGAR) или не совпадают с номером листа PDF."""
+    candidates: list[tuple[int, int, int]] = []
+    for page_index, lines in enumerate(pages_lines):
+        if len(lines) <= 1:
+            continue
+        for line_index in sorted({0, len(lines) - 1}):
+            match = PAGE_NUMBER_RE.match(get_text(lines[line_index]))
+            if match:
+                candidates.append((page_index, page_index * 100_000 + line_index, int(match.group(1))))
+    chains: list[list[tuple[int, int, int]]] = []
+    for candidate in candidates:
+        target = next((
+            chain for chain in reversed(chains)
+            if chain[-1][2] == candidate[2] - 1 and chain[-1][0] == candidate[0] - 1
+        ), None)
+        if target is None:
+            chains.append([candidate])
+        else:
+            target.append(candidate)
+    drop = {c[1] for chain in chains if len(chain) >= 2 for c in chain}
+    for page_index, lines in enumerate(pages_lines):
+        for line_index in range(len(lines) - 1, -1, -1):
+            if page_index * 100_000 + line_index in drop:
+                lines.pop(line_index)
+
+
+def _strip_centered_page_numbers(pages_lines: list[list[_Line]]) -> None:
+    """Номер страницы по центру текста посреди листа PDF.
+
+    В текстовых приложениях EDGAR («-5-») страницы исходного документа не совпадают
+    с листами PDF, и номер оказывается между абзацами, часто посреди предложения."""
+    text_lines = [
+        line for lines in pages_lines for line in lines
+        if not line.is_table and len(line.text) >= 30 and line.glyph_x1 > line.glyph_x0
+    ]
+    if len(text_lines) < 10:
+        return
+    lefts = sorted(line.glyph_x0 for line in text_lines)
+    rights = sorted(line.glyph_x1 for line in text_lines)
+    left = lefts[len(lefts) // 10]
+    right = rights[len(rights) * 9 // 10]
+    if right <= left:
+        return
+    center = (left + right) / 2
+    tolerance = 0.08 * (right - left)
+    candidates: list[tuple[int, int, int, bool]] = []
+    keys: dict[int, tuple[int, int]] = {}
+    for page_index, lines in enumerate(pages_lines):
+        for line_index, line in enumerate(lines):
+            if line.is_table or line.glyph_x1 <= line.glyph_x0:
+                continue
+            match = PAGE_NUMBER_RE.match(line.text)
+            if match and abs((line.glyph_x0 + line.glyph_x1) / 2 - center) <= tolerance:
+                key = len(keys)
+                keys[key] = (page_index, line_index)
+                candidates.append((page_index, key, int(match.group(1)), line.text != match.group(1)))
+    drop = {keys[key] for key in _page_number_chains(candidates, 3)}
+    if not drop:
+        return
+    # Рядом с номером страницы EDGAR ставит свой счетчик листов отдельной строкой («3»,
+    # затем «-2-»). Он тоже идет рядом N, N+1, … и без удаления прилипает к абзацу.
+    neighbours: list[tuple[int, int, int, bool]] = []
+    for page_index, lines in enumerate(pages_lines):
+        for line_index, line in enumerate(lines):
+            if (page_index, line_index) in drop or line.is_table or line.text.strip() != line.text:
+                continue
+            if not re.fullmatch(r"\d{1,4}", line.text):
+                continue
+            before = (page_index, line_index - 1) if line_index else (page_index - 1, -1)
+            after = (page_index, line_index + 1) if line_index + 1 < len(lines) else (page_index + 1, 0)
+            if before[1] == -1 and page_index:
+                before = (page_index - 1, len(pages_lines[page_index - 1]) - 1)
+            if before in drop or after in drop:
+                key = len(keys)
+                keys[key] = (page_index, line_index)
+                neighbours.append((page_index, key, int(line.text), True))
+    drop |= {keys[key] for key in _page_number_chains(neighbours, 3)}
+    for page_index, lines in enumerate(pages_lines):
+        lines[:] = [line for line_index, line in enumerate(lines) if (page_index, line_index) not in drop]
+
+
 def _strip_headers_footers(pages_lines: list[list[_Line]], layouts: Optional[Sequence[PdfPageLayout]]) -> None:
     for page_index, lines in enumerate(pages_lines):
         layout = layouts[page_index] if layouts and page_index < len(layouts) else None
@@ -243,16 +364,21 @@ def _strip_headers_footers(pages_lines: list[list[_Line]], layouts: Optional[Seq
                 and int(match.group(1)) <= layout.totalPages
             ):
                 lines.pop(index)
+    _strip_centered_page_numbers(pages_lines)
     if len(pages_lines) >= 3:
         _suppress_repeated_first_last(pages_lines, lambda line: line.text)
+    # После повторяющихся колонтитулов: номер страницы часто стоит над ними.
+    _strip_edge_page_number_chain(pages_lines, lambda line: "" if line.is_table else line.text)
     _strip_explicit_page_labels(pages_lines, lambda line: line.text)
 
 
 def strip_repeated_lines_and_page_numbers(pages: Sequence[Sequence[str]]) -> list[list[str]]:
-    """Вариант для построчного текста OCR, где нет координат. Числовые строки сохраняются."""
+    """Вариант для построчного текста OCR, где нет координат. Одиночные числовые строки сохраняются,
+    ряд номеров N, N+1, … на краях соседних страниц убирается."""
     working = [list(lines) for lines in pages]
     if len(working) >= 3:
         _suppress_repeated_first_last(working, lambda t: t)
+    _strip_edge_page_number_chain(working, lambda t: t)
     _strip_explicit_page_labels(working, lambda t: t)
     return working
 

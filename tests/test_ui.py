@@ -862,6 +862,9 @@ def test_history_groups_batch_documents_with_review_state(qtbot, window):
     names = [next(lb.text() for lb in r.findChildren(QLabel) if lb.objectName() == "historyName") for r in rows[1:]]
     assert names == ["Клиент/акт.docx", "Клиент/2024/счет.xlsx", "скан.pdf", "старый.docx"]
     assert [chips(r) for r in rows[1:]] == [["Не проверено: 2"], ["Проверено"], [], []]
+    # Документы пакета на цветной подложке, первый одиночный документ после пакета отделен линией цвета пакета.
+    assert [bool(r.property("grouped")) for r in rows[1:]] == [True, True, False, False]
+    assert [bool(r.property("afterBatch")) for r in rows[1:]] == [False, False, True, False]
 
     opened = []
     panel.show_batch.connect(opened.append)

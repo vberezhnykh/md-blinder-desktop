@@ -326,12 +326,18 @@ class HistoryPanel(QWidget):
             else:
                 ordered.append(doc)
         shown_groups: set[str] = set()
+        previous_grouped = False
         for doc in ordered[:len(docs) - hidden]:
             grouped = bool(doc.batch_id) and len(batches.get(doc.batch_id or "", [])) > 1
-            if grouped and doc.batch_id not in shown_groups:
+            new_group = grouped and doc.batch_id not in shown_groups
+            if new_group:
                 shown_groups.add(doc.batch_id)
                 self.rows.addWidget(self._group(batches[doc.batch_id]))
-            self.rows.addWidget(self._row(doc, current_id, grouped))
+            row = self._row(doc, current_id, grouped)
+            # Граница пакета: строка сразу после него отделена линией цвета пакета.
+            row.setProperty("afterBatch", previous_grouped and not grouped)
+            self.rows.addWidget(row)
+            previous_grouped = grouped
 
     def _group(self, members: list[HistoryDocMeta]) -> QFrame:
         group = QFrame()
@@ -340,16 +346,16 @@ class HistoryPanel(QWidget):
         line = QHBoxLayout(group)
         line.setContentsMargins(16, 0, 12, 0)
         line.setSpacing(10)
-        line.addWidget(icon_label("layers", t.INK_2, 16))
+        line.addWidget(icon_label("layers", t.ACCENT, 16))
         folder = _batch_folder([d.name for d in members])
         title = QLabel(f"Пакет «{folder}»" if folder else "Пакет документов")
-        title.setObjectName("strongSmall")
+        title.setObjectName("batchTitle")
         meta = QLabel(
             f"{plural(len(members), ('документ', 'документа', 'документов'))} · "
             f"{plural(sum(d.entity_count for d in members), ('находка', 'находки', 'находок'))} · "
             f"{_when(max(d.updated_at for d in members))}"
         )
-        meta.setObjectName("hint")
+        meta.setObjectName("batchMeta")
         line.addWidget(title)
         line.addWidget(meta)
         line.addStretch(1)
@@ -362,6 +368,7 @@ class HistoryPanel(QWidget):
     def _row(self, doc: HistoryDocMeta, current_id: Optional[str], grouped: bool) -> QFrame:
         row = QFrame()
         row.setObjectName("historyRow")
+        row.setProperty("grouped", grouped)
         row.setMinimumHeight(52)
         line = QHBoxLayout(row)
         line.setContentsMargins(42 if grouped else 16, 8, 12, 8)

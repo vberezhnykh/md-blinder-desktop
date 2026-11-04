@@ -903,6 +903,20 @@ def test_long_file_name_does_not_push_side_panel_off_screen(qtbot, window, tmp_p
         qtbot.waitUntil(lambda: side.mapTo(window, side.rect().topRight()).x() < width)
 
 
+def test_view_switch_stays_inside_pane_head(qtbot, window, tmp_path):
+    """Переключатель «Исходник / Результат» не растягивается на весь заголовок колонки,
+    иначе его подложка заходит на рамку карточки."""
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    window.page.side_by_side_box.setChecked(False)
+    box = window.page.view_box
+    qtbot.waitUntil(box.isVisible)
+    head = box.parentWidget()
+    assert head.objectName() == "paneHead"
+    geo = box.geometry()
+    assert geo.top() >= 4 and geo.bottom() <= head.height() - 5
+    assert geo.left() >= 8
+
+
 def test_overview_label_click_opens_editor(qtbot, window, tmp_path):
     from md_blinder.ui.widgets import LabelEditor
 

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..anonymize.apply import candidate_reason, entity_current_value, pending_candidates
+from ..text_utils import plural
 from ..anonymize.batch import BatchIndex, BatchTarget, similar_in_document
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
@@ -160,11 +161,15 @@ class ReviewPanel(QWidget):
     restore = Signal(str)
     change_type = Signal(str, str)
     export = Signal()
+    next_doc = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
+        # Следующий документ пакета, где остались кандидаты: имя, число таких документов
+        # и кандидатов в них. Задает MainWindow перед render.
+        self.next_in_batch: Optional[tuple[str, int, int]] = None
         self.area, self.layout_ = _scroll_area()
         self.layout_.setSpacing(16)
         outer.addWidget(self.area)
@@ -206,8 +211,26 @@ class ReviewPanel(QWidget):
             box.addLayout(title_row)
             note = QLabel("В результате не осталось непроверенных фрагментов.")
             note.setObjectName("secondary")
+            note.setWordWrap(True)
             box.addWidget(note)
-            export = make_button("Экспортировать .md", kind="primary", icon_name="download")
+            if self.next_in_batch is not None:
+                name, docs, candidates = self.next_in_batch
+                note.setText(
+                    "В этом документе все проверено. В пакете еще "
+                    f"{plural(docs, ('документ', 'документа', 'документов'))} с непроверенными кандидатами "
+                    f"({candidates})."
+                )
+                next_button = make_button("Следующий документ", kind="primary", icon_name="chevron-right")
+                next_button.setToolTip(name)
+                next_button.clicked.connect(self.next_doc)
+                next_name = QLabel(_truncate(name.rsplit("/", 1)[-1], 40))
+                next_name.setObjectName("muted")
+                next_name.setToolTip(name)
+                box.addWidget(next_button, 0, Qt.AlignmentFlag.AlignLeft)
+                box.addWidget(next_name)
+            export = make_button(
+                "Экспортировать .md", kind="" if self.next_in_batch is not None else "primary", icon_name="download",
+            )
             export.clicked.connect(self.export)
             box.addWidget(export, 0, Qt.AlignmentFlag.AlignLeft)
             self.layout_.addWidget(done)

@@ -1043,3 +1043,32 @@ def test_search_in_text_replaces_all_matches(qtbot, window, tmp_path):
     assert "Иван Петров" in window.anonymized_text
     bar.close_bar()
     assert not bar.isVisible()
+
+
+def test_next_batch_document_with_pending_candidates(qtbot, window):
+    from dataclasses import replace
+
+    from md_blinder.anonymize.types import Entity, Position
+    from md_blinder.storage.history import HistoryDoc
+
+    def doc(doc_id, created, candidate):
+        e = Entity(id=f"e-{doc_id}", type="PERSON", value="Иван", placeholder="[PERSON_1]",
+                   positions=[Position(0, 4)], anonymize=not candidate, candidate=candidate)
+        return HistoryDoc(doc_id, f"Клиент/{doc_id}.docx", "docx", created, 10**13, "Иван подписал.", [e], "b")
+
+    for d in (doc("a", 1, False), doc("b", 2, False), doc("c", 3, True), doc("d", 4, True)):
+        window.store.put_doc(d)
+    window.open_doc("a")
+    review = window.page.side.review
+    assert review.next_in_batch == ("Клиент/c.docx", 2, 2)
+    buttons = [b for b in review.findChildren(QPushButton) if b.text() == "Следующий документ"]
+    assert buttons and buttons[0].isVisibleTo(review)
+    buttons[0].click()
+    assert window.session.doc.id == "c"
+    # В открытом документе еще есть кандидат: кнопка не нужна, пока он не разобран.
+    window._update(lambda es: [replace(e, candidate=False, anonymize=True) for e in es], "Принять")
+    assert window.page.side.review.next_in_batch == ("Клиент/d.docx", 1, 1)
+    window.open_next_pending_doc()
+    assert window.session.doc.id == "d"
+    window._update(lambda es: [replace(e, candidate=False, anonymize=True) for e in es], "Принять")
+    assert window.page.side.review.next_in_batch is None

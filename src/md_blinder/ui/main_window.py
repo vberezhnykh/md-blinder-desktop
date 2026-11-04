@@ -399,6 +399,7 @@ class MainWindow(QMainWindow):
         review.restore.connect(lambda i: self._update(lambda es: restore_candidate(es, i), "Вернуть кандидата"))
         review.change_type.connect(self._change_type)
         review.export.connect(self.export_md)
+        review.next_doc.connect(self.open_next_pending_doc)
         found.set_anonymize.connect(self._set_anonymize)
         found.select.connect(self.select_entity)
         found.change_type.connect(self._change_type)
@@ -909,6 +910,28 @@ class MainWindow(QMainWindow):
             return []
         return sorted([*self.batch_others, doc], key=lambda d: (d.created_at, d.id))
 
+    def _pending_batch_docs(self) -> list[HistoryDoc]:
+        """Другие документы пакета с непроверенными кандидатами, начиная со следующего
+        за открытым по порядку загрузки."""
+        doc = self.session.doc
+        docs = self._batch_docs()
+        if doc is None or not docs:
+            return []
+        index = next(i for i, d in enumerate(docs) if d.id == doc.id)
+        ordered = docs[index + 1:] + docs[:index]
+        return [d for d in ordered if pending_candidates(d.entities)]
+
+    def _next_pending_doc(self) -> Optional[tuple[str, int, int]]:
+        pending = self._pending_batch_docs()
+        if not pending:
+            return None
+        return pending[0].name, len(pending), sum(len(pending_candidates(d.entities)) for d in pending)
+
+    def open_next_pending_doc(self) -> None:
+        pending = self._pending_batch_docs()
+        if pending:
+            self.open_doc(pending[0].id)
+
     def _update_batch_button(self) -> None:
         docs = self._batch_docs()
         self.header.set_batch_size(len(docs))
@@ -1223,6 +1246,7 @@ class MainWindow(QMainWindow):
         anonymized = build_anonymized_text_with_map(text, output)
         self.anonymized_text = anonymized.text
         p.preview.render(anonymized.text, text, anonymized.segments, output)
+        p.side.review.next_in_batch = None if self.convert_only else self._next_pending_doc()
         p.side.render(entities, text, None if self.convert_only else self.batch_index)
         p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
         unreviewed = len(pending_candidates(output))

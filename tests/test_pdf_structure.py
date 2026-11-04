@@ -2,6 +2,8 @@
 
 import re
 
+import pytest
+
 from md_blinder.convert.pdf_structure import (
     PdfPageLayout,
     PdfTextItem,
@@ -276,3 +278,81 @@ def test_separate_tables_stay_separate():
     shifted = items_to_markdown([[body, _table(first, 0, 380, 340), _table(second, 200, 338, 300, w=200)]])
     for md in (far, shifted):
         assert md.count("| --- | --- |") == 2
+
+
+def _body_lines(page, count, y_top=700, x=50, w=450):
+    return [
+        item(str=f"Sample body line {page}.{n} of the synthetic contract text with enough words", x=x,
+             y=y_top - n * 12, w=w, hasEOL=True)
+        for n in range(count)
+    ]
+
+
+@pytest.mark.parametrize("number_x", [296, 50])
+def test_page_number_under_short_page_text_removed(number_x):
+    # Страницы EDGAR: текст кончается посреди листа, номер страницы сразу под ним.
+    pages = []
+    for n in (1, 2, 3):
+        lines = _body_lines(n, 5)
+        if n == 1:
+            lines[-1].str = "the obligations of the Parties continue and"
+        pages.append(lines + [item(str=str(n), x=number_x, y=600, w=5, hasEOL=True)])
+    layouts = [PdfPageLayout(bottom=0, height=800, pageNumber=n, totalPages=3) for n in (1, 2, 3)]
+    pages[1][0].str = "remain in force for the whole term of the Agreement."
+    blocks = items_to_markdown(pages, layouts).split("\n\n")
+    assert not any(re.fullmatch(r"\d+", b) for b in blocks)
+    assert any("continue and remain in force" in b for b in blocks)
+
+
+def test_centered_dashed_page_numbers_mid_page_removed():
+    # Текстовое приложение EDGAR: моноширинный текст, «-N-» центрирован пробелами, рядом
+    # счетчик листов отдельной строкой. Страницы исходника не совпадают с листами PDF.
+    char = 4.3
+    pages = []
+    number = 1
+    for page in range(3):
+        items = []
+        y = 760
+        for part in range(3):
+            items += [item(str=f"Sample monospaced line {page}.{part}.{n} of the exhibit text and more words here",
+                           x=13, y=y - n * 8, w=80 * char, hasEOL=True) for n in range(4)]
+            y -= 40
+            if part < 2 or page < 2:
+                items.append(item(str="   " + str(number + 1), x=13, y=y + 6, w=4 * char, hasEOL=True))
+                label = f"-{number}-"
+                items.append(item(str=" " * 38 + label, x=13, y=y - 2, w=(38 + len(label)) * char, hasEOL=True))
+                number += 1
+            y -= 20
+        pages.append(items)
+    layouts = [PdfPageLayout(bottom=0, height=800, pageNumber=n + 1, totalPages=3) for n in range(3)]
+    blocks = items_to_markdown(pages, layouts).split("\n\n")
+    assert not any(re.fullmatch(r"-?\d+-?", b) for b in blocks)
+    assert not any(re.search(r" \d+$", b) for b in blocks)
+
+
+def test_centered_heading_numbers_kept():
+    # Номера разделов по центру, по три на лист — не нумерация страниц.
+    pages = []
+    number = 1
+    for page in range(3):
+        items = []
+        y = 700
+        for _ in range(3):
+            items.append(item(str=str(number), x=270, y=y, w=6, hasEOL=True))
+            items += _body_lines(page, 4, y_top=y - 20)
+            y -= 90
+            number += 1
+        pages.append(items)
+    layouts = [PdfPageLayout(bottom=0, height=800, pageNumber=n + 1, totalPages=3) for n in range(3)]
+    blocks = items_to_markdown(pages, layouts).split("\n\n")
+    assert [b for b in blocks if re.fullmatch(r"\d+", b)] == [str(n) for n in range(1, 10)]
+
+
+def test_ocr_page_number_above_repeated_footer_removed():
+    pages = [
+        [f"Body paragraph number {n} for the synthetic sample text.", str(n), "Source: sample filing footer"]
+        for n in (1, 2, 3)
+    ]
+    assert strip_repeated_lines_and_page_numbers(pages) == [
+        [f"Body paragraph number {n} for the synthetic sample text."] for n in (1, 2, 3)
+    ]

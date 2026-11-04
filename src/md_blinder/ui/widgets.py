@@ -95,6 +95,13 @@ class ElidedLabel(QLabel):
         self._mode = mode
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
 
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Минимум QLabel — вся строка целиком. С политикой Preferred (подпись занимает свою
+        # ширину, пока есть место) длинное имя файла раздвигало бы окно шире экрана.
+        hint = super().minimumSizeHint()
+        margins = self.contentsMargins()
+        return QSize(self.fontMetrics().horizontalAdvance("…") + margins.left() + margins.right(), hint.height())
+
     def elided_text(self) -> str:
         return self.fontMetrics().elidedText(self.text(), self._mode, self.contentsRect().width())
 
@@ -583,8 +590,9 @@ class StatusStrip(QWidget):
         self.ready.setObjectName("chipReady")
         info.addWidget(self.pending)
         info.addWidget(self.ready)
-        self.summary = QLabel()
+        self.summary = ElidedLabel()
         self.summary.setObjectName("muted")
+        self.summary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         info.addWidget(self.summary)
         info.addStretch(1)
         layout.addLayout(info, 1)
@@ -636,6 +644,7 @@ class StatusStrip(QWidget):
         self.ready.setVisible(ready)
         self.pending.setText(f"Не проверено: {plural(unreviewed, ('кандидат', 'кандидата', 'кандидатов'))}")
         self.summary.setText(replaced_summary(values, places))
+        self.summary.setToolTip(self.summary.text())
         self._export_name = export_name
         self._pdf = pdf
 

@@ -881,6 +881,28 @@ def test_header_switches_between_start_and_document(qtbot, window, tmp_path):
     assert header.start_actions.isVisible() and not header.crumbs.isVisible()
 
 
+def test_long_file_name_does_not_push_side_panel_off_screen(qtbot, window, tmp_path):
+    """Развернутое окно не растет под содержимое: если минимум раскладки шире окна,
+    правая панель уходит за край. Минимум не должен зависеть от длины имени файла
+    и подсказок, а в режиме «Результат рядом» должен помещаться в WIDE_WINDOW,
+    иначе окно нельзя сузить до одной колонки."""
+    from md_blinder.ui.main_window import WIDE_WINDOW
+
+    name = "Supplementary Agreement 1 to the Consultancy Agreement dd 03.09.2026 " * 3 + "— копия.docx"
+    window.process_file(make_docx(tmp_path / name, para(TEXT)))
+    qtbot.waitUntil(lambda: window.job is None, timeout=20000)
+    assert window.header.file_label.text() == name
+    window.page.side_by_side_box.setChecked(True)
+    for width, side_by_side in ((WIDE_WINDOW, True), (WIDE_WINDOW - 1, False)):
+        window.resize(width, 900)
+        qtbot.waitUntil(lambda: window.width() == width)
+        assert window.page.result_pane.isVisible() is side_by_side
+        assert window.minimumSizeHint().width() <= width
+        side = window.page.side
+        # Раскладка пересчитывается после события изменения размера.
+        qtbot.waitUntil(lambda: side.mapTo(window, side.rect().topRight()).x() < width)
+
+
 def test_overview_label_click_opens_editor(qtbot, window, tmp_path):
     from md_blinder.ui.widgets import LabelEditor
 

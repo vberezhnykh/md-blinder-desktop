@@ -1161,6 +1161,7 @@ class MainWindow(QMainWindow):
             p.editor.set_content("", [])
             return
         p.file_label.setText(doc.name)
+        p.file_label.setToolTip(doc.name)
         p.editor.set_content(doc.source_text, doc.entities)
         self._update_batch_button()
         self._render_derived()

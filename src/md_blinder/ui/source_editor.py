@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QSizePolicy,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -42,7 +43,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from ..editing import TextChange, active_span_at, drag_span, hovered_entity_at, replace_position
 from ..storage.offsets import OffsetMap
 from . import theme as t
-from .widgets import BATCH_PREFIX, Pane, Select, make_button
+from .widgets import BATCH_PREFIX, ElidedLabel, Pane, Select, make_button
 
 _TABLE_LINE = re.compile(r"^\s*\|")
 LINE_HEIGHT = 130  # процентов от высоты строки шрифта: так выходит line-height 1.7 из веб-версии
@@ -651,8 +652,10 @@ class EditorPane(Pane):
 
     def __init__(self) -> None:
         super().__init__("Исходник")
-        hint = QLabel("Выделите текст, чтобы добавить его в замены")
+        hint = ElidedLabel("Выделите текст, чтобы добавить его в замены")
         hint.setObjectName("hint")
+        hint.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        hint.setToolTip(hint.text())
         self.add_head_widget(hint)
         self.editor = SourceEditor()
         self.body.addWidget(self.editor)

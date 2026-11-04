@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
@@ -180,6 +181,8 @@ class DocumentPage(QWidget):
         # видимой колонки: _apply_layout в MainWindow переносит их туда.
         self.view_box = QFrame()
         self.view_box.setObjectName("segmented")
+        # Высота по кнопкам: иначе рамка растягивается на весь заголовок колонки и упирается в ее край.
+        self.view_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         view_row = QHBoxLayout(self.view_box)
         view_row.setContentsMargins(3, 3, 3, 3)
         view_row.setSpacing(2)

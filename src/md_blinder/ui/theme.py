@@ -33,6 +33,9 @@ ACCENT_WASH = "#ecebf6"
 ACCENT_LINE = "#c9c8ea"
 ACCENT_INK = "#ffffff"
 INFO_INK = "#2e3170"  # текст на плашке-сведении
+BATCH_WASH = "#f5f5fb"  # фон документов пакета в истории
+BATCH_LINE = "#dddcf0"  # разделитель документов внутри пакета
+BATCH_META = "#555a85"  # подпись в заголовке пакета (контраст на ACCENT_WASH 5,6)
 # «Внимание» и «не проверено» — один оранжевый тон.
 WARN = "#8a4b06"
 WARN_WASH = "#fff1d6"
@@ -331,7 +334,12 @@ QFrame#upload[dragging="true"] {{ background: {ACCENT_WASH}; }}
 QLabel#dropIcon {{ background: {ACCENT_WASH}; border-radius: 20px; }}
 QFrame#historyRow {{ border: none; border-top: 1px solid {LINE}; background: transparent; }}
 QFrame#historyRow:hover {{ background: {SURFACE_2}; }}
-QFrame#historyGroup {{ border: none; border-top: 1px solid {LINE}; background: {SURFACE_2}; }}
+QFrame#historyRow[grouped="true"] {{ border-top-color: {BATCH_LINE}; background: {BATCH_WASH}; }}
+QFrame#historyRow[grouped="true"]:hover {{ background: {ACCENT_WASH}; }}
+QFrame#historyRow[afterBatch="true"] {{ border-top-color: {ACCENT_LINE}; }}
+QFrame#historyGroup {{ border: none; border-top: 1px solid {ACCENT_LINE}; background: {ACCENT_WASH}; }}
+QLabel#batchTitle {{ color: {INFO_INK}; font-size: {FS_SMALL}px; font-weight: 600; }}
+QLabel#batchMeta {{ color: {BATCH_META}; font-size: {FS_CAPTION}px; }}
 QFrame#listFooter {{ border: none; border-top: 1px solid {LINE}; background: transparent; }}
 QFrame#progressCard {{ background: {SURFACE}; border: 1px solid {LINE}; border-radius: {RADIUS}px; }}
 QProgressBar {{ background: {SUNK}; border: none; border-radius: 2px; max-height: 4px; min-height: 4px; }}

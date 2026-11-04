@@ -22,10 +22,49 @@ permissions:
 # шли всегда. Остальные тесты используют синтетические документы.
 
 jobs:
-  test:
-    # contents: write нужен только шагу публикации релиза (см. ниже).
+  # Пуш в main после слияния PR. Если тот же код (то же дерево файлов) уже прошел
+  # все проверки в PR, а сборка из PR прошла --self-check, повторять тесты и сборку
+  # не нужно: релиз публикуется из той же сборки через минуту после слияния, а не
+  # через пять. Дерево совпадает, когда PR сливается поверх того main, на котором
+  # шли его проверки. Иначе (main ушел вперед, PR из форка, прогон PR не зеленый)
+  # все проверки и сборка идут заново.
+  prebuilt:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
-      contents: write
+      actions: read
+      contents: read
+    outputs:
+      tree: ${{ steps.find.outputs.tree }}
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Find a checked build of the same tree
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          tree=$(gh api "repos/$REPO/git/commits/$GITHUB_SHA" --jq .tree.sha)
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+          runs=$(gh api "repos/$REPO/actions/artifacts?name=md-blinder-windows-$tree&per_page=20" \
+            --jq '.artifacts[] | select(.expired | not) | .workflow_run.id' || true)
+          for id in $runs; do
+            # Только завершенный зеленый прогон этого workflow из ветки этого же репозитория.
+            ok=$(gh api "repos/$REPO/actions/runs/$id" \
+              --jq "select(.conclusion == \"success\" and .path == \".github/workflows/ci.yml\"
+                and .head_repository.full_name == \"$REPO\") | .id" || true)
+            if [ -n "$ok" ]; then
+              echo "Сборка дерева $tree уже проверена в прогоне $id"
+              echo "run_id=$id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "Проверенной сборки дерева $tree нет, проверки и сборка пойдут заново"
+
+  test:
+    needs: prebuilt
+    if: ${{ !cancelled() && needs.prebuilt.outputs.run_id == '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -79,12 +118,50 @@ jobs:
       - name: Tests
         run: python -m pytest -q
 
+  # Сборка идет параллельно с тестами, а не после них: так прогон короче на пару
+  # минут. Релиз все равно публикуется только после зеленых тестов (needs ниже).
+  build:
+    needs: prebuilt
+    if: ${{ !cancelled() && needs.prebuilt.outputs.run_id == '' }}
+    runs-on: windows-latest
+    timeout-minutes: 25
+    outputs:
+      tree: ${{ steps.tree.outputs.tree }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: "1"
+      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - uses: actions/cache@v4
+        with:
+          path: .uv-cache
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: uv-${{ runner.os }}-
+
+      - name: Install
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check -q uv==0.11.32
+          uv export --frozen --extra dev --no-emit-project --no-hashes -o requirements-ci.txt
+          uv pip install --system -r requirements-ci.txt
+          uv pip install --system --no-deps -e .
+
+      # Модели OCR нужны проверке собранной программы.
+      - name: OCR models
+        run: python scripts/fetch_ocr_models.py
+
       - name: Build
-        if: runner.os == 'Windows'
         run: pyinstaller --noconfirm --clean md_blinder.spec
 
       - name: Self-check of the built app
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $p = Start-Process -FilePath "dist\MD Blinder\MD Blinder.exe" -ArgumentList "--self-check" -Wait -PassThru
@@ -93,33 +170,79 @@ jobs:
           if ($p.ExitCode -ne 0) { exit 1 }
           if (-not ($report -match "OCR \(Indra\): OK")) { Write-Host "OCR не проверен"; exit 1 }
 
+      # В имени артефакта хеш дерева файлов: по нему прогон main находит сборку,
+      # уже проверенную в PR (см. prebuilt).
+      - name: Tree hash
+        id: tree
+        shell: bash
+        run: echo "tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
       - name: Upload build
-        if: runner.os == 'Windows'
         uses: actions/upload-artifact@v6
         with:
-          name: md-blinder-windows
+          name: md-blinder-windows-${{ steps.tree.outputs.tree }}
           path: dist/MD Blinder
           retention-days: 14
 
-      # Новая версия в md_blinder/__init__.py выпускается автоматически при пуше в main: если
-      # релиза desktop-v<версия> еще нет, он создается из этого коммита. Описание
-      # релиза берется из раздела версии в CHANGELOG.md (release_notes.py).
-      # Настольная программа находит его через API релизов и предлагает обновиться.
-      - name: Publish release for a new version
-        if: runner.os == 'Windows' && github.event_name == 'push' && github.ref == 'refs/heads/main'
-        shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
+  # Новая версия в md_blinder/__init__.py выпускается автоматически при пуше в main: если
+  # релиза desktop-v<версия> еще нет, он создается из этого коммита. Описание
+  # релиза берется из раздела версии в CHANGELOG.md (release_notes.py).
+  # Настольная программа находит его через API релизов и предлагает обновиться.
+  # Запуск вручную (workflow_dispatch) проходит все шаги, кроме публикации.
+  release:
+    needs: [prebuilt, test, build]
+    if: >-
+      ${{ !cancelled() && github.event_name != 'pull_request' &&
+      (needs.prebuilt.outputs.run_id != '' || (needs.test.result == 'success' && needs.build.result == 'success')) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+      PUBLISH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+      # Хеш дерева: из проверенного прогона PR или из сборки в этом прогоне.
+      TREE: ${{ needs.prebuilt.outputs.run_id && needs.prebuilt.outputs.tree || needs.build.outputs.tree }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Version
+        id: version
         run: |
-          $version = python -c "import md_blinder; print(md_blinder.__version__)"
-          $tag = "desktop-v$version"
-          gh release view $tag --repo "${{ github.repository }}" *> $null
-          if ($LASTEXITCODE -eq 0) { Write-Host "Релиз $tag уже есть"; exit 0 }
-          Compress-Archive -Path "dist\MD Blinder\*" -DestinationPath "md-blinder-windows.zip"
-          $hash = (Get-FileHash "md-blinder-windows.zip" -Algorithm SHA256).Hash.ToLower()
-          Set-Content -Path "md-blinder-windows.zip.sha256" -Value "$hash  md-blinder-windows.zip" -NoNewline -Encoding ascii
-          python release_notes.py $version release-notes.md
-          if ($LASTEXITCODE -ne 0) { exit 1 }
-          gh release create $tag md-blinder-windows.zip md-blinder-windows.zip.sha256 `
-            --repo "${{ github.repository }}" --target "${{ github.sha }}" `
-            --title "MD Blinder Desktop $version" --notes-file release-notes.md
+          version=$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' src/md_blinder/__init__.py)
+          [ -n "$version" ] || { echo "Не найдена версия"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if gh release view "desktop-v$version" --repo "$REPO" > /dev/null 2>&1; then
+            echo "Релиз desktop-v$version уже есть"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v7
+        if: steps.version.outputs.exists != 'true' || env.PUBLISH != 'true'
+        with:
+          name: md-blinder-windows-${{ env.TREE }}
+          path: app
+          run-id: ${{ needs.prebuilt.outputs.run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Publish release for a new version
+        if: steps.version.outputs.exists != 'true' || env.PUBLISH != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          test -f "app/MD Blinder.exe" && test -d app/_internal
+          (cd app && zip -qr ../md-blinder-windows.zip .)
+          hash=$(sha256sum md-blinder-windows.zip | cut -d' ' -f1)
+          printf '%s  md-blinder-windows.zip' "$hash" > md-blinder-windows.zip.sha256
+          python3 release_notes.py "$VERSION" release-notes.md
+          ls -l md-blinder-windows.zip*
+          if [ "$PUBLISH" != "true" ]; then
+            echo "Не main: релиз desktop-v$VERSION не публикуется"; cat release-notes.md; exit 0
+          fi
+          gh release create "desktop-v$VERSION" md-blinder-windows.zip md-blinder-windows.zip.sha256 \
+            --repo "$REPO" --target "$GITHUB_SHA" \
+            --title "MD Blinder Desktop $VERSION" --notes-file release-notes.md

@@ -1491,7 +1491,7 @@ class MainWindow(QMainWindow):
         if members:
             current = self.session.doc
             docs = [current, *[d for d in members if d.id != current.id]]
-            scope = f"документов пакета ({len(docs)})"
+            scope = f"пакета ({plural(len(docs), ('документ', 'документа', 'документов'))})"
         else:
             docs = [doc]
             scope = "этого документа"

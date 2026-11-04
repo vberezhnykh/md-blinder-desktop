@@ -432,10 +432,15 @@ class SourceEditor(QTextEdit):
                 sel.cursor = self._cursor_for(p.start, p.end)
                 sel.format = fmt
                 selections.append(sel)
+        # Совпадения поиска — в цвете акцента с подчеркиванием, чтобы не путать их с заливкой замен;
+        # текущее совпадение выделено, как выделенный текст.
         for i, m in enumerate(self._search):
             sel = QTextEdit.ExtraSelection()
             sel.cursor = self._cursor_for(m.start, m.end)
-            sel.format.setBackground(QColor(t.WARN_LINE if i == self._search_current else t.MARK))
+            current = i == self._search_current
+            sel.format.setBackground(t.mix(t.ACCENT, t.SURFACE, 0.32 if current else 0.14))
+            sel.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+            sel.format.setUnderlineColor(QColor(t.ACCENT))
             selections.append(sel)
         self.setExtraSelections(selections)
         self.viewport().update()
@@ -546,7 +551,8 @@ class SourceEditor(QTextEdit):
         self._render_highlights()
         if reveal and current is not None and 0 <= current < len(self._search):
             m = self._search[current]
-            self.reveal(m.start, m.end)
+            self.popup.hide()
+            self.scroll_to(m.start)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         # Встроенная отмена выключена; Ctrl+Z/Ctrl+Y ведут в общий стек сессии.

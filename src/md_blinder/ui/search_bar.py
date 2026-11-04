@@ -12,7 +12,7 @@ from typing import Optional
 import regex
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QKeyEvent
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QLineEdit, QVBoxLayout
 
 from ..anonymize.image_safety import mask_images_for_detection
 from ..anonymize.types import ALL_ENTITY_TYPES, Position
@@ -65,32 +65,41 @@ class SearchBar(QFrame):
     def __init__(self) -> None:
         super().__init__()
         self.setObjectName("searchBar")
-        row = QHBoxLayout(self)
-        row.setContentsMargins(12, 8, 12, 8)
-        row.setSpacing(8)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(12, 8, 12, 8)
+        column.setSpacing(6)
+        row = QHBoxLayout()
+        row.setSpacing(6)
         self.query = _QueryEdit()
+        self.query.setObjectName("search")
         self.query.setPlaceholderText("Найти в тексте")
         self.query.addAction(icon("search", t.INK_3, 16), QLineEdit.ActionPosition.LeadingPosition)
         self.query.setClearButtonEnabled(True)
         self.count = QLabel()
         self.count.setObjectName("muted")
-        self.count.setMinimumWidth(64)
         self.prev_button = make_button(kind="iconButton", small=True, icon_name="chevron-up", tooltip="Предыдущее (Shift+Enter)")
         self.next_button = make_button(kind="iconButton", small=True, icon_name="chevron-down", tooltip="Следующее (Enter)")
-        self.type_box = Select()
-        self.type_box.setObjectName("compact")
-        self.type_box.addItems(list(ALL_ENTITY_TYPES))
-        self.type_box.setToolTip("Тип замены для найденного")
-        self.replace_button = make_button("Заменить все", kind="primary", small=True)
-        self.replace_button.setToolTip("Добавить все найденные совпадения в замены выбранного типа")
         close = make_button(kind="iconButton", small=True, icon_name="x", tooltip="Закрыть поиск (Esc)")
         row.addWidget(self.query, 1)
         row.addWidget(self.count)
         row.addWidget(self.prev_button)
         row.addWidget(self.next_button)
-        row.addWidget(self.type_box)
-        row.addWidget(self.replace_button)
         row.addWidget(close)
+        column.addLayout(row)
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        caption = QLabel("Заменить все найденное меткой типа")
+        caption.setObjectName("hint")
+        self.type_box = Select()
+        self.type_box.setObjectName("compact")
+        self.type_box.addItems(list(ALL_ENTITY_TYPES))
+        self.replace_button = make_button("Заменить все", kind="primary", small=True)
+        self.replace_button.setToolTip("Добавить все найденные места в замены выбранного типа")
+        actions.addWidget(caption)
+        actions.addWidget(self.type_box)
+        actions.addWidget(self.replace_button)
+        actions.addStretch(1)
+        column.addLayout(actions)
         self._text = ""
         self.matches: list[Position] = []
         self.current: Optional[int] = None

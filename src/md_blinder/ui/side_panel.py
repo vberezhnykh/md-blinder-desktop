@@ -209,17 +209,19 @@ class ReviewPanel(QWidget):
             title_row.addWidget(title)
             title_row.addStretch(1)
             box.addLayout(title_row)
-            note = QLabel("В результате не осталось непроверенных фрагментов.")
+            if self.next_in_batch is None:
+                note = QLabel("В результате не осталось непроверенных фрагментов.")
+            else:
+                name, docs, candidates = self.next_in_batch
+                note = QLabel(
+                    "В этом документе все проверено. В других документах пакета ждут проверки: "
+                    f"{plural(candidates, ('кандидат', 'кандидата', 'кандидатов'))} "
+                    f"в {plural(docs, ('документе', 'документах', 'документах'))}."
+                )
             note.setObjectName("secondary")
-            note.setWordWrap(True)
+            _fit_width(note)
             box.addWidget(note)
             if self.next_in_batch is not None:
-                name, docs, candidates = self.next_in_batch
-                note.setText(
-                    "В этом документе все проверено. В пакете еще "
-                    f"{plural(docs, ('документ', 'документа', 'документов'))} с непроверенными кандидатами "
-                    f"({candidates})."
-                )
                 next_button = make_button("Следующий документ", kind="primary", icon_name="chevron-right")
                 next_button.setToolTip(name)
                 next_button.clicked.connect(self.next_doc)
@@ -952,6 +954,9 @@ class SidePanel(QFrame):
         self.tab_found.set_badge(str(confirmed), "badge")
         self.review.render(entities, text)
         self.found.render(entities, text, batch)
-        target = self.user_tab if self.user_tab is not None else (0 if pending else 1)
+        # В пакете вкладка проверки остается открытой, пока в других документах есть кандидаты:
+        # на ней кнопка перехода к следующему такому документу.
+        review_first = pending or self.review.next_in_batch is not None
+        target = self.user_tab if self.user_tab is not None else (0 if review_first else 1)
         if self.currentIndex() != target:
             self.setCurrentIndex(target)

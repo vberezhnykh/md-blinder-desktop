@@ -68,8 +68,8 @@ class RestoreDialog(QDialog):
         title = QLabel("Вернуть настоящие данные")
         title.setObjectName("dialogTitle")
         summary = QLabel(
-            f"Вставьте ответ, в котором остались метки вроде [PERSON_1]. Метки заменятся значениями {scope} "
-            f"({plural(len(mapping), ('метка', 'метки', 'меток'))} в таблице замен). Текст не покидает компьютер."
+            "Вставьте ответ, в котором остались метки вроде [PERSON_1]. Они заменятся значениями из таблицы "
+            f"замен {scope}: {plural(len(mapping), ('метка', 'метки', 'меток'))}. Текст не покидает компьютер."
         )
         summary.setObjectName("secondary")
         summary.setWordWrap(True)

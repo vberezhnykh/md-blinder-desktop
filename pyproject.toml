@@ -44,7 +44,7 @@ where = ["src"]
 version = {attr = "md_blinder.__version__"}
 
 [tool.setuptools.package-data]
-md_blinder = ["ui/assets/fonts/*", "anonymize/*.LICENSE"]
+md_blinder = ["ui/assets/fonts/*", "ui/assets/icon/*", "anonymize/*.LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

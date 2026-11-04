@@ -8,6 +8,8 @@ datas = [
     ("src/md_blinder/anonymize/presidio.LICENSE", "md_blinder/anonymize"),
     # Шрифты IBM Plex (OFL) — как в веб-версии, без загрузки со сторонних серверов.
     ("src/md_blinder/ui/assets/fonts", "md_blinder/ui/assets/fonts"),
+    # Иконка окна и панели задач (PNG всех размеров, см. ui/app_icon.py).
+    ("src/md_blinder/ui/assets/icon/*.png", "md_blinder/ui/assets/icon"),
     # Модели ONNX и настройки pymupdf_layout (около 50 МБ): поиск таблиц в PDF.
     # Пакет ищет их рядом со своими модулями.
     *collect_data_files("pymupdf.layout"),
@@ -44,6 +46,8 @@ exe = EXE(
     exclude_binaries=True,
     name="MD Blinder",
     console=False,
+    # Иконка exe: ее же показывают ярлыки и пункт в меню проводника.
+    icon="src/md_blinder/ui/assets/icon/app.ico",
     upx=False,
 )
 coll = COLLECT(exe, a.binaries, a.datas, name="MD Blinder", upx=False)

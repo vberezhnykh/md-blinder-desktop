@@ -221,7 +221,7 @@ jobs:
             echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/download-artifact@v6
+      - uses: actions/download-artifact@v7
         if: steps.version.outputs.exists != 'true' || env.PUBLISH != 'true'
         with:
           name: md-blinder-windows-${{ env.TREE }}

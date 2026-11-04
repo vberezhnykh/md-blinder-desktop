@@ -42,6 +42,10 @@ class HistoryDoc:
     entities: list[Entity] = field(default_factory=list)
     # Пакет: документы с одним batch_id получают согласованные метки замены.
     batch_id: Optional[str] = None
+    # Имена, компании и адреса не искались: модель не загрузилась или не была скачана.
+    # Признак остается до успешного повторного поиска, чтобы документ из истории не
+    # выглядел полностью обработанным.
+    ner_missing: bool = False
 
 
 @dataclass
@@ -55,6 +59,7 @@ class HistoryDocMeta:
     batch_id: Optional[str] = None
     # Непроверенные кандидаты; None — запись из базы, где счетчика еще не было.
     pending_count: Optional[int] = None
+    ner_missing: bool = False
 
 
 def sanitize_entities(raw: Any, source_length: Optional[int] = None) -> list[Entity]:
@@ -135,6 +140,8 @@ def _doc_to_export(doc: HistoryDoc) -> dict[str, Any]:
     }
     if doc.batch_id is not None:
         data["batchId"] = doc.batch_id
+    if doc.ner_missing:
+        data["nerMissing"] = True
     return data
 
 
@@ -187,6 +194,7 @@ def parse_history(text: str) -> list[HistoryDoc]:
             source_text=source,
             entities=sanitize_entities(raw_entities, len(source)),
             batch_id=d["batchId"] if isinstance(d.get("batchId"), str) else None,
+            ner_missing=d.get("nerMissing") is True,
         ))
     return docs
 
@@ -213,8 +221,8 @@ def merge_docs(existing: list[HistoryDoc], incoming: list[HistoryDoc]) -> list[H
     return list(by_id.values())
 
 
-_DOC_COLUMNS = "id, name, format, created_at, updated_at, source_text, entities, batch_id"
-_META_COLUMNS = "id, name, format, created_at, updated_at, entity_count, batch_id, pending_count"
+_DOC_COLUMNS = "id, name, format, created_at, updated_at, source_text, entities, batch_id, ner_missing"
+_META_COLUMNS = "id, name, format, created_at, updated_at, entity_count, batch_id, pending_count, ner_missing"
 
 
 def _pending_count(entities: list[Entity]) -> int:
@@ -244,6 +252,11 @@ class HistoryStore:
             columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
             if "batch_id" not in columns:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN batch_id TEXT")
+        # Признак «имена не искались» добавлен в 0.13.0.
+        for table in ("documents", "document_meta"):
+            columns = {row[1] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+            if "ner_missing" not in columns:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN ner_missing INTEGER NOT NULL DEFAULT 0")
         # Счетчик непроверенных кандидатов для списка истории; в старых базах считается один раз.
         columns = {row[1] for row in self._conn.execute("PRAGMA table_info(document_meta)")}
         if "pending_count" not in columns:
@@ -264,14 +277,17 @@ class HistoryStore:
         entities = json.dumps(_entities_to_json(doc.entities), ensure_ascii=False)
         with self._lock, self._conn:
             self._conn.execute(
-                f"INSERT OR REPLACE INTO documents ({_DOC_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, doc.source_text, entities, doc.batch_id),
+                f"INSERT OR REPLACE INTO documents ({_DOC_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, doc.source_text, entities,
+                    doc.batch_id, int(doc.ner_missing),
+                ),
             )
             self._conn.execute(
-                f"INSERT OR REPLACE INTO document_meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT OR REPLACE INTO document_meta ({_META_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     doc.id, doc.name, doc.format, doc.created_at, doc.updated_at, len(doc.entities), doc.batch_id,
-                    _pending_count(doc.entities),
+                    _pending_count(doc.entities), int(doc.ner_missing),
                 ),
             )
 
@@ -281,12 +297,14 @@ class HistoryStore:
             self._conn.execute("DELETE FROM document_meta WHERE id = ?", (doc_id,))
 
     def _row_to_doc(self, row: tuple) -> HistoryDoc:
-        doc_id, name, fmt, created, updated, source, entities, batch_id = row
+        doc_id, name, fmt, created, updated, source, entities, batch_id, ner_missing = row
         try:
             raw = json.loads(entities)
         except ValueError:
             raw = []
-        return HistoryDoc(doc_id, name, fmt, created, updated, source, sanitize_entities(raw, len(source)), batch_id)
+        return HistoryDoc(
+            doc_id, name, fmt, created, updated, source, sanitize_entities(raw, len(source)), batch_id, bool(ner_missing),
+        )
 
     def load_doc(self, doc_id: str) -> Optional[HistoryDoc]:
         with self._lock:
@@ -301,7 +319,7 @@ class HistoryStore:
     def load_metadata(self) -> list[HistoryDocMeta]:
         with self._lock:
             rows = self._conn.execute(f"SELECT {_META_COLUMNS} FROM document_meta ORDER BY updated_at DESC").fetchall()
-        return [HistoryDocMeta(*r) for r in rows]
+        return [HistoryDocMeta(*r[:-1], bool(r[-1])) for r in rows]
 
     def load_batch(self, batch_id: str) -> list[HistoryDoc]:
         """Документы пакета в порядке загрузки."""

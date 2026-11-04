@@ -969,3 +969,17 @@ def test_overview_label_click_opens_editor(qtbot, window, tmp_path):
     assert window.anonymized_text.startswith("[Поставщик] signs.")
     assert [x.placeholder for x in overview.targets] == ["[Поставщик]"]
     overview.close()
+
+
+def test_ner_failure_is_remembered_in_history(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    assert window.session.doc.ner_missing  # модель не скачана: имена не искались
+    qtbot.waitUntil(lambda: not window.autosave.saving, timeout=3000)
+    window.autosave.flush()
+    [meta] = window.store.load_metadata()
+    assert meta.ner_missing
+    window.show_all_docs()
+    window.open_doc(meta.id)
+    assert window.page.ner_notice.isVisible()
+    assert "не искались" in window.page.ner_notice.label.text()
+    assert window.page.ner_retry.isVisible()

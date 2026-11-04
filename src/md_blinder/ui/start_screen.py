@@ -390,7 +390,15 @@ class HistoryPanel(QWidget):
         texts.addWidget(name)
         texts.addWidget(meta)
         line.addLayout(texts, 1)
-        if doc.pending_count:
+        if doc.ner_missing:
+            chip = QLabel("Имена не искались")
+            chip.setObjectName("chipPending")
+            chip.setToolTip(
+                "Модель поиска имен, компаний и адресов не работала при обработке. Откройте документ и нажмите "
+                "«Найти имена заново»"
+            )
+            line.addWidget(chip)
+        elif doc.pending_count:
             chip = QLabel(f"Не проверено: {doc.pending_count}")
             chip.setObjectName("chipPending")
             chip.setToolTip("Кандидаты, которые еще не приняты и не отклонены: в тексте они без замены")

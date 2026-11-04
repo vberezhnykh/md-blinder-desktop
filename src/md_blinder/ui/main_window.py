@@ -153,6 +153,7 @@ class DocumentPage(QWidget):
         self.ocr_retry.row.setStretch(1, 0)
         self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None)
         self.ner_notice = Notice(closable=True)
+        self.ner_retry = self.ner_notice.add_button("Найти имена заново", lambda: None)
         self.convert_notice = Notice(
             "Включена только конвертация в Markdown: копирование и экспорт дают текст без замен. Отмеченные "
             "данные сохраняются и снова заменяются, если снять флажок «Только конвертация».",
@@ -351,6 +352,7 @@ class MainWindow(QMainWindow):
             box.setChecked(convert_only)
             box.toggled.connect(self.set_convert_only)
         p.detect_button.clicked.connect(self.find_entities)
+        p.ner_retry.clicked.connect(self.find_entities)
 
         self.header.home.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
@@ -650,6 +652,7 @@ class MainWindow(QMainWindow):
         doc = HistoryDoc(
             id=str(uuid.uuid4()), name=run.names.get(path, result.path.name), format=result.format, created_at=now, updated_at=now,
             source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
+            ner_missing=result.ner_failed or result.ner_skipped,
         )
         run.created.append((doc, result))
         if result.format == "pdf":
@@ -708,7 +711,13 @@ class MainWindow(QMainWindow):
         elif result is not None and result.ner_skipped:
             notice.label.setText(
                 "Поиск имен, компаний и адресов не выполнялся: модель распознавания не скачана. Найдены только "
-                "данные по шаблонам. Отметьте имена вручную или откройте файл заново, чтобы скачать модель."
+                "данные по шаблонам. Отметьте имена вручную или найдите их заново, скачав модель."
+            )
+            notice.show()
+        elif self.session.doc is not None and self.session.doc.ner_missing:
+            notice.label.setText(
+                "При обработке этого документа имена, компании и адреса не искались: модель распознавания "
+                "не работала. Найдены только данные по шаблонам: телефоны, email, реквизиты, номера документов."
             )
             notice.show()
         else:
@@ -800,6 +809,11 @@ class MainWindow(QMainWindow):
                     added.append(replace(e, positions=free))
             return compact_placeholder_numbers(dedupe_entity_ids([*entities, *added]))
 
+        doc = self.session.doc
+        missing = result.ner_failed or result.ner_skipped
+        if doc is not None and doc.ner_missing != missing:
+            doc.ner_missing = missing
+            self.autosave.queue(replace(doc, entities=list(doc.entities)))
         self._update(merge, "Найти персональные данные")
         self._set_ner_notice(result)
         self._render_derived()
@@ -1339,6 +1353,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ выдача
 
     def _notify_done(self, done: str) -> None:
+        doc = self.session.doc
+        if not self.convert_only and doc is not None and doc.ner_missing:
+            self.toast.show_message(
+                f"{done} Имена, компании и адреса в этом документе не искались: проверьте текст "
+                "или найдите их заново.", 10000, action=("Найти заново", self.find_entities), tone="warn",
+            )
+            return
         unreviewed = 0 if self.convert_only else len(pending_candidates(self.session.entities))
         if unreviewed == 0:
             self.toast.show_message(done, 3000)

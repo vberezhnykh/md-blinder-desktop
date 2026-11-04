@@ -1,6 +1,6 @@
 """Порт src/lib/anonymize/batch.test.ts: согласованные метки в пакете документов."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from md_blinder.anonymize.apply import build_anonymized_text
 from md_blinder.anonymize.apply import (
@@ -17,6 +17,7 @@ from md_blinder.anonymize.batch import (
     batch_targets,
     link_to_batch,
     merge_batch_labels,
+    similar_in_document,
     similar_spelling,
     similar_target_pairs,
     batch_entities_to_csv,
@@ -289,6 +290,31 @@ def test_similar_spelling():
     assert not similar_spelling("12 Main Street, London", "14 Main Street, London", "ADDRESS")
     assert similar_spelling("DIALOQ LTDA", "DIALOQ LTD4", "COMPANY")
     assert not similar_spelling("Smith", "Smyth")  # слишком коротко, чтобы судить
+
+
+def test_similar_values_inside_one_document():
+    text = ("DIALOQ LTDA and DIALOQ LTDA hire Makedon Kiriakidis. Signed: DIALOQ LTD4, Makedon Kirjakidjs. "
+            "Witness: John Smith, Jane Smith. At 12 Main Street, London; 14 Main Street, London.")
+    d = doc(text, [("COMPANY", "DIALOQ LTDA", "[COMPANY_1]"), ("COMPANY", "DIALOQ LTD4", "[COMPANY_2]"),
+                   ("PERSON", "Makedon Kiriakidis", "[PERSON_1]"), ("PERSON", "Makedon Kirjakidjs", "[PERSON_2]"),
+                   ("PERSON", "John Smith", "[PERSON_3]"), ("PERSON", "Jane Smith", "[PERSON_4]"),
+                   ("ADDRESS", "12 Main Street, London", "[ADDRESS_1]"),
+                   ("ADDRESS", "14 Main Street, London", "[ADDRESS_2]")])
+    entities = d.entities
+    company, ocr_company, person, ocr_person = entities[:4]
+    assert len(company.positions) == 2
+    hints = similar_in_document(entities, text)
+    # Подсказка у редкого написания и ведет к частому; при равенстве — у более позднего.
+    assert {k: [e.placeholder for e in v] for k, v in hints.items()} == {
+        ocr_company.id: ["[COMPANY_1]"], ocr_person.id: ["[PERSON_1]"],
+    }
+    # После объединения подсказки нет.
+    merged = merge_entities(entities, ocr_company.id, company.id)
+    assert ocr_company.id not in similar_in_document(merged, text)
+    # Кандидаты, отклоненные и замены с одной меткой не сравниваются.
+    assert similar_in_document([person, replace(ocr_person, candidate=True)], text) == {}
+    assert similar_in_document([person, replace(ocr_person, dismissed=True)], text) == {}
+    assert similar_in_document([person, replace(ocr_person, placeholder="[PERSON_1]")], text) == {}
 
 
 def three_variants() -> tuple[Doc, Doc, Doc]:

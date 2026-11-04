@@ -314,6 +314,35 @@ def test_merge_from_editor(qtbot, window, tmp_path):
     assert len([e for e in window.session.entities if e.type == "PERSON"]) == 2
 
 
+def test_similar_spelling_hint_inside_single_document(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para(
+        "Makedon Kiriakidis signed. Makedon Kiriakidis paid. Witness Makedon Kirjakidjs and Petr Ivanov."))
+    text = window.session.text
+    for name in ("Makedon Kiriakidis", "Makedon Kirjakidjs", "Petr Ivanov"):
+        s = text.index(name)
+        window._add_entity(s, s + len(name), "PERSON")
+    people = {text[e.positions[0].start:e.positions[0].end]: e for e in window.session.entities if e.type == "PERSON"}
+    assert len(people["Makedon Kiriakidis"].positions) == 2
+    found = window.page.side.found
+    window.page.side.setCurrentIndex(1)
+
+    def hints():
+        qtbot.wait(10)  # старые строки списка удаляются в цикле событий
+        return [lb.text() for lb in found.findChildren(QLabel) if lb.objectName() == "hint"]
+
+    # Подсказка одна: у редкого написания, с меткой частого.
+    [hint] = hints()
+    assert people["Makedon Kiriakidis"].placeholder in hint and "в этом документе" in hint
+    button = next(b for b in found.findChildren(QPushButton) if b.text() == "Объединить")
+    qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+    merged = [e for e in window.session.entities if e.type == "PERSON" and not e.candidate]
+    assert sorted(len(e.positions) for e in merged) == [1, 3]
+    assert window.anonymized_text.count("[PERSON_1]") == 3 and "Kirjakidjs" not in window.anonymized_text
+    assert not hints()
+    window.session.undo_stack.undo()
+    assert len(hints()) == 1
+
+
 def test_drag_handle_changes_span_as_one_command(qtbot, window, tmp_path):
     from md_blinder.anonymize.types import Position
 

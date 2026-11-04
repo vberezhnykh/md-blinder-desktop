@@ -15,7 +15,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from .offsets import OffsetMap
@@ -295,6 +295,41 @@ class HistoryStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             self._conn.execute("DELETE FROM document_meta WHERE id = ?", (doc_id,))
+
+    def delete_all(self) -> int:
+        with self._lock, self._conn:
+            count = self._conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
+            self._conn.execute("DELETE FROM documents")
+            self._conn.execute("DELETE FROM document_meta")
+        return count
+
+    def delete_older_than(self, cutoff_ms: int, keep: Iterable[str] = ()) -> list[str]:
+        """Удаляет документы, которые не менялись с cutoff_ms. Пакет удаляется только
+        целиком, когда старше срока все его документы: иначе в открытом позже пакете
+        пропали бы документы и общие метки. Документы из keep и их пакеты остаются."""
+        keep = set(keep)
+        with self._lock, self._conn:
+            rows = self._conn.execute("SELECT id, updated_at, batch_id FROM documents").fetchall()
+            newest: dict[str, int] = {}
+            kept_batches: set[str] = set()
+            for doc_id, updated, batch_id in rows:
+                if batch_id is not None:
+                    newest[batch_id] = max(newest.get(batch_id, 0), updated)
+                    if doc_id in keep:
+                        kept_batches.add(batch_id)
+
+            def expired(doc_id: str, updated: int, batch_id: Optional[str]) -> bool:
+                if doc_id in keep:
+                    return False
+                if batch_id is None:
+                    return updated < cutoff_ms
+                return batch_id not in kept_batches and newest[batch_id] < cutoff_ms
+
+            doomed = [doc_id for doc_id, updated, batch_id in rows if expired(doc_id, updated, batch_id)]
+            for doc_id in doomed:
+                self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+                self._conn.execute("DELETE FROM document_meta WHERE id = ?", (doc_id,))
+        return doomed
 
     def _row_to_doc(self, row: tuple) -> HistoryDoc:
         doc_id, name, fmt, created, updated, source, entities, batch_id, ner_missing = row

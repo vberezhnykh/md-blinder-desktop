@@ -983,3 +983,44 @@ def test_ner_failure_is_remembered_in_history(qtbot, window, tmp_path):
     assert window.page.ner_notice.isVisible()
     assert "не искались" in window.page.ner_notice.label.text()
     assert window.page.ner_retry.isVisible()
+
+
+def test_old_documents_are_removed_on_start(qtbot, tmp_path, monkeypatch):
+    import md_blinder.jobs as jobs
+    from md_blinder.storage.history import HistoryDoc, now_ms
+
+    monkeypatch.setenv("MD_BLINDER_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(jobs, "MODEL", jobs.ModelHolder())
+    store = HistoryStore(tmp_path / "h.sqlite")
+    day = 24 * 60 * 60 * 1000
+    store.put_doc(HistoryDoc("old", "old.docx", "docx", 1, now_ms() - 8 * day, "text"))
+    store.put_doc(HistoryDoc("new", "new.docx", "docx", 1, now_ms() - 6 * day, "text"))
+    w = MainWindow(store)
+    qtbot.addWidget(w)
+    assert [m.id for m in store.load_metadata()] == ["new"]
+    assert "7 дней" in w.start.history.warning.text()
+    # Без флажка документы не удаляются.
+    w.settings.setValue("historyRetention", False)
+    store.put_doc(HistoryDoc("old2", "old2.docx", "docx", 1, now_ms() - 30 * day, "text"))
+    w._purge_old_history()
+    assert {m.id for m in store.load_metadata()} == {"new", "old2"}
+    w.settings.clear()
+    w.close()
+
+
+def test_clear_history_removes_everything(qtbot, window, tmp_path, monkeypatch):
+    from md_blinder.ui import dialogs
+
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    window.autosave.flush()
+    window._refresh_history()
+    assert window.start.history.clear_button.isEnabled()
+    monkeypatch.setattr(dialogs, "ask", lambda *a, **k: False)
+    window.clear_history()
+    assert len(window.store.load_metadata()) == 1
+    monkeypatch.setattr(dialogs, "ask", lambda *a, **k: True)
+    window.clear_history()
+    assert window.store.load_metadata() == []
+    assert window.session.doc is None
+    assert window.stack.currentWidget() is window.start
+    assert not window.start.history.clear_button.isEnabled()

@@ -92,6 +92,10 @@ SETTING_CONVERT_ONLY = "convertOnly"
 # Нужен для экспорта обезличенного PDF; хранится только на этом компьютере.
 SETTING_PDF_SOURCES = "pdfSources"
 PDF_SOURCES_LIMIT = 200
+# Документы, которые не менялись столько дней, удаляются из истории при запуске.
+SETTING_HISTORY_RETENTION = "historyRetention"
+HISTORY_RETENTION_DAYS = 7
+DAY_MS = 24 * 60 * 60 * 1000
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -325,12 +329,14 @@ class MainWindow(QMainWindow):
         for widget in header_update_actions(self.updates):
             self.header.start_row.addWidget(widget)
         footer = settings_footer(self.updates)
+        footer.layout().insertWidget(footer.layout().count() - 1, self._retention_box())
         if shell.available():
             footer.layout().insertWidget(footer.layout().count() - 1, self._explorer_menu_box())
             self._sync_explorer_menu(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
         self.start.add_footer(footer)
 
         self._wire()
+        self._purge_old_history()
         self._refresh_history()
         self._wire_model_status()
 
@@ -347,6 +353,7 @@ class MainWindow(QMainWindow):
         s.history.show_batch.connect(self.show_batch_from_history)
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
+        s.history.clear_history.connect(self.clear_history)
         convert_only = self.settings.value(SETTING_CONVERT_ONLY, False, type=bool)
         for box in (s.convert_only_box, p.convert_only_box):
             box.setChecked(convert_only)
@@ -1571,6 +1578,8 @@ class MainWindow(QMainWindow):
         if recent:
             menu.add_item("Экспорт истории…", self.export_history, "Файл .json с исходным текстом документов", "download")
         menu.add_item("Импорт истории…", self.import_history, "Документы из файла добавятся к этим", "import")
+        if recent:
+            menu.add_item("Удалить все…", self.clear_history, "Все документы вместе с исходным текстом", "trash")
         menu.add_note(
             "История хранится на этом компьютере вместе с исходным текстом, без шифрования.", icon_name="lock",
         )
@@ -1642,6 +1651,82 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.start.history.set_error(f"Не удалось удалить документ: {exc}")
         self._refresh_history()
+
+    # ------------------------------------------------------------------ срок хранения истории
+
+    @property
+    def retention_days(self) -> Optional[int]:
+        enabled = self.settings.value(SETTING_HISTORY_RETENTION, True, type=bool)
+        return HISTORY_RETENTION_DAYS if enabled else None
+
+    def _retention_box(self) -> QCheckBox:
+        box = QCheckBox(f"Удалять документы старше {HISTORY_RETENTION_DAYS} дней")
+        box.setObjectName("small")
+        box.setChecked(self.retention_days is not None)
+        box.setToolTip(
+            f"При запуске программы из истории удаляются документы, которые не менялись {HISTORY_RETENTION_DAYS} "
+            "дней. Пакет удаляется целиком, когда устарели все его документы."
+        )
+        box.toggled.connect(self._retention_toggled)
+        return box
+
+    def _retention_toggled(self, enabled: bool) -> None:
+        self.settings.setValue(SETTING_HISTORY_RETENTION, enabled)
+        if enabled:
+            self._purge_old_history()
+        self._refresh_history()
+
+    def _purge_old_history(self) -> None:
+        days = self.retention_days
+        self.start.history.set_retention(days)
+        if days is None:
+            return
+        keep = {d.id for d in [self.session.doc, *self.batch_others] if d is not None}
+        try:
+            removed = self.store.delete_older_than(now_ms() - days * DAY_MS, keep)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось удалить старые документы: {exc}")
+            return
+        if removed:
+            self._forget_pdf_sources(removed)
+            self.toast.show_message(
+                f"Из истории удалено {plural(len(removed), ('документ', 'документа', 'документов'))} "
+                f"старше {days} дней.", 5000,
+            )
+
+    def _forget_pdf_sources(self, doc_ids: Optional[list[str]] = None) -> None:
+        """Пути к исходным PDF тоже говорят об удаленных документах: убираем и их."""
+        sources = {} if doc_ids is None else {k: v for k, v in self._pdf_sources().items() if k not in set(doc_ids)}
+        self.settings.setValue(SETTING_PDF_SOURCES, json.dumps(sources, ensure_ascii=False))
+
+    def clear_history(self) -> None:
+        if self.job is not None:
+            return
+        count = len(getattr(self, "history_meta", []))
+        if not count or not dialogs.ask(
+            self, "Удалить всю историю?",
+            f"Из истории будут удалены {plural(count, ('документ', 'документа', 'документов'))} вместе с исходным "
+            "текстом и таблицами замен. Отменить удаление нельзя.",
+            "Удалить все", danger=True,
+        ):
+            return
+        self.autosave.flush()
+        if self.session.doc is not None:
+            self.autosave.discard(self.session.doc.id)
+        self.delete_timer.stop()
+        self.pending_delete = None
+        self.session.replace_doc(None)
+        self.batch_others = []
+        self.last_pdf = None
+        try:
+            self.store.delete_all()
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось очистить историю: {exc}")
+            return
+        self._forget_pdf_sources()
+        self.stack.setCurrentWidget(self.start)
+        self._refresh_history()
+        self.toast.show_message("История очищена.", 4000)
 
     def export_history(self) -> None:
         if not self.autosave.flush():

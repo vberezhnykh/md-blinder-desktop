@@ -278,3 +278,24 @@ def test_old_database_documents_are_not_marked_ner_missing(tmp_path):
     assert not store.load_doc("d").ner_missing
     assert not store.load_metadata()[0].ner_missing
     store.close()
+
+
+def test_delete_older_than_keeps_recent_batches_whole(tmp_path):
+    store = HistoryStore(tmp_path / "h.sqlite")
+    store.put_doc(doc(id="old", updated_at=100))
+    store.put_doc(doc(id="new", updated_at=1000))
+    # Пакет с одним свежим документом остается целиком, устаревший пакет удаляется целиком.
+    store.put_doc(doc(id="b1-old", batch_id="b1", updated_at=100))
+    store.put_doc(doc(id="b1-new", batch_id="b1", updated_at=1000))
+    store.put_doc(doc(id="b2-a", batch_id="b2", updated_at=100))
+    store.put_doc(doc(id="b2-b", batch_id="b2", updated_at=200))
+    # Открытый документ и его пакет не трогаются.
+    store.put_doc(doc(id="open", updated_at=100))
+    store.put_doc(doc(id="b3-a", batch_id="b3", updated_at=100))
+    store.put_doc(doc(id="b3-open", batch_id="b3", updated_at=100))
+    removed = store.delete_older_than(500, keep={"open", "b3-open"})
+    assert sorted(removed) == ["b2-a", "b2-b", "old"]
+    assert sorted(m.id for m in store.load_metadata()) == ["b1-new", "b1-old", "b3-a", "b3-open", "new", "open"]
+    assert store.delete_all() == 6
+    assert store.load_metadata() == [] and store.load_all() == []
+    store.close()

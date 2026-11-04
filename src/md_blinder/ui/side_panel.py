@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 )
 
 from ..anonymize.apply import candidate_reason, entity_current_value, pending_candidates
-from ..anonymize.batch import BatchIndex, BatchTarget
+from ..anonymize.batch import BatchIndex, BatchTarget, similar_in_document
 from ..anonymize.types import ALL_ENTITY_TYPES, Entity
 from ..text_utils import candidate_context
 from . import theme as t
@@ -480,6 +480,8 @@ class FoundPanel(QWidget):
         self._entities: list[Entity] = []
         self._text = ""
         self._batch: Optional[BatchIndex] = None
+        # Похожие написания внутри документа: сущность → замены, в которые ее стоит влить.
+        self._local_similar: dict[str, list[Entity]] = {}
         self._selected: Optional[str] = None
         self._merging: Optional[str] = None
         self._collapsed: set[str] = set()
@@ -502,6 +504,7 @@ class FoundPanel(QWidget):
         self._rows = {}
         self._group_headers = {}
         confirmed = self.confirmed(entities)
+        self._local_similar = similar_in_document(confirmed, text)
         if not confirmed:
             empty = QLabel("Ничего не найдено. Выделите текст в редакторе, чтобы добавить замену вручную.")
             empty.setWordWrap(True)
@@ -615,6 +618,8 @@ class FoundPanel(QWidget):
         button.clicked.connect(lambda eid=entity.id: self._click(eid))
         line.addWidget(button, 1)
         box.addLayout(line)
+        for other in self._local_similar.get(entity.id, [])[:2]:
+            box.addWidget(self._local_hint(entity, other))
         if self._batch is not None:
             for target in self._batch.similar(entity, self._text, self._entities)[:2]:
                 box.addWidget(self._similar_hint(entity, target))
@@ -623,28 +628,51 @@ class FoundPanel(QWidget):
         self._rows[entity.id] = row
         return row
 
-    def _similar_hint(self, entity: Entity, target: BatchTarget) -> QWidget:
-        """Подсказка: в другом документе пакета то же значение написано иначе."""
+    def _hint(self, text: str, tooltip: str, button_tooltip: str, on_click: Callable[[], None]) -> QWidget:
+        """Строка подсказки под заменой: текст и кнопка «Объединить»."""
         area = QWidget()
         row = QHBoxLayout(area)
         row.setContentsMargins(36, 0, 8, 6)
         row.setSpacing(6)
-        where = "в другом документе" if len(target.docs) == 1 else "в других документах"
-        label = QLabel(_breakable(f"Похоже на {target.placeholder} «{_truncate(target.value, 40)}» {where}"))
+        label = QLabel(_breakable(text))
         label.setObjectName("hint")
         _fit_width(label)
-        label.setToolTip(
+        label.setToolTip(tooltip)
+        row.addWidget(label, 1)
+        button = make_button("Объединить", small=True)
+        button.setToolTip(button_tooltip)
+        button.clicked.connect(lambda _=False: on_click())
+        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
+        return area
+
+    def _local_hint(self, entity: Entity, other: Entity) -> QWidget:
+        """Подсказка: в этом же документе похожее значение получило другую метку."""
+        value = entity_current_value(self._text, other).replace("\n", " ")
+        return self._hint(
+            f"Похоже на {other.placeholder} «{_truncate(value, 40)}» в этом документе",
+            "Похожее значение в этом документе получило другую метку: "
+            "возможно, это ошибка распознавания, опечатка или другой падеж.",
+            f"Заменять это значение на {other.placeholder}",
+            lambda eid=entity.id, oid=other.id: self._merge_into(eid, oid),
+        )
+
+    def _merge_into(self, entity_id: str, target_id: str) -> None:
+        self._merging = None
+        self._selected = None
+        self.merge.emit(entity_id, target_id)
+
+    def _similar_hint(self, entity: Entity, target: BatchTarget) -> QWidget:
+        """Подсказка: в другом документе пакета то же значение написано иначе."""
+        where = "в другом документе" if len(target.docs) == 1 else "в других документах"
+        return self._hint(
+            f"Похоже на {target.placeholder} «{_truncate(target.value, 40)}» {where}",
             "В другом документе пакета похожее значение получило другую метку: "
             "возможно, это ошибка распознавания или опечатка.\n"
             f"{target.placeholder}: {'; '.join(target.forms[:5])}\n"
-            f"Документы: {', '.join(target.docs[:5])}{'…' if len(target.docs) > 5 else ''}"
+            f"Документы: {', '.join(target.docs[:5])}{'…' if len(target.docs) > 5 else ''}",
+            f"Заменять это значение на {target.placeholder} во всем пакете",
+            lambda eid=entity.id, ph=target.placeholder: self._link(eid, ph),
         )
-        row.addWidget(label, 1)
-        button = make_button("Объединить", small=True)
-        button.setToolTip(f"Заменять это значение на {target.placeholder} во всем пакете")
-        button.clicked.connect(lambda _=False, eid=entity.id, ph=target.placeholder: self._link(eid, ph))
-        row.addWidget(button, 0, Qt.AlignmentFlag.AlignTop)
-        return area
 
     def _link(self, entity_id: str, placeholder: str) -> None:
         self._merging = None
@@ -684,9 +712,7 @@ class FoundPanel(QWidget):
                 if chosen.startswith(BATCH_PREFIX):
                     self._link(entity.id, chosen[len(BATCH_PREFIX):])
                     return
-                self._merging = None
-                self._selected = None
-                self.merge.emit(entity.id, chosen)
+                self._merge_into(entity.id, chosen)
 
             def do_cancel() -> None:
                 self._merging = None

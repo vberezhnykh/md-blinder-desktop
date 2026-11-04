@@ -515,18 +515,18 @@ def _trigrams(text: str) -> set[str]:
     return {text[i:i + 3] for i in range(len(text) - 2)}
 
 
-def similar_target_pairs(targets: Sequence[BatchTarget]) -> list[tuple[BatchTarget, BatchTarget]]:
-    """Пары замен пакета, похожих по написанию: кандидаты на объединение.
+def _similar_groups(groups: Sequence[tuple[EntityType, Iterable[str]]]) -> set[tuple[int, int]]:
+    """Пары групп (i < j) одного типа из SIMILAR_TYPES, у которых есть похожие формы.
 
     Чтобы не сравнивать все формы со всеми, сначала отбираются формы с общими
     тройками букв: одна правка портит не больше трех троек, поэтому у похожих
     форм общих троек не меньше, чем у формы своих, минус три на каждую
-    допустимую правку. Пары идут в порядке типов и номеров меток."""
-    entries: list[tuple[str, int]] = []  # форма, индекс замены
-    for i, target in enumerate(targets):
-        if target.type not in SIMILAR_TYPES:
+    допустимую правку."""
+    entries: list[tuple[str, int]] = []  # форма, индекс группы
+    for i, (type_, forms) in enumerate(groups):
+        if type_ not in SIMILAR_TYPES:
             continue
-        for folded in dict.fromkeys(_fold(f) for f in target.forms):
+        for folded in dict.fromkeys(_fold(f) for f in forms):
             if len(folded) >= MIN_SIMILAR_LENGTH:
                 entries.append((folded, i))
     grams = [_trigrams(folded) for folded, _ in entries]
@@ -551,11 +551,43 @@ def similar_target_pairs(targets: Sequence[BatchTarget]) -> list[tuple[BatchTarg
         for b in candidates:
             fb, ib = entries[b]
             pair = (min(ia, ib), max(ia, ib))
-            if ia == ib or pair in found or targets[ia].type != targets[ib].type:
+            if ia == ib or pair in found or groups[ia][0] != groups[ib][0]:
                 continue
-            if _similar_folded(fa, fb, targets[ia].type):
+            if _similar_folded(fa, fb, groups[ia][0]):
                 found.add(pair)
+    return found
+
+
+def similar_target_pairs(targets: Sequence[BatchTarget]) -> list[tuple[BatchTarget, BatchTarget]]:
+    """Пары замен пакета, похожих по написанию: кандидаты на объединение.
+    Пары идут в порядке типов и номеров меток."""
+    found = _similar_groups([(t.type, t.forms) for t in targets])
     return [(targets[i], targets[j]) for i, j in sorted(found)]
+
+
+def similar_in_document(entities: Sequence[Entity], source_text: str) -> dict[str, list[Entity]]:
+    """Замены одного документа, похожие по написанию (ошибка OCR, опечатка,
+    другой падеж): для каждой сущности — те, в которые ее стоит влить.
+
+    Подсказка показывается у одной из двух: у той, что встречается реже (при
+    равенстве — позже), а предлагается та, что встречается чаще: ее значение и
+    метка, скорее всего, верные. Сущности с одной меткой не сравниваются."""
+    main = [e for e in entities if _is_main(e) and e.positions and e.type in SIMILAR_TYPES]
+    groups = [(e.type, [source_text[p.start:p.end] for p in e.positions]) for e in main]
+
+    def rank(e: Entity) -> tuple[int, int]:
+        return -len(e.positions), min(p.start for p in e.positions)
+
+    result: dict[str, list[Entity]] = {}
+    for i, j in sorted(_similar_groups(groups)):
+        a, b = main[i], main[j]
+        if a.placeholder == b.placeholder:
+            continue
+        keep, absorb = (a, b) if rank(a) <= rank(b) else (b, a)
+        result.setdefault(absorb.id, []).append(keep)
+    for targets in result.values():
+        targets.sort(key=rank)
+    return result
 
 
 def merge_batch_labels(docs: Sequence[M], keep: str, absorb: str) -> list[M]:

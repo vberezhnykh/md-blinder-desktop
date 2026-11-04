@@ -134,10 +134,12 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     from .shell import file_argument
+    from .ui.app_icon import app_icon, refresh_shell_icons, set_taskbar_identity
     from .ui.main_window import MainWindow
     from .ui.single_instance import InstanceServer, send_to_running
     from .ui.theme import STYLESHEET, register_fonts
 
+    set_taskbar_identity()
     app = QApplication(sys.argv)
     file_path = file_argument(sys.argv)
     # Программа уже открыта: файл из меню проводника уходит в ее окно.
@@ -151,6 +153,10 @@ def main() -> int:
     install_gc(app)
     app.setApplicationName("MD Blinder")
     app.setOrganizationName("md-blinder")
+    app.setWindowIcon(app_icon())
+    if "--updated" in sys.argv:
+        # Первый запуск после обновления: в новом exe может быть новая иконка.
+        refresh_shell_icons()
     app.setStyle("Fusion")
     app.setStyleSheet(STYLESHEET)
     window = MainWindow()

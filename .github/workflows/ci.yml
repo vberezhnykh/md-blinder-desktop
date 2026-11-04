@@ -170,6 +170,18 @@ jobs:
           if ($p.ExitCode -ne 0) { exit 1 }
           if (-not ($report -match "OCR \(Indra\): OK")) { Write-Host "OCR не проверен"; exit 1 }
 
+      # Иконка вшита в exe: у края иконки 32×32 должен быть фирменный сиреневый, а не иконка PyInstaller.
+      - name: Exe icon
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.Drawing
+          $bmp = [System.Drawing.Icon]::ExtractAssociatedIcon("dist\MD Blinder\MD Blinder.exe").ToBitmap()
+          $c = $bmp.GetPixel(3, [int]($bmp.Height / 2))
+          "Иконка exe $($bmp.Width)x$($bmp.Height), цвет у края: $c"
+          if ([Math]::Abs($c.R - 0x3a) -gt 2 -or [Math]::Abs($c.G - 0x3d) -gt 2 -or [Math]::Abs($c.B - 0x8f) -gt 2) {
+            Write-Host "В exe не та иконка"; exit 1
+          }
+
       # В имени артефакта хеш дерева файлов: по нему прогон main находит сборку,
       # уже проверенную в PR (см. prebuilt).
       - name: Tree hash

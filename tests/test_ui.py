@@ -1024,3 +1024,22 @@ def test_clear_history_removes_everything(qtbot, window, tmp_path, monkeypatch):
     assert window.session.doc is None
     assert window.stack.currentWidget() is window.start
     assert not window.start.history.clear_button.isEnabled()
+
+
+def test_search_in_text_replaces_all_matches(qtbot, window, tmp_path):
+    open_docx(qtbot, window, tmp_path, para("Подписант Иван Петров. Позже Иван Петров и ИВАН ПЕТРОВ согласились."))
+    window.open_search()
+    bar = window.page.editor_pane.search
+    assert bar.isVisible()
+    bar.query.setText("иван петров")
+    assert len(bar.matches) == 3 and bar.count.text() == "1 из 3"
+    bar.step(1)
+    assert bar.count.text() == "2 из 3"
+    bar.type_box.setCurrentText("PERSON")
+    bar.replace_button.click()
+    assert "Иван Петров" not in window.anonymized_text
+    assert "ИВАН ПЕТРОВ" not in window.anonymized_text
+    window.session.undo_stack.undo()
+    assert "Иван Петров" in window.anonymized_text
+    bar.close_bar()
+    assert not bar.isVisible()

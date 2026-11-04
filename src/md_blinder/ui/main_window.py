@@ -33,6 +33,7 @@ from ..anonymize.apply import (
     MAX_LABEL_LENGTH,
     accept_all_related,
     accept_related_candidate,
+    add_entity_from_matches,
     add_entity_from_selection,
     add_occurrence_to_entity,
     build_anonymized_text,
@@ -424,8 +425,12 @@ class MainWindow(QMainWindow):
         folder_action = QAction("Открыть папку", self)
         folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         folder_action.triggered.connect(self.pick_folder)
-        for action in (undo, redo, open_action, folder_action):
+        find_action = QAction("Найти в тексте", self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self.open_search)
+        for action in (undo, redo, open_action, folder_action, find_action):
             self.addAction(action)
+        p.editor_pane.search.replace_all.connect(self._replace_found)
 
     # ------------------------------------------------------------------ обработка файла
 
@@ -1188,6 +1193,7 @@ class MainWindow(QMainWindow):
         p = self.page
         if doc is None:
             p.editor.set_content("", [])
+            p.editor_pane.search.close_bar()
             return
         p.file_label.setText(doc.name)
         p.file_label.setToolTip(doc.name)
@@ -1211,6 +1217,7 @@ class MainWindow(QMainWindow):
         p = self.page
         text, entities = doc.source_text, doc.entities
         self._rendered_text = text
+        p.editor_pane.search.set_text(text)
         # В режиме только конвертации разметка сохраняется, но в результат не попадает.
         output = [] if self.convert_only else entities
         anonymized = build_anonymized_text_with_map(text, output)
@@ -1266,6 +1273,41 @@ class MainWindow(QMainWindow):
     def _set_anonymize(self, ids: list, value: bool) -> None:
         selected = set(ids)
         self._update(lambda es: [replace(e, anonymize=value) if e.id in selected else e for e in es], "Переключить замену")
+
+    # ------------------------------------------------------------------ поиск по тексту
+
+    def open_search(self) -> None:
+        """Ctrl+F на экране документа: строка поиска над исходником. Выделенный
+        в тексте фрагмент сразу становится запросом."""
+        doc = self.session.doc
+        if doc is None or self.stack.currentWidget() is not self.page:
+            return
+        p = self.page
+        if not p.editor_pane.isVisible():
+            self.set_view("source")
+        selected = p.editor.textCursor().selectedText().replace("\u2029", " ").strip()
+        query = selected if 0 < len(selected) <= 100 else ""
+        p.editor_pane.search.open_with(doc.source_text, query, p.editor.selected_type)
+
+    def _replace_found(self, spans: list, type_: str) -> None:
+        text = self.session.text
+        added = 0
+
+        def apply(entities: list) -> list:
+            nonlocal added
+            result, added = add_entity_from_matches(entities, text, spans, type_)
+            return compact_placeholder_numbers(result)
+
+        self.page.editor.selected_type = type_
+        self._update(apply, "Заменить найденное")
+        skipped = len(spans) - added
+        if added:
+            message = f"В замены добавлено: {plural(added, ('место', 'места', 'мест'))}."
+            if skipped:
+                message += f" Еще {plural(skipped, ('место', 'места', 'мест'))} уже в заменах или ждут проверки."
+            self.toast.show_message(message, 5000)
+        else:
+            self.toast.show_message("Все найденные места уже в заменах или ждут проверки.", 4000)
 
     def _add_entity(self, start: int, end: int, type_: str) -> None:
         text = self.session.text

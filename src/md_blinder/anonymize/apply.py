@@ -14,6 +14,7 @@ from functools import reduce
 from typing import NamedTuple, Optional
 
 from .image_safety import IMAGE_REMOVED_MARKER, find_image_ranges
+from .normalize import normalize_value
 from .placeholder_guard import escape_placeholder_literal, find_placeholder_ranges
 from .types import Entity, EntityType, Position
 
@@ -211,6 +212,60 @@ def add_entity_from_selection(
         manual=True,
     )
     return [*working, new_entity]
+
+
+def add_entity_from_matches(
+    entities: list[Entity],
+    source_text: str,
+    spans: list[Position],
+    type_: EntityType,
+) -> tuple[list[Entity], int]:
+    """Добавляет найденные поиском места в замены типа type_ и возвращает их число.
+
+    Место, которое уже закрыто или ждет проверки, не меняется: иначе короткий запрос
+    («Иван») разрезал бы готовую замену «Иван Петров», и фамилия стала бы видна.
+    Отклоненные находки под новым местом убираются. Если значение уже заменяется
+    меткой этого типа, места присоединяются к ней, а не получают новую метку.
+    """
+    busy = [p for e in entities if not e.dismissed for p in e.positions]
+    free = sorted(
+        (s for s in spans if s.end > s.start and not any(s.start < p.end and p.start < s.end for p in busy)),
+        key=lambda s: s.start,
+    )
+    if not free:
+        return entities, 0
+    working: list[Entity] = []
+    for e in entities:
+        if not e.dismissed:
+            working.append(e)
+            continue
+        kept = [p for p in e.positions if not any(p.start < s.end and s.start < p.end for s in free)]
+        if kept:
+            working.append(e if len(kept) == len(e.positions) else replace(e, positions=kept))
+    value = source_text[free[0].start:free[0].end]
+    key = normalize_value(type_, value).casefold()
+    target = next(
+        (
+            e for e in working
+            if e.type == type_ and not e.candidate and not e.dismissed
+            and normalize_value(type_, entity_current_value(source_text, e)).casefold() == key
+        ),
+        None,
+    )
+    if target is not None:
+        positions = sorted([*target.positions, *free], key=lambda p: p.start)
+        result = [replace(e, positions=positions, anonymize=True) if e.id == target.id else e for e in working]
+        return result, len(free)
+    new_entity = Entity(
+        id=_new_id(),
+        type=type_,
+        value=value,
+        placeholder=f"[{type_}_{next_placeholder_number(working, type_)}]",
+        positions=free,
+        anonymize=True,
+        manual=True,
+    )
+    return [*working, new_entity], len(free)
 
 
 def add_occurrence_to_entity(

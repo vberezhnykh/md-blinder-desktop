@@ -969,3 +969,50 @@ def test_overview_label_click_opens_editor(qtbot, window, tmp_path):
     assert window.anonymized_text.startswith("[Поставщик] signs.")
     assert [x.placeholder for x in overview.targets] == ["[Поставщик]"]
     overview.close()
+
+
+@pytest.mark.parametrize("field_y", [700, 120, 400])
+def test_type_list_stays_on_screen(qtbot, window, tmp_path, field_y):
+    """Список типов на карточке кандидата не уходит за край маленького экрана: внизу
+    он открывается над полем, а когда тесно с обеих сторон, прокручивается."""
+    from PySide6.QtGui import QGuiApplication
+
+    from md_blinder.anonymize.related import find_related_occurrences
+    from md_blinder.anonymize.types import ALL_ENTITY_TYPES
+    from md_blinder.ui.widgets import Select
+
+    area = (window.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+    window.resize(area.width(), 900)
+    open_docx(qtbot, window, tmp_path, para("Иван Петров подписал. Позже Петров уехал."))
+    text = window.session.text
+    s = text.index("Иван Петров")
+    window._add_entity(s, s + len("Иван Петров"), "PERSON")
+    window.session.update_entities(lambda es: es + find_related_occurrences(text, window.session.entities))
+    window._render_derived()
+    window.show_candidates()
+    card = window.page.side.review._card
+    box = next(b for b in card.findChildren(Select) if b.count() == len(ALL_ENTITY_TYPES))
+    qtbot.waitUntil(lambda: box.isVisible() and box.height() < 100)
+    if field_y == 400:
+        # Тесно с обеих сторон: пунктов больше, чем помещается над полем и под ним.
+        box.addItems([f"EXTRA_{i}" for i in range(Select.MAX_VISIBLE - box.count())])
+        box.setCurrentIndex(box.count() - 1)
+    window.move(window.x(), window.y() + field_y - box.mapToGlobal(box.rect().topLeft()).y())
+    # Рамка окна в offscreen сдвигает поле на пару пикселей.
+    qtbot.waitUntil(lambda: abs(box.mapToGlobal(box.rect().topLeft()).y() - field_y) <= 4)
+    box.showPopup()
+    view = box.view()
+    popup = view.window()
+    qtbot.waitUntil(popup.isVisible)
+    geo = popup.frameGeometry()
+    field = box.rect().translated(box.mapToGlobal(box.rect().topLeft()))
+    assert area.contains(geo)
+    assert not geo.intersects(field)
+    rows = sum(view.sizeHintForRow(i) for i in range(box.count()))
+    if field_y == 400:
+        assert view.verticalScrollBar().maximum() > 0
+        assert view.visualRect(view.currentIndex()).intersects(view.viewport().rect())
+    else:
+        assert view.viewport().height() >= rows
+        assert (geo.top() > field.bottom()) is (field_y == 120)
+    box.hidePopup()

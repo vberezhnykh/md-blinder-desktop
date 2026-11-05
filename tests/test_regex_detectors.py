@@ -278,6 +278,16 @@ def test_bounds_a_labeled_address_at_an_underscore_signature_run() -> None:
     assert "12 Baker Street, London" in values(text, "ADDRESS")
 
 
+@pytest.mark.parametrize("text", [
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE; website: acme-trading.com, hereinafter",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE Website: acme-trading.com",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE, https://acme-trading.com",
+])
+def test_stops_a_labeled_address_before_a_website(text: str) -> None:
+    assert values(text, "ADDRESS") == ["Office 32, Al Saqr Tower, Dubai, UAE"]
+    assert [v.removeprefix("https://") for v in values(text, "URL")] == ["acme-trading.com"]
+
+
 def test_recovers_a_multi_line_address_behind_a_doubled_address_label() -> None:
     text = "Address: Address: 11 Hurley Street\n\n--------------------------- Cambridge, MA 02141\n\nTel"
     addrs = values(text, "ADDRESS")
@@ -454,6 +464,20 @@ class TestRussianAndUkrainianAddressLabels:
     ])
     def test_trims_the_value_at_the_next_requisites_field(self, text: str) -> None:
         assert self.addresses(text) == ["г. Москва, ул. Тверская, д. 1"]
+
+    # Сайт после адреса — отдельное поле: адрес кончается на стране, сайт получает метку URL.
+    @pytest.mark.parametrize("text", [
+        "по адресу офис 032, Бизнес Тауэр, Дубай, ОАЭ; сайт: acme-trading.com, именуемая в дальнейшем",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ, веб-сайт acme-trading.com",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ Сайт: acme-trading.com",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ, www.acme-trading.com",
+    ])
+    def test_stops_the_value_before_a_website(self, text: str) -> None:
+        assert self.addresses(text) == ["офис 032, Бизнес Тауэр, Дубай, ОАЭ"]
+        assert [v.removeprefix("www.") for v in values(text, "URL")] == ["acme-trading.com"]
+
+    def test_trims_at_a_field_after_a_semicolon(self) -> None:
+        assert self.addresses("Адрес: г. Москва, ул. Тверская, д. 1; ИНН 7712345678") == ["г. Москва, ул. Тверская, д. 1"]
 
     # Без двоеточия именная метка в прозе не превращает полпредложения в адрес.
     def test_ignores_a_noun_label_used_in_prose_without_a_colon(self) -> None:

@@ -432,14 +432,17 @@ _EN_ADDRESS_SPEC = _AddressLabelSpec(
         r"^\s*(?:registered\s+office\s+|business\s+|legal\s+|postal\s+|residential\s+|correspondence\s+)?address\s*:",
         "i",
     ),
+    # Поле после запятой или точки с запятой. Сайт тоже поле: «…, UAE; website: acme.com»
+    # иначе входил в адрес целиком и не получал своей метки URL.
     field_re=JsRegex(
-        r",\s*(?:company\s+(?:registration|reg)\b|registration\s+(?:no|number)\b|reg\.?\s*(?:no|number)\b|CRN\b|VAT\b"
-        r"|represented\s+by\b|acting\b|director\b|tel\b|phone\b|fax\b|e-?mail\b|hereinafter\b)",
+        r"[,;]\s*(?:company\s+(?:registration|reg)\b|registration\s+(?:no|number)\b|reg\.?\s*(?:no|number)\b|CRN\b"
+        r"|VAT\b|represented\s+by\b|acting\b|director\b|tel\b|phone\b|fax\b|e-?mail\b|hereinafter\b"
+        r"|web-?site\b|web\b|url\b|www\.|https?://)",
         "i",
     ),
-    # Контактное поле (Phone #:, Tel:, Fax:, Email:) обрезаем и без запятой: адрес
-    # и контакты могут оказаться в одном абзаце.
-    contact_field_re=JsRegex(r"\s(?:telephone|tel|phone|fax|e-?mail|mobile|cell)\b[\s.]*[:#]", "i"),
+    # Контактное поле (Phone #:, Tel:, Fax:, Email:, Website:) обрезаем и без запятой:
+    # адрес и контакты могут оказаться в одном абзаце.
+    contact_field_re=JsRegex(r"\s(?:telephone|tel|phone|fax|e-?mail|mobile|cell|web-?site|url)\b[\s.]*[:#]", "i"),
 )
 
 
@@ -473,14 +476,18 @@ _RU_ADDRESS_SPEC = _AddressLabelSpec(
     double_label_re=JsRegex(rf"^\s*{RU_ADDRESS_LABEL_SRC}", "iu"),
     # Идентификатор часто вводится словом «код» («, код за ЄДРПОУ 12345678»): без
     # этого префикса адрес проглатывал номер вместе с его типом.
+    # Сайт тоже поле: «…, ОАЭ; сайт: acme.com» иначе входил в адрес целиком.
     field_re=JsRegex(
-        r",\s*(?:код\s+(?:за\s+)?)?"
+        r"[,;]\s*(?:(?:код\s+(?:за\s+)?)?"
         r"(?:тел(?:ефон)?|факс|e-?mail|эл\.?\s*почт\p{L}*|ИНН|КПП|ОГРНИП|ОГРН|БИК|СНИЛС|"
         r"ЄДРПОУ|ІПН|РНОКПП|р\/с|к\/с|паспорт|именуем\p{L}*|іменован\p{L}*|в\s+лице|"
-        r"в\s+особі|действующ\p{L}*|діюч\p{L}*)(?!\p{L})",
+        r"в\s+особі|действующ\p{L}*|діюч\p{L}*|(?:веб-?|интернет-?)?сайт|web-?site|url)(?!\p{L})"
+        r"|www\.|https?://)",
         "iu",
     ),
-    contact_field_re=JsRegex(r"\s(?:тел(?:ефон)?|факс|e-?mail|эл\.?\s*почт\p{L}*)\s*[.:#]", "iu"),
+    contact_field_re=JsRegex(
+        r"\s(?:тел(?:ефон)?|факс|e-?mail|эл\.?\s*почт\p{L}*|(?:веб-?|интернет-?)?сайт|web-?site|url)\s*[.:#]", "iu"
+    ),
 )
 
 

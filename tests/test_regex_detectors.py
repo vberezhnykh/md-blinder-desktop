@@ -369,6 +369,19 @@ class TestRussianIdsAndAccounts:
         assert "12345678901" not in regs
         assert not any(len(v) == 11 for v in regs)
 
+    # Двуязычные реквизиты: метки латиницей.
+    @pytest.mark.parametrize("text, expected", [
+        ("INN 7736324582", "7736324582"),
+        ("KPP: 773601001", "773601001"),
+        ("OGRN 1197746606232", "1197746606232"),
+        ("OGRNIP: 315237500002317", "315237500002317"),
+    ])
+    def test_detects_id_with_latin_label(self, text: str, expected: str) -> None:
+        assert set(values(text, "REG_NUMBER")) == {expected}
+
+    def test_detects_a_combined_inn_kpp_form_with_latin_labels(self) -> None:
+        assert sorted(values("INN/KPP 7736321479/773601001", "REG_NUMBER")) == ["773601001", "7736321479"]
+
     @pytest.mark.parametrize("text, expected", [
         ("р/с 40702810338000246070", "40702810338000246070"),
         ("к/с 30101810400000000225", "30101810400000000225"),
@@ -683,3 +696,39 @@ def test_spaced_registration_prefix_is_uppercase_only() -> None:
     # Строчное слово перед цифрами — не префикс номера.
     assert values("the registration number is 12345678", "REG_NUMBER") == []
     assert values("registration number c 62251", "REG_NUMBER") == []
+
+
+# Налоговый номер с английской меткой: модель без правила путала его с адресом.
+class TestTaxIdWithEnglishLabel:
+    @pytest.mark.parametrize("text, expected", [
+        ("TIN: 9909747220<br>KPP: 774751001", "9909747220"),
+        ("TIN 500100732259", "500100732259"),
+        ("Tax ID: 123456789", "123456789"),
+        ("Tax ID No.: 123456789", "123456789"),
+        ("Taxpayer Identification Number: 7707083893", "7707083893"),
+        ("tax registration number 12345678", "12345678"),
+        ("ITN 3012345678", "3012345678"),
+        ("INN 301234567", "301234567"),  # ИНН Узбекистана — 9 цифр
+        ("TIN No. 123-45-6789", "123-45-6789"),
+    ])
+    def test_detects_tax_id(self, text: str, expected: str) -> None:
+        assert expected in values(text, "REG_NUMBER")
+
+    def test_labelled_number_is_reg_number_not_phone(self) -> None:
+        # При одинаковом спане побеждает совпадение, найденное раньше: номер должен идти до телефона.
+        first = detect_structural("TIN: 123-45-6789")[0]
+        assert (first.type, first.value) == ("REG_NUMBER", "123-45-6789")
+
+    @pytest.mark.parametrize("text", [
+        "a tin of 12345678 cans",  # строчное слово, не метка
+        "Holiday Inn 123456789",
+        "TIN: 1234567",  # слишком короткий
+        "TIN 1234567890123456789",  # слишком длинный
+    ])
+    def test_ignores(self, text: str) -> None:
+        assert values(text, "REG_NUMBER") == []
+
+    def test_address_stops_before_tax_id(self) -> None:
+        text = "Address: 125009, Moscow, Tverskaya str., 7, TIN 9909747220"
+        assert values(text, "ADDRESS") == ["125009, Moscow, Tverskaya str., 7"]
+        assert values(text, "REG_NUMBER") == ["9909747220"]

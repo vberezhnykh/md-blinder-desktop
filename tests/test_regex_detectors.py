@@ -663,7 +663,7 @@ def test_excludes_the_removal_notice_from_structural_detection() -> None:
     ("Ac\u212a 12345678", []),
     ("Tele\u212aom tel 0612345678", [("PHONE", "0612345678", 12, 22)]),
     # С флагами iu JS отождествляет «ſ» с «s»: метка паспорта срабатывает.
-    ("Pa\u017f\u017fport 4506 123456", [("ID_DOC", "4506 123456", 9, 20), ("PHONE", "4506 12345", 9, 19)]),
+    ("Pa\u017f\u017fport 4506 123456", [("ID_DOC", "4506 123456", 9, 20), ("PHONE", "4506 123456", 9, 20)]),
     ("https://\u0130stanbul.example.com/x", [("URL", "https://\u0130stanbul.example.com/x", 0, 30)]),
     # \s и trim() как в JS: \ufeff — пробел, \x85 — нет.
     ("Address:\ufeff12 Baker Street, London", [("ADDRESS", "12 Baker Street, London", 9, 32)]),
@@ -697,6 +697,34 @@ def test_spaced_registration_prefix_is_uppercase_only() -> None:
     assert values("the registration number is 12345678", "REG_NUMBER") == []
     assert values("registration number c 62251", "REG_NUMBER") == []
 
+
+# Хвосты: рядом с меткой не должно оставаться цифр и букв закрытого значения.
+@pytest.mark.parametrize("text, expected", [
+    ("Тел.: +7 916 1234567", "Тел.: [PHONE_1]"),
+    ("Tel: 8 (495) 123-45-67", "Tel: [PHONE_1]"),
+    ("тел +7(495)123-45-67", "тел [PHONE_1]"),
+    ("тел. +7 916 123-45-67 01.01.2020", "тел. [PHONE_1] 01.01.2020"),
+    ("р/с 40702 810 9 3800 0012345", "р/с [ACCOUNT_1]"),
+    ("E-mail: иван.ivanov@mail.ru", "E-mail: [EMAIL_1]"),
+    ("почта: info@почта.рф.", "почта: [EMAIL_1]."),
+])
+def test_no_tails_next_to_placeholder(text: str, expected: str) -> None:
+    from md_blinder.anonymize.apply import build_anonymized_text
+    from md_blinder.anonymize.pipeline import anonymize_markdown
+
+    result = anonymize_markdown(text)
+    assert build_anonymized_text(text, result.entities) == expected
+
+
+@pytest.mark.parametrize("text", [
+    "2019 2020 2021 2022",
+    "Сумма 100 200 300 400 500 600",
+    "40702810938000012345 30101810400000000225",
+    "с 2020-01-01 2020-12-31",
+])
+def test_long_digit_rows_are_not_phones(text: str) -> None:
+    assert not has_type(text, "PHONE")
+    assert not has_type(text, "ACCOUNT")
 
 # Налоговый номер с английской меткой: модель без правила путала его с адресом.
 class TestTaxIdWithEnglishLabel:

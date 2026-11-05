@@ -590,6 +590,7 @@ class StatusStrip(QWidget):
     copy_text = Signal()
     export_csv = Signal()
     export_pdf = Signal()
+    restore_names = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -651,6 +652,11 @@ class StatusStrip(QWidget):
                 "file",
             )
         m.add_separator()
+        m.add_item(
+            "Вернуть настоящие данные…", self.restore_names.emit,
+            "Вставьте ответ нейросети или юриста с метками и получите текст с настоящими значениями", "refresh",
+            sensitive=True,
+        )
         m.add_item(
             "Таблица замен (.csv)", self.export_csv.emit,
             "Содержит исходные данные, не передавайте ее вместе с обезличенным текстом", "table", sensitive=True,

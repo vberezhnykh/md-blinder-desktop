@@ -38,7 +38,7 @@ python scripts/eval_corpus.py <папка test-samples> --cache <папка ке
 ## Устройство
 
 - `convert/` — DOCX (mammoth), XLSX (openpyxl), PDF (PyMuPDF, таблицы через pymupdf-layout), OCR сканов (Indra OCR, `ocr.py`, `script_mix.py`).
-- `anonymize/` — правила (`regex_detectors.py`, шаблоны с семантикой JS через `_js_regex.py`), фильтр находок модели (`ner_filter.py`), склейка, поиск повторов (`related.py`), пакет документов (`batch.py`), обезличенный PDF (`redacted_pdf.py`).
+- `anonymize/` — правила (`regex_detectors.py`, шаблоны с семантикой JS через `_js_regex.py`), фильтр находок модели (`ner_filter.py`), склейка, поиск повторов (`related.py`), пакет документов (`batch.py`), обезличенный PDF (`redacted_pdf.py`), имя выгружаемого файла с метками (`file_name.py`), обратная подстановка меток (`restore.py`).
 - `ner/` — сессия ONNX Runtime для GLiNER: CPU или DirectML на Windows, калибровка, батчи. Одна модель на программу, ее скачивание, предзагрузка и состояние для индикатора стартового экрана — `model_holder.py`.
 - `ui/` — интерфейс, `jobs.py` — фоновая обработка, `storage/` — история в SQLite.
 

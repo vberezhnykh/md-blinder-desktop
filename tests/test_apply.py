@@ -585,3 +585,37 @@ def test_segments_map_is_consistent():
         if not s.opaque:
             assert text[s.out_start:s.out_end] == source[s.src_start:s.src_end]
     assert [s.opaque for s in segments] == [True, False, True, False, True]
+
+
+def test_add_entity_from_matches_skips_closed_places_and_reuses_label():
+    from md_blinder.anonymize.apply import add_entity_from_matches
+    from md_blinder.ui.search_bar import find_matches
+
+    text = "Иван Петров подписал. ИВАН пришел. Иван\nушел. Acme и acme."
+    person = Entity(id="p", type="PERSON", value="Иван Петров", placeholder="[PERSON_1]",
+                    positions=[P(0, 11)], anonymize=True)
+    dismissed = Entity(id="d", type="PERSON", value="ИВАН", placeholder="[PERSON_2]",
+                       positions=[P(22, 26)], anonymize=False, dismissed=True)
+    spans = find_matches(text, "иван")
+    assert [text[s.start:s.end] for s in spans] == ["Иван", "ИВАН", "Иван"]
+    result, added = add_entity_from_matches([person, dismissed], text, spans, "PERSON")
+    # «Иван» внутри готовой замены «Иван Петров» не трогается, отклоненная находка уступает место.
+    assert added == 2
+    assert next(e for e in result if e.id == "p").positions == [P(0, 11)]
+    assert all(e.id != "d" for e in result)
+    new = next(e for e in result if e.id not in ("p", "d"))
+    assert (new.type, new.anonymize, new.placeholder) == ("PERSON", True, "[PERSON_2]")
+    assert [text[p.start:p.end] for p in new.positions] == ["ИВАН", "Иван"]
+
+    company = Entity(id="c", type="COMPANY", value="Acme", placeholder="[COMPANY_1]",
+                     positions=[P(text.index("Acme"), text.index("Acme") + 4)], anonymize=True)
+    result, added = add_entity_from_matches([company], text, find_matches(text, "acme"), "COMPANY")
+    assert added == 1 and len(result) == 1 and len(result[0].positions) == 2
+
+
+def test_find_matches_spans_line_breaks_and_skips_images():
+    from md_blinder.ui.search_bar import find_matches
+
+    text = "Иван\nПетров ![](data:image/png;base64,ИванПетров) Иван Петров"
+    assert len(find_matches(text, "иван петров")) == 2
+    assert find_matches(text, "   ") == []

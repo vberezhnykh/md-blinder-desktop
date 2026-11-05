@@ -216,6 +216,7 @@ class HistoryPanel(QWidget):
     show_batch = Signal(str)  # id любого документа пакета: открыть его и «Все замены пакета»
     export_history = Signal()
     import_history = Signal()
+    clear_history = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -237,8 +238,12 @@ class HistoryPanel(QWidget):
         import_button = make_button("Импорт истории", kind="ghost", small=True, icon_name="import")
         import_button.setToolTip("Документы из файла .json добавятся к этим")
         import_button.clicked.connect(self.import_history)
+        self.clear_button = make_button("Удалить все", kind="ghost", small=True, icon_name="trash")
+        self.clear_button.setToolTip("Удалить из истории все документы вместе с исходным текстом")
+        self.clear_button.clicked.connect(self.clear_history)
         header.addWidget(self.export_button)
         header.addWidget(import_button)
+        header.addWidget(self.clear_button)
         layout.addLayout(header)
         layout.addSpacing(10)
         self.error = QLabel()
@@ -261,13 +266,11 @@ class HistoryPanel(QWidget):
         foot.setContentsMargins(16, 10, 16, 10)
         foot.setSpacing(8)
         foot.addWidget(icon_label("lock", t.INK_3, 14), 0, Qt.AlignmentFlag.AlignTop)
-        warning = QLabel(
-            "История хранится на этом компьютере вместе с исходным текстом, без шифрования. "
-            "Экспорт истории тоже содержит исходные данные."
-        )
-        warning.setObjectName("hint")
-        warning.setWordWrap(True)
-        foot.addWidget(warning, 1)
+        self.warning = QLabel()
+        self.warning.setObjectName("hint")
+        self.warning.setWordWrap(True)
+        self.set_retention(None)
+        foot.addWidget(self.warning, 1)
         card_layout.addWidget(footer)
         layout.addWidget(card)
         self.more_button = make_button(kind="link")
@@ -289,6 +292,16 @@ class HistoryPanel(QWidget):
         self.expanded = expanded
         self.render(self._docs, self._current_id)
 
+    def set_retention(self, days: Optional[int]) -> None:
+        """Подпись под списком: где хранится история и через сколько дней документы удаляются."""
+        text = (
+            "История хранится на этом компьютере вместе с исходным текстом, без шифрования. "
+            "Экспорт истории тоже содержит исходные данные."
+        )
+        if days:
+            text += f" Документы, которые не менялись {days} дней, удаляются при запуске программы."
+        self.warning.setText(text)
+
     def set_error(self, text: str) -> None:
         self.error.setText(text)
         self.error.setVisible(bool(text))
@@ -297,6 +310,7 @@ class HistoryPanel(QWidget):
         self._docs, self._current_id = docs, current_id
         self.count.setText(str(len(docs)))
         self.export_button.setEnabled(bool(docs))
+        self.clear_button.setEnabled(bool(docs))
         while self.rows.count():
             item = self.rows.takeAt(0)
             if item.widget():
@@ -390,7 +404,15 @@ class HistoryPanel(QWidget):
         texts.addWidget(name)
         texts.addWidget(meta)
         line.addLayout(texts, 1)
-        if doc.pending_count:
+        if doc.ner_missing:
+            chip = QLabel("Имена не искались")
+            chip.setObjectName("chipPending")
+            chip.setToolTip(
+                "Модель поиска имен, компаний и адресов не работала при обработке. Откройте документ и нажмите "
+                "«Найти имена заново»"
+            )
+            line.addWidget(chip)
+        elif doc.pending_count:
             chip = QLabel(f"Не проверено: {doc.pending_count}")
             chip.setObjectName("chipPending")
             chip.setToolTip("Кандидаты, которые еще не приняты и не отклонены: в тексте они без замены")

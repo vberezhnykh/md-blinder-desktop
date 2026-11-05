@@ -43,6 +43,7 @@ from ..anonymize.types import ALL_ENTITY_TYPES, Entity, Position
 from ..editing import TextChange, active_span_at, drag_span, hovered_entity_at, replace_position
 from ..storage.offsets import OffsetMap
 from . import theme as t
+from .search_bar import SearchBar
 from .widgets import BATCH_PREFIX, ElidedLabel, Pane, Select, make_button
 
 _TABLE_LINE = re.compile(r"^\s*\|")
@@ -249,6 +250,8 @@ class SourceEditor(QTextEdit):
         self._active: Optional[tuple[str, Position]] = None  # вхождение с ручками
         self._drag: Optional[dict] = None
         self._hover_id: Optional[str] = None
+        self._search: list[Position] = []  # совпадения строки поиска (Ctrl+F)
+        self._search_current: Optional[int] = None
         self._suppress = False
         self.selected_type = "PERSON"
         # Замены остальных документов пакета открытого документа; задает MainWindow.
@@ -429,6 +432,16 @@ class SourceEditor(QTextEdit):
                 sel.cursor = self._cursor_for(p.start, p.end)
                 sel.format = fmt
                 selections.append(sel)
+        # Совпадения поиска — в цвете акцента с подчеркиванием, чтобы не путать их с заливкой замен;
+        # текущее совпадение выделено, как выделенный текст.
+        for i, m in enumerate(self._search):
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = self._cursor_for(m.start, m.end)
+            current = i == self._search_current
+            sel.format.setBackground(t.mix(t.ACCENT, t.SURFACE, 0.32 if current else 0.14))
+            sel.format.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+            sel.format.setUnderlineColor(QColor(t.ACCENT))
+            selections.append(sel)
         self.setExtraSelections(selections)
         self.viewport().update()
         self._gutter.update()
@@ -530,6 +543,16 @@ class SourceEditor(QTextEdit):
         return None
 
     # --- клавиатура и мышь ---
+
+    def set_search(self, matches: list[Position], current: Optional[int], reveal: bool = True) -> None:
+        """Подсветка совпадений поиска; текущее показывается в середине окна."""
+        self._search = list(matches)
+        self._search_current = current
+        self._render_highlights()
+        if reveal and current is not None and 0 <= current < len(self._search):
+            m = self._search[current]
+            self.popup.hide()
+            self.scroll_to(m.start)
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         # Встроенная отмена выключена; Ctrl+Z/Ctrl+Y ведут в общий стек сессии.
@@ -657,5 +680,8 @@ class EditorPane(Pane):
         hint.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         hint.setToolTip(hint.text())
         self.add_head_widget(hint)
+        self.search = SearchBar()
+        self.body.addWidget(self.search)
         self.editor = SourceEditor()
         self.body.addWidget(self.editor)
+        self.search.changed.connect(self.editor.set_search)

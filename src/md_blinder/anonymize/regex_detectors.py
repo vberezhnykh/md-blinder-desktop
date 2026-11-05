@@ -83,6 +83,16 @@ _EMAIL_LOCAL_CHARS = _ASCII_ALNUM | frozenset("._%+'-")
 _EMAIL_DOMAIN_CHARS = _ASCII_ALNUM | frozenset(".-")
 
 
+# Адрес может содержать буквы любого алфавита («иван.ivanov@mail.ru», «info@почта.рф»).
+# Без них кириллическая часть адреса осталась бы в тексте рядом с меткой.
+def _is_email_local(ch: str) -> bool:
+    return ch in _EMAIL_LOCAL_CHARS or ch.isalnum()
+
+
+def _is_email_domain(ch: str) -> bool:
+    return ch in _EMAIL_DOMAIN_CHARS or ch.isalnum()
+
+
 def detect_email(text: str) -> list[RawMatch]:
     matches: list[RawMatch] = []
     n = len(text)
@@ -91,18 +101,18 @@ def detect_email(text: str) -> list[RawMatch]:
     at = text.find("@")
     while at >= 0:
         start = at
-        while start > 0 and text[start - 1] in _EMAIL_LOCAL_CHARS:
+        while start > 0 and _is_email_local(text[start - 1]):
             start -= 1
         if start != at:
             end = at + 1
-            while end < n and text[end] in _EMAIL_DOMAIN_CHARS:
+            while end < n and _is_email_domain(text[end]):
                 end += 1
             while text[end - 1] == ".":
                 end -= 1
             domain = text[at + 1:end]
             dot = domain.rfind(".")
             tld = domain[dot + 1:]
-            if dot > 0 and len(tld) >= 2 and tld.isascii() and tld.isalpha():
+            if dot > 0 and len(tld) >= 2 and tld.isalpha():
                 matches.append(RawMatch("EMAIL", text[start:end], start, end))
         at = text.find("@", at + 1)
     return matches
@@ -289,20 +299,100 @@ def _count_digits(s: str) -> int:
     return sum(1 for ch in s if ch in _ASCII_DIGITS)
 
 
+# Разделители цепочки групп цифр: «40702 810 9 3800 0012345», «123-45-67». Точка не входит,
+# иначе дата сразу после телефона («… 123-45-67 01.01.2020») слилась бы с ним.
+_CHAIN_SEP = " \xa0 -"
+_MAX_PHONE_DIGITS = 15
+_MAX_CHAIN_DIGITS = 34
+
+
+def _digit_run_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Расширяет [start, end) до целых чисел: шаблон телефона берет группы до 5 цифр
+    и без этого обрывается посреди числа («+7 916 12345» из «+7 916 1234567»)."""
+    n = len(text)
+    while start > 0 and text[start - 1] in _ASCII_DIGITS:
+        start -= 1
+    while end < n and text[end] in _ASCII_DIGITS:
+        end += 1
+    return start, end
+
+
+def _digit_chain_bounds(text: str, start: int, end: int) -> tuple[int, int]:
+    """Цепочка групп цифр через одиночный пробел или дефис вокруг [start, end)."""
+    n = len(text)
+    while end + 1 < n and text[end] in _CHAIN_SEP and text[end + 1] in _ASCII_DIGITS:
+        end += 1
+        while end < n and text[end] in _ASCII_DIGITS:
+            end += 1
+    while start >= 2 and text[start - 1] in _CHAIN_SEP and text[start - 2] in _ASCII_DIGITS:
+        start -= 1
+        while start > 0 and text[start - 1] in _ASCII_DIGITS:
+            start -= 1
+    return start, end
+
+
+_GROUP_TAIL_RE = JsRegex(r"[\s.-]\d+$")
+
+
+def _drop_dotted_tail(text: str, start: int, raw: str) -> str:
+    """Последняя группа, за которой идет «.12» или «/12», — начало даты или другого числа,
+    а не часть телефона: «… 123-45-67 01.01.2020» не должен забирать «01»."""
+    end = start + len(raw)
+    if end + 1 < len(text) and text[end] in "./" and text[end + 1] in _ASCII_DIGITS:
+        tail = _GROUP_TAIL_RE.search(raw)
+        if tail is not None and tail.start() > 0:
+            return raw[:tail.start()]
+    return raw
+
+
+_PREFIX_BEFORE_PARENS_RE = JsRegex(r"(?<![\p{L}\p{N}+])\+?\d{1,3}[\s.-]?$", "u")
+
+
+def _country_prefix_start(text: str, start: int) -> int:
+    """Код страны или «8» перед кодом города в скобках: «8 (495) 123-45-67», «+7(495)…»."""
+    if start < len(text) and text[start] == "(":
+        m = _PREFIX_BEFORE_PARENS_RE.search(text[max(0, start - 6):start])
+        if m is not None:
+            return max(0, start - 6) + m.start()
+    return start
+
+
 def _detect_phone(text: str) -> list[RawMatch]:
     matches: list[RawMatch] = []
     sep_matches: list[RawMatch] = []
+    long_numbers: list[RawMatch] = []
     for m in _PHONE_SEP_RE.finditer(text):
-        raw = m.group()
+        raw = _drop_dotted_tail(text, m.start(), m.group())
         if _is_date_like(raw) or _is_cep_like(raw) or _is_snils_like(raw):
             continue
         digits = _count_digits(raw)
-        if digits < 7 or digits > 15:
+        if digits < 7 or digits > _MAX_PHONE_DIGITS:
             continue
         if _looks_like_money_sum(raw, text, m.start()):
             continue
-        sep_matches.append(RawMatch("PHONE", raw, m.start(), m.end()))
+        start, end = _digit_run_bounds(text, _country_prefix_start(text, m.start()), m.start() + len(raw))
+        chain_start, chain_end = _digit_chain_bounds(text, start, end)
+        chain = text[chain_start:chain_end]
+        chain_digits = _count_digits(chain)
+        if chain_digits > _MAX_PHONE_DIGITS:
+            # Кусок длинного номера через пробелы (счет, реквизиты): телефоном закрылась бы
+            # только часть, а цифры по краям метки остались бы в тексте. Закрываем весь номер.
+            if (
+                chain_digits <= _MAX_CHAIN_DIGITS
+                and "-" not in chain
+                and not (chain_start > 0 and text[chain_start - 1].isalnum())
+                and not (chain_end < len(text) and text[chain_end].isalnum())
+                and not any(chain_start < x.end and x.start < chain_end for x in long_numbers)
+            ):
+                long_numbers.append(RawMatch("ACCOUNT", chain, chain_start, chain_end))
+            continue
+        if _count_digits(text[start:end]) > _MAX_PHONE_DIGITS:
+            continue
+        if sep_matches and start < sep_matches[-1].end:
+            continue
+        sep_matches.append(RawMatch("PHONE", text[start:end], start, end))
     matches.extend(sep_matches)
+    matches.extend(long_numbers)
 
     # Без метки голое число телефоном не считается.
     for m in _PHONE_LABELLED_RE.finditer(text):
@@ -937,9 +1027,11 @@ def detect_structural(text: str) -> list[RawMatch]:
         *detect_presidio_ids(text),
         *_detect_card(text),
         *_detect_swift(text),
-        *_detect_phone(text),
+        # Номера с меткой счета или регистрации до телефонов: телефон забирает число целиком,
+        # и при одинаковом спане метка должна определять тип («EIN 12-3456789»).
         *_detect_account(text),
         *_detect_reg_number(text),
+        *_detect_phone(text),
         *_detect_address(text),
         *_detect_russian_address(text),
         *_detect_us_address(text),

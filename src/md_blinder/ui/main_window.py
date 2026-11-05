@@ -33,6 +33,7 @@ from ..anonymize.apply import (
     MAX_LABEL_LENGTH,
     accept_all_related,
     accept_related_candidate,
+    add_entity_from_matches,
     add_entity_from_selection,
     add_occurrence_to_entity,
     build_anonymized_text,
@@ -57,8 +58,11 @@ from ..anonymize.batch import (
     swap_batch_labels,
 )
 from ..anonymize.csv_export import csv_bytes
+from ..anonymize.file_name import anonymize_file_name
+from ..anonymize.restore import restore_map
 from ..anonymize.image_safety import find_image_ranges
 from ..anonymize.placeholder_guard import has_placeholder_collision
+from ..anonymize.types import Entity
 from .. import jobs as jobs_module
 from ..cancel import CancelToken
 from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
@@ -82,6 +86,7 @@ from .header import AppHeader
 from . import dialogs
 from .update_ui import UpdateBar, UpdateController, header_update_actions, settings_footer
 from .batch_overview import BatchOverview
+from .restore_dialog import RestoreDialog
 from .widgets import BATCH_PREFIX, Notice, StatusStrip, Toast
 
 SETTING_EXPLORER_MENU = "explorerMenu"
@@ -90,6 +95,10 @@ SETTING_CONVERT_ONLY = "convertOnly"
 # Нужен для экспорта обезличенного PDF; хранится только на этом компьютере.
 SETTING_PDF_SOURCES = "pdfSources"
 PDF_SOURCES_LIMIT = 200
+# Документы, которые не менялись столько дней, удаляются из истории при запуске.
+SETTING_HISTORY_RETENTION = "historyRetention"
+HISTORY_RETENTION_DAYS = 7
+DAY_MS = 24 * 60 * 60 * 1000
 
 WIDE_WINDOW = 1280
 DELETE_UNDO_MS = 8000
@@ -151,6 +160,7 @@ class DocumentPage(QWidget):
         self.ocr_retry.row.setStretch(1, 0)
         self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None)
         self.ner_notice = Notice(closable=True)
+        self.ner_retry = self.ner_notice.add_button("Найти имена заново", lambda: None)
         self.convert_notice = Notice(
             "Включена только конвертация в Markdown: копирование и экспорт дают текст без замен. Отмеченные "
             "данные сохраняются и снова заменяются, если снять флажок «Только конвертация».",
@@ -322,12 +332,14 @@ class MainWindow(QMainWindow):
         for widget in header_update_actions(self.updates):
             self.header.start_row.addWidget(widget)
         footer = settings_footer(self.updates)
+        footer.layout().insertWidget(footer.layout().count() - 1, self._retention_box())
         if shell.available():
             footer.layout().insertWidget(footer.layout().count() - 1, self._explorer_menu_box())
             self._sync_explorer_menu(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
         self.start.add_footer(footer)
 
         self._wire()
+        self._purge_old_history()
         self._refresh_history()
         self._wire_model_status()
 
@@ -344,11 +356,13 @@ class MainWindow(QMainWindow):
         s.history.show_batch.connect(self.show_batch_from_history)
         s.history.export_history.connect(self.export_history)
         s.history.import_history.connect(self.import_history)
+        s.history.clear_history.connect(self.clear_history)
         convert_only = self.settings.value(SETTING_CONVERT_ONLY, False, type=bool)
         for box in (s.convert_only_box, p.convert_only_box):
             box.setChecked(convert_only)
             box.toggled.connect(self.set_convert_only)
         p.detect_button.clicked.connect(self.find_entities)
+        p.ner_retry.clicked.connect(self.find_entities)
 
         self.header.home.connect(self.show_all_docs)
         p.new_button.clicked.connect(self.pick_file)
@@ -365,6 +379,7 @@ class MainWindow(QMainWindow):
         p.status.export_md.connect(self.export_md)
         p.status.copy_text.connect(self.copy_text)
         p.status.export_csv.connect(self.export_csv)
+        p.status.restore_names.connect(self.open_restore)
         p.status.export_pdf.connect(self.export_pdf)
 
         p.editor.edited.connect(self.session.editor_changed)
@@ -387,6 +402,7 @@ class MainWindow(QMainWindow):
         review.restore.connect(lambda i: self._update(lambda es: restore_candidate(es, i), "Вернуть кандидата"))
         review.change_type.connect(self._change_type)
         review.export.connect(self.export_md)
+        review.next_doc.connect(self.open_next_pending_doc)
         found.set_anonymize.connect(self._set_anonymize)
         found.select.connect(self.select_entity)
         found.change_type.connect(self._change_type)
@@ -413,8 +429,12 @@ class MainWindow(QMainWindow):
         folder_action = QAction("Открыть папку", self)
         folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
         folder_action.triggered.connect(self.pick_folder)
-        for action in (undo, redo, open_action, folder_action):
+        find_action = QAction("Найти в тексте", self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self.open_search)
+        for action in (undo, redo, open_action, folder_action, find_action):
             self.addAction(action)
+        p.editor_pane.search.replace_all.connect(self._replace_found)
 
     # ------------------------------------------------------------------ обработка файла
 
@@ -648,6 +668,7 @@ class MainWindow(QMainWindow):
         doc = HistoryDoc(
             id=str(uuid.uuid4()), name=run.names.get(path, result.path.name), format=result.format, created_at=now, updated_at=now,
             source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
+            ner_missing=result.ner_failed or result.ner_skipped,
         )
         run.created.append((doc, result))
         if result.format == "pdf":
@@ -706,7 +727,13 @@ class MainWindow(QMainWindow):
         elif result is not None and result.ner_skipped:
             notice.label.setText(
                 "Поиск имен, компаний и адресов не выполнялся: модель распознавания не скачана. Найдены только "
-                "данные по шаблонам. Отметьте имена вручную или откройте файл заново, чтобы скачать модель."
+                "данные по шаблонам. Отметьте имена вручную или найдите их заново, скачав модель."
+            )
+            notice.show()
+        elif self.session.doc is not None and self.session.doc.ner_missing:
+            notice.label.setText(
+                "При обработке этого документа имена, компании и адреса не искались: модель распознавания "
+                "не работала. Найдены только данные по шаблонам: телефоны, email, реквизиты, номера документов."
             )
             notice.show()
         else:
@@ -798,6 +825,11 @@ class MainWindow(QMainWindow):
                     added.append(replace(e, positions=free))
             return compact_placeholder_numbers(dedupe_entity_ids([*entities, *added]))
 
+        doc = self.session.doc
+        missing = result.ner_failed or result.ner_skipped
+        if doc is not None and doc.ner_missing != missing:
+            doc.ner_missing = missing
+            self.autosave.queue(replace(doc, entities=list(doc.entities)))
         self._update(merge, "Найти персональные данные")
         self._set_ner_notice(result)
         self._render_derived()
@@ -881,6 +913,28 @@ class MainWindow(QMainWindow):
             return []
         return sorted([*self.batch_others, doc], key=lambda d: (d.created_at, d.id))
 
+    def _pending_batch_docs(self) -> list[HistoryDoc]:
+        """Другие документы пакета с непроверенными кандидатами, начиная со следующего
+        за открытым по порядку загрузки."""
+        doc = self.session.doc
+        docs = self._batch_docs()
+        if doc is None or not docs:
+            return []
+        index = next(i for i, d in enumerate(docs) if d.id == doc.id)
+        ordered = docs[index + 1:] + docs[:index]
+        return [d for d in ordered if pending_candidates(d.entities)]
+
+    def _next_pending_doc(self) -> Optional[tuple[str, int, int]]:
+        pending = self._pending_batch_docs()
+        if not pending:
+            return None
+        return pending[0].name, len(pending), sum(len(pending_candidates(d.entities)) for d in pending)
+
+    def open_next_pending_doc(self) -> None:
+        pending = self._pending_batch_docs()
+        if pending:
+            self.open_doc(pending[0].id)
+
     def _update_batch_button(self) -> None:
         docs = self._batch_docs()
         self.header.set_batch_size(len(docs))
@@ -930,6 +984,11 @@ class MainWindow(QMainWindow):
             menu.add_item(
                 "Экспортировать пакет в папку", self.export_batch_folder,
                 "Отдельный .md на каждый документ, подпапки и имена файлов как в исходной папке", "download",
+            )
+            menu.add_item(
+                "Вернуть настоящие данные…", self.open_restore,
+                "Ответ с метками любого документа пакета превращается в текст с настоящими значениями", "refresh",
+                sensitive=True,
             )
             menu.add_item(
                 "Таблица замен пакета (.csv)", self.export_batch_csv,
@@ -1109,7 +1168,10 @@ class MainWindow(QMainWindow):
         target = self._pick_folder("Папка для Markdown-файлов пакета")
         if target is None:
             return
-        plan = export_plan([d.name for d in members])
+        # Метки пакета согласованы, поэтому имя клиента в папке «Клиент/2024» заменяется
+        # одной и той же меткой у всех документов, и структура папок сохраняется.
+        batch_entities = [] if self.convert_only else [e for d in members for e in d.entities]
+        plan = export_plan([anonymize_file_name(d.name, batch_entities) for d in members])
         existing = [rel for rel in plan if target.joinpath(*rel.parts).exists()]
         if existing:
             if not dialogs.ask(
@@ -1162,6 +1224,7 @@ class MainWindow(QMainWindow):
         p = self.page
         if doc is None:
             p.editor.set_content("", [])
+            p.editor_pane.search.close_bar()
             return
         p.file_label.setText(doc.name)
         p.file_label.setToolTip(doc.name)
@@ -1185,17 +1248,19 @@ class MainWindow(QMainWindow):
         p = self.page
         text, entities = doc.source_text, doc.entities
         self._rendered_text = text
+        p.editor_pane.search.set_text(text)
         # В режиме только конвертации разметка сохраняется, но в результат не попадает.
         output = [] if self.convert_only else entities
         anonymized = build_anonymized_text_with_map(text, output)
         self.anonymized_text = anonymized.text
         p.preview.render(anonymized.text, text, anonymized.segments, output)
+        p.side.review.next_in_batch = None if self.convert_only else self._next_pending_doc()
         p.side.render(entities, text, None if self.convert_only else self.batch_index)
         p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
         unreviewed = len(pending_candidates(output))
         active = [e for e in output if e.anonymize]
         p.status.update_state(
-            unreviewed, len(active), sum(len(e.positions) for e in active), f"{base_name(doc.name)}.md",
+            unreviewed, len(active), sum(len(e.positions) for e in active), f"{self._export_base(doc.name, output)}.md",
             pdf=doc.format == "pdf" and not self.convert_only,
         )
         # Без обезличивания проверка не нужна: остаются исходник, результат и выгрузка.
@@ -1240,6 +1305,41 @@ class MainWindow(QMainWindow):
     def _set_anonymize(self, ids: list, value: bool) -> None:
         selected = set(ids)
         self._update(lambda es: [replace(e, anonymize=value) if e.id in selected else e for e in es], "Переключить замену")
+
+    # ------------------------------------------------------------------ поиск по тексту
+
+    def open_search(self) -> None:
+        """Ctrl+F на экране документа: строка поиска над исходником. Выделенный
+        в тексте фрагмент сразу становится запросом."""
+        doc = self.session.doc
+        if doc is None or self.stack.currentWidget() is not self.page:
+            return
+        p = self.page
+        if not p.editor_pane.isVisible():
+            self.set_view("source")
+        selected = p.editor.textCursor().selectedText().replace("\u2029", " ").strip()
+        query = selected if 0 < len(selected) <= 100 else ""
+        p.editor_pane.search.open_with(doc.source_text, query, p.editor.selected_type)
+
+    def _replace_found(self, spans: list, type_: str) -> None:
+        text = self.session.text
+        added = 0
+
+        def apply(entities: list) -> list:
+            nonlocal added
+            result, added = add_entity_from_matches(entities, text, spans, type_)
+            return compact_placeholder_numbers(result)
+
+        self.page.editor.selected_type = type_
+        self._update(apply, "Заменить найденное")
+        skipped = len(spans) - added
+        if added:
+            message = f"В замены добавлено: {plural(added, ('место', 'места', 'мест'))}."
+            if skipped:
+                message += f" Еще {plural(skipped, ('место', 'места', 'мест'))} уже в заменах или ждут проверки."
+            self.toast.show_message(message, 5000)
+        else:
+            self.toast.show_message("Все найденные места уже в заменах или ждут проверки.", 4000)
 
     def _add_entity(self, start: int, end: int, type_: str) -> None:
         text = self.session.text
@@ -1334,6 +1434,13 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ выдача
 
     def _notify_done(self, done: str) -> None:
+        doc = self.session.doc
+        if not self.convert_only and doc is not None and doc.ner_missing:
+            self.toast.show_message(
+                f"{done} Имена, компании и адреса в этом документе не искались: проверьте текст "
+                "или найдите их заново.", 10000, action=("Найти заново", self.find_entities), tone="warn",
+            )
+            return
         unreviewed = 0 if self.convert_only else len(pending_candidates(self.session.entities))
         if unreviewed == 0:
             self.toast.show_message(done, 3000)
@@ -1343,6 +1450,10 @@ class MainWindow(QMainWindow):
             "в тексте они остались без замены.",
             8000, action=("Показать", self.show_candidates), tone="warn",
         )
+
+    def _export_base(self, name: str, entities: list[Entity]) -> str:
+        """Имя выгрузки без расширения: найденные в имени исходника данные заменены метками."""
+        return base_name(name if self.convert_only else anonymize_file_name(name, entities))
 
     def _save_path(self, default_name: str, filter_: str) -> Optional[Path]:
         start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
@@ -1356,7 +1467,7 @@ class MainWindow(QMainWindow):
         doc = self.session.doc
         if doc is None:
             return
-        name = f"{base_name(doc.name)}.md"
+        name = f"{self._export_base(doc.name, self.session.entities)}.md"
         path = self._save_path(name, "Markdown (*.md)")
         if path is None:
             return
@@ -1370,6 +1481,24 @@ class MainWindow(QMainWindow):
     def copy_text(self) -> None:
         QApplication.clipboard().setText(self.anonymized_text)
         self._notify_done("Текст скопирован.")
+
+    def open_restore(self) -> None:
+        """Обратная подстановка по таблице замен открытого документа или всего пакета."""
+        doc = self.session.doc
+        if doc is None:
+            return
+        members = self._collect_batch() if doc.batch_id else None
+        if members:
+            current = self.session.doc
+            docs = [current, *[d for d in members if d.id != current.id]]
+            scope = f"пакета ({plural(len(docs), ('документ', 'документа', 'документов'))})"
+        else:
+            docs = [doc]
+            scope = "этого документа"
+        mapping = restore_map((d.source_text, d.entities) for d in docs)
+        dialog = RestoreDialog(self, mapping, scope, self._save_path)
+        self.restore_dialog = dialog
+        dialog.exec()
 
     def export_csv(self) -> None:
         doc = self.session.doc
@@ -1422,7 +1551,7 @@ class MainWindow(QMainWindow):
                 return
             source = Path(picked)
             self._remember_pdf_source(doc.id, source, force_ocr)
-        target = self._save_path(f"{base_name(doc.name)} (обезличенный).pdf", "PDF (*.pdf)")
+        target = self._save_path(f"{self._export_base(doc.name, doc.entities)} (обезличенный).pdf", "PDF (*.pdf)")
         if target is None:
             return
         if target.resolve() == source.resolve():
@@ -1541,6 +1670,8 @@ class MainWindow(QMainWindow):
         if recent:
             menu.add_item("Экспорт истории…", self.export_history, "Файл .json с исходным текстом документов", "download")
         menu.add_item("Импорт истории…", self.import_history, "Документы из файла добавятся к этим", "import")
+        if recent:
+            menu.add_item("Удалить все…", self.clear_history, "Все документы вместе с исходным текстом", "trash")
         menu.add_note(
             "История хранится на этом компьютере вместе с исходным текстом, без шифрования.", icon_name="lock",
         )
@@ -1612,6 +1743,82 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.start.history.set_error(f"Не удалось удалить документ: {exc}")
         self._refresh_history()
+
+    # ------------------------------------------------------------------ срок хранения истории
+
+    @property
+    def retention_days(self) -> Optional[int]:
+        enabled = self.settings.value(SETTING_HISTORY_RETENTION, True, type=bool)
+        return HISTORY_RETENTION_DAYS if enabled else None
+
+    def _retention_box(self) -> QCheckBox:
+        box = QCheckBox(f"Удалять документы старше {HISTORY_RETENTION_DAYS} дней")
+        box.setObjectName("small")
+        box.setChecked(self.retention_days is not None)
+        box.setToolTip(
+            f"При запуске программы из истории удаляются документы, которые не менялись {HISTORY_RETENTION_DAYS} "
+            "дней. Пакет удаляется целиком, когда устарели все его документы."
+        )
+        box.toggled.connect(self._retention_toggled)
+        return box
+
+    def _retention_toggled(self, enabled: bool) -> None:
+        self.settings.setValue(SETTING_HISTORY_RETENTION, enabled)
+        if enabled:
+            self._purge_old_history()
+        self._refresh_history()
+
+    def _purge_old_history(self) -> None:
+        days = self.retention_days
+        self.start.history.set_retention(days)
+        if days is None:
+            return
+        keep = {d.id for d in [self.session.doc, *self.batch_others] if d is not None}
+        try:
+            removed = self.store.delete_older_than(now_ms() - days * DAY_MS, keep)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось удалить старые документы: {exc}")
+            return
+        if removed:
+            self._forget_pdf_sources(removed)
+            self.toast.show_message(
+                f"Из истории удалено {plural(len(removed), ('документ', 'документа', 'документов'))} "
+                f"старше {days} дней.", 5000,
+            )
+
+    def _forget_pdf_sources(self, doc_ids: Optional[list[str]] = None) -> None:
+        """Пути к исходным PDF тоже говорят об удаленных документах: убираем и их."""
+        sources = {} if doc_ids is None else {k: v for k, v in self._pdf_sources().items() if k not in set(doc_ids)}
+        self.settings.setValue(SETTING_PDF_SOURCES, json.dumps(sources, ensure_ascii=False))
+
+    def clear_history(self) -> None:
+        if self.job is not None:
+            return
+        count = len(getattr(self, "history_meta", []))
+        if not count or not dialogs.ask(
+            self, "Удалить всю историю?",
+            f"Из истории будут удалены {plural(count, ('документ', 'документа', 'документов'))} вместе с исходным "
+            "текстом и таблицами замен. Отменить удаление нельзя.",
+            "Удалить все", danger=True,
+        ):
+            return
+        self.autosave.flush()
+        if self.session.doc is not None:
+            self.autosave.discard(self.session.doc.id)
+        self.delete_timer.stop()
+        self.pending_delete = None
+        self.session.replace_doc(None)
+        self.batch_others = []
+        self.last_pdf = None
+        try:
+            self.store.delete_all()
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось очистить историю: {exc}")
+            return
+        self._forget_pdf_sources()
+        self.stack.setCurrentWidget(self.start)
+        self._refresh_history()
+        self.toast.show_message("История очищена.", 4000)
 
     def export_history(self) -> None:
         if not self.autosave.flush():

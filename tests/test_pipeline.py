@@ -198,3 +198,18 @@ def test_postal_code_piece_is_stitched_before_number_check():
         RawMatch("ADDRESS", markdown[rest_start:], rest_start, len(markdown), 0.6),
     ]))
     assert [e.value for e in result.entities if e.type == "ADDRESS"] == ["125009, Moscow, Tverskaya str., 7"]
+
+
+def test_city_is_not_merged_into_address_that_contains_it_as_letters():
+    # «Львів» в оговорке об арбитраже — не адрес стороны «… Львівська обл., …».
+    markdown = "Сторона проживає: Україна, 79000, Львівська обл., село Вишнєве.\n\nМісце арбітражу – Львів, Україна."
+    address = "Україна, 79000, Львівська обл., село Вишнєве"
+    start = markdown.index(address)
+    city = markdown.index("Львів,")
+    result = anonymize_markdown(markdown, ner([
+        RawMatch("ADDRESS", address, start, start + len(address), 0.9),
+        RawMatch("ADDRESS", "Львів", city, city + 5, 0.9),
+    ]))
+    addresses = sorted(e.placeholder for e in result.entities if e.type == "ADDRESS")
+    assert addresses == ["[ADDRESS_1]", "[ADDRESS_2]"]
+    assert "Місце арбітражу – [ADDRESS_2], Україна." in result.markdown

@@ -12,9 +12,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Callable, Optional
 
+import regex
+
 from ..cancel import CancelToken, Cancelled, check
 from .apply import build_anonymized_text
 from .config import NER_CONFIRM_THRESHOLD, NER_GRAY_ZONE_LOW
+from .cross_script import TextIndex, find_counterpart, same_value
+from .image_safety import mask_images_for_detection
 from .ner_filter import filter_generic_ner_matches
 from .normalize import normalize_value
 from .regex_detectors import detect_structural
@@ -83,6 +87,64 @@ class _Group:
     max_score: Optional[float]
 
 
+def _absorb(target: "_Group", other: "_Group") -> None:
+    for sp in other.positions:
+        if not any(sp.start < p.end and p.start < sp.end for p in target.positions):
+            target.positions.append(sp)
+    target.first_start = min(target.first_start, other.first_start)
+    target.max_score = _max_defined_score(target.max_score, other.max_score)
+
+
+def _link_cross_script(groups: dict[str, "_Group"], markdown: str) -> None:
+    """Имя и адрес латиницей и их перевод кириллицей в двуязычном договоре — одно значение
+    с одной меткой. Неуверенный перевод уверенной находки становится ее вхождением. Затем
+    ищутся переводы, которые модель не нашла вовсе (cross_script.find_counterpart)."""
+    linkable = sorted((g for g in groups.values() if g.type in ("PERSON", "ADDRESS")),
+                      key=lambda g: (not g.confirmed, g.first_start))
+    merged: list[_Group] = []
+    for i, group in enumerate(linkable):
+        if any(group is m for m in merged):
+            continue
+        for other in linkable[i + 1:]:
+            if other.type != group.type or any(other is m for m in merged):
+                continue
+            if (group.confirmed or not other.confirmed) and same_value(group.first_value, other.first_value, group.type):
+                _absorb(group, other)
+                merged.append(other)
+    for key in [k for k, g in groups.items() if any(g is m for m in merged)]:
+        del groups[key]
+
+    # Неуверенные находки внутри найденного перевода («№ 12») поглощаются им.
+    index: Optional[TextIndex] = None
+    taken = [(p.start, p.end) for g in groups.values() if g.confirmed for p in g.positions]
+    for group in sorted(groups.values(), key=lambda g: g.first_start):
+        if not group.confirmed or group.type not in ("PERSON", "ADDRESS"):
+            continue
+        if index is None:
+            index = TextIndex(mask_images_for_detection(markdown))
+        for start, end in find_counterpart(index, group.first_value, group.type, taken):
+            group.positions.append(Position(start, end))
+            taken.append((start, end))
+            for other in groups.values():
+                if not other.confirmed:
+                    other.positions = [p for p in other.positions if not (p.start < end and start < p.end)]
+    for key in [k for k, g in groups.items() if not g.positions]:
+        del groups[key]
+
+
+# Короткий адрес без цифр сливается с длинным, только если сам по себе похож на адрес:
+# город («Львів», «Lviv») — не часть адреса стороны, даже если встречается в нем.
+MIN_NESTED_ADDRESS_LENGTH = 12
+
+
+def _address_inside(long: str, short: str) -> bool:
+    """short входит в long целыми словами: «львів» не входит в «львівська обл.»."""
+    if len(short) < MIN_NESTED_ADDRESS_LENGTH and not any(ch.isdigit() for ch in short):
+        return False
+    pattern = rf"(?<![\p{{L}}\p{{N}}]){regex.escape(short)}(?![\p{{L}}\p{{N}}])"
+    return regex.search(pattern, long) is not None
+
+
 def anonymize_markdown(
     markdown: str,
     ner_detect: Optional[NerDetect] = None,
@@ -141,7 +203,7 @@ def anonymize_markdown(
             if any(short is a for a in absorbed):
                 continue
             short_norm = normalize_value("ADDRESS", short.first_value)
-            if short_norm in long_norm and long.confirmed == short.confirmed:
+            if _address_inside(long_norm, short_norm) and long.confirmed == short.confirmed:
                 for sp in short.positions:
                     if not any(sp.start < lp.end and lp.start < sp.end for lp in long.positions):
                         long.positions.append(sp)
@@ -149,6 +211,7 @@ def anonymize_markdown(
                 absorbed.append(short)
     for g in absorbed:
         groups.pop(f"{g.type} {normalize_value(g.type, g.first_value)}", None)
+    _link_cross_script(groups, markdown)
 
     # Подтвержденные нумеруются первыми, кандидаты следом по общему счетчику типа:
     # принятие кандидата не столкнется с существующим плейсхолдером.

@@ -106,6 +106,11 @@ def _group_rows(pieces: Sequence[Piece]) -> list[tuple[float, float, list[Piece]
     return [(top, bottom, sorted(parts, key=lambda item: item[0][0])) for top, bottom, parts in rows]
 
 
+def _sorted_rows(pieces: Sequence[Piece]) -> list[tuple[float, float, str]]:
+    """Строки по положению на странице: сверху вниз, куски строки слева направо."""
+    return [(top, bottom, _join(parts)) for top, bottom, parts in _group_rows(pieces)]
+
+
 def _join(pieces: Sequence[Piece]) -> str:
     return " ".join(" ".join(text for _, text in pieces).split())
 
@@ -205,6 +210,183 @@ def prose_columns(bbox: Sequence[float], lines: Sequence[Piece]) -> Optional[lis
     return paragraphs
 
 
+# Страница в две колонки текста: двуязычный договор, слева английский, справа
+# украинский или русский. Indra делит такую страницу на блоки по колонкам, но порядок
+# блоков скачет между колонками, а строки соседних колонок с узким просветом сливает
+# в одну. Поэтому страница собирается заново по строкам: колонка за колонкой.
+TWO_COLUMN_MIN_LINES = 12
+# Доля строк, которым разрешено пересекать просвет (заголовок, подписи на всю ширину,
+# слитые строки соседних колонок).
+TWO_COLUMN_MAX_CROSSING = 0.2
+TWO_COLUMN_MIN_SHARE = 0.2
+_GUTTER_MARGIN = 0.02
+_NO_SCRIPT, _LATIN, _CYRILLIC = 0, 1, 2
+_ROMAN_RE = re.compile(r"^\(?[ivxIVX]+\)[.,;]?$")
+
+
+def _script(text: str) -> int:
+    """Письменность куска текста по буквам: латиница, кириллица или не понять."""
+    lat = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    cyr = sum(1 for ch in text if "Ѐ" <= ch <= "ӿ")
+    if lat > 2 * cyr:
+        return _LATIN
+    if cyr > 2 * lat:
+        return _CYRILLIC
+    return _NO_SCRIPT
+
+
+def split_by_script(text: str) -> Optional[tuple[str, str]]:
+    """Строка из двух колонок разных языков, слитая распознаванием: «the Client agrees
+    погоджується з тим» → («the Client agrees», «погоджується з тим»). None, если
+    письменность в строке меняется не ровно один раз."""
+    tokens = text.split()
+    # Короткие слова («і», «та», «a») и римские номера «(ii)» есть в обоих языках.
+    scripts = [_NO_SCRIPT if sum(ch.isalpha() for ch in token) < 3 or _ROMAN_RE.match(token) else _script(token)
+               for token in tokens]
+    switches = [i for i in range(1, len(tokens)) if scripts[i]
+                and scripts[i] != next((s for s in reversed(scripts[:i]) if s), scripts[i])]
+    if len(switches) != 1:
+        return None
+    cut = switches[0]
+    # Открывающая кавычка или скобка без букв уходит ко второй части: «(«Договір»)».
+    while cut > 0 and not scripts[cut - 1] and tokens[cut - 1][:1] in "«(\"“„":
+        cut -= 1
+    left, right = " ".join(tokens[:cut]), " ".join(tokens[cut:])
+    return (left, right) if left and right else None
+
+
+def _find_gutter(pieces: Sequence[Piece]) -> Optional[tuple[float, float]]:
+    """Просвет между двумя колонками текста: (x, допуск) или None."""
+    boxes = [box for box, text in pieces if text.strip()]
+    if len(boxes) < TWO_COLUMN_MIN_LINES:
+        return None
+    left_edge = min(box[0] for box in boxes)
+    right_edge = max(box[2] for box in boxes)
+    width = right_edge - left_edge
+    margin = _GUTTER_MARGIN * width
+    candidates: list[tuple[int, float]] = []
+    for step in range(201):
+        x = left_edge + (0.3 + 0.4 * step / 200) * width
+        crossing = sum(1 for box in boxes if box[0] < x - margin and box[2] > x + margin)
+        left = sum(1 for box in boxes if box[2] <= x + margin and box[0] < x - margin)
+        right = sum(1 for box in boxes if box[0] >= x - margin and box[2] > x + margin)
+        if crossing <= TWO_COLUMN_MAX_CROSSING * len(boxes) and min(left, right) >= TWO_COLUMN_MIN_SHARE * len(boxes):
+            candidates.append((crossing, x))
+    if not candidates:
+        return None
+    # Середина лучших положений: просвет широкий, а край колонки не должен попасть в допуск.
+    fewest = min(crossing for crossing, _ in candidates)
+    best = [x for crossing, x in candidates if crossing == fewest]
+    return (best[0] + best[-1]) / 2, margin
+
+
+def two_column_items(lines: Sequence[Piece], headings: Sequence[Sequence[float]] = ()) -> Optional[list[str]]:
+    """Абзацы страницы в две колонки текста: в каждой полосе между строками на всю
+    ширину сначала левая колонка, затем правая. None, если колонок нет или это таблица
+    с короткими значениями. headings — рамки блоков-заголовков Indra."""
+    found = _find_gutter(lines)
+    if found is None:
+        return None
+    gutter, margin = found
+    heights = sorted(box[3] - box[1] for box, _ in lines)
+    height = heights[len(heights) // 2]
+
+    sides: list[tuple[list[float], str, str]] = []  # (рамка, текст, L/R/F)
+    for box, text in lines:
+        text = text.strip()
+        if not text:
+            continue
+        if box[0] >= gutter - 2 * margin and box[2] <= gutter + 2 * margin and len(text) <= 3 \
+                and not any(ch.isalpha() for ch in text):
+            # Обрывки вертикальной линейки между колонками: «1», «3», «|».
+            continue
+        if box[0] >= gutter - margin and box[2] <= gutter + margin:
+            sides.append((box, text, "L" if (box[0] + box[2]) / 2 < gutter else "R"))
+        elif box[2] <= gutter + margin:
+            sides.append((box, text, "L"))
+        elif box[0] >= gutter - margin:
+            sides.append((box, text, "R"))
+        else:
+            sides.append((box, text, "F"))
+
+    def is_heading(box: Sequence[float]) -> bool:
+        cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        return any(h[0] - 2 <= cx <= h[2] + 2 and h[1] - 2 <= cy <= h[3] + 2 for h in headings)
+
+    def near(box: Sequence[float], side: str) -> bool:
+        return any(s == side and other[1] < box[3] + 3 * height and other[3] > box[1] - 3 * height
+                   for other, _, s in sides)
+
+    # Письменность колонок: слитая строка, которую не удалось разделить, уходит в колонку
+    # своего языка.
+    column_script = {side: _script(" ".join(text for _, text, s in sides if s == side)) for side in "LR"}
+    pieces: list[tuple[list[float], str, str]] = []
+    for box, text, side in sides:
+        if side != "F" or is_heading(box) or not (near(box, "L") and near(box, "R")):
+            pieces.append((box, text, side))
+            continue
+        # Строка на всю ширину посреди колонок — слитые строки соседних колонок.
+        halves = split_by_script(text)
+        if halves is None:
+            script = _script(text)
+            side = "R" if script and column_script["R"] == script != column_script["L"] else "L"
+            pieces.append((box, text, side))
+        else:
+            pieces.append(([box[0], box[1], gutter, box[3]], halves[0], "L"))
+            pieces.append(([gutter, box[1], box[2], box[3]], halves[1], "R"))
+
+    for side in "LR":
+        column = [text for _, text, s in pieces if s == side]
+        if len(column) < 3 or sum(len(text) for text in column) / len(column) < PROSE_MIN_CHARS:
+            return None
+
+    def paragraphs(column: list[tuple[list[float], str, str]]) -> list[str]:
+        """Абзацы куска колонки; строки заголовка Indra подряд — один заголовок «## »."""
+        result: list[str] = []
+        run: list[Piece] = []
+        heading = False
+        for box, text, _ in sorted(column, key=lambda piece: ((piece[0][1] + piece[0][3]) / 2, piece[0][0])):
+            if is_heading(box):
+                result.extend(_paragraphs(_sorted_rows(run)))
+                run = []
+                if heading:
+                    result[-1] += " " + text
+                else:
+                    result.append("## " + text)
+                heading = True
+                continue
+            heading = False
+            run.append((box, text))
+        result.extend(_paragraphs(_sorted_rows(run)))
+        return result
+
+    def emit_band(band: list[tuple[list[float], str, str]]) -> list[str]:
+        # Под концом одной из колонок (подписи, реквизиты) порядок обычный, строками.
+        bottoms = [max((box[3] for box, text, s in band if s == side and len(text) >= PROSE_MIN_CHARS), default=None)
+                   for side in "LR"]
+        end = min(b for b in bottoms if b is not None) if all(b is not None for b in bottoms) else None
+        tail = [p for p in band if end is not None and p[0][1] > end + 1.5 * height]
+        body = [p for p in band if p not in tail]
+        result = [item for side in "LR" for item in paragraphs([p for p in body if p[2] == side])]
+        return result + paragraphs([(box, text, "F") for box, text, _ in tail])
+
+    items: list[str] = []
+    band: list[tuple[list[float], str, str]] = []
+    full: list[tuple[list[float], str, str]] = []
+    for piece in sorted(pieces, key=lambda piece: (piece[0][1] + piece[0][3]) / 2):
+        if piece[2] == "F":
+            items.extend(emit_band(band))
+            band.clear()
+            full.append(piece)
+            continue
+        items.extend(paragraphs(full))
+        full.clear()
+        band.append(piece)
+    items.extend(emit_band(band))
+    items.extend(paragraphs(full))
+    return items
+
+
 def _cell(text: str) -> str:
     return text.replace("|", "\\|")
 
@@ -281,10 +463,25 @@ def _is_paragraph(item: str) -> bool:
     return not item.startswith(("|", "#", "- ", "* ", ">"))
 
 
+def _can_continue(last: str, first: str) -> bool:
+    return (
+        _is_paragraph(last) and _is_paragraph(first)
+        and not _SENTENCE_END_RE.search(last) and bool(_LOWER_START_RE.match(first))
+    )
+
+
+def _glue(last: str, first: str) -> str:
+    return last[:-1] + first if last.endswith("-") and last[-2:-1].isalpha() else last + " " + first
+
+
 def join_page_items(pages: list[list[str]]) -> None:
     """Склеивает то, что разорвала граница страницы: таблицу с ее продолжением (столько же
     столбцов) и предложение, оборванное на полуслове (следующая страница со строчной буквы).
-    Списки страниц должны идти подряд; продолжение переезжает на предыдущую страницу."""
+    Списки страниц должны идти подряд; продолжение переезжает на предыдущую страницу.
+
+    На странице в две колонки разных языков за концом английской колонки идет украинская,
+    поэтому продолжение ищется среди абзацев своей письменности: первый абзац страницы
+    на каждой письменности клеится к последнему абзацу той же письменности."""
     for prev, page in zip(pages, pages[1:]):
         if not prev or not page:
             continue
@@ -293,12 +490,30 @@ def join_page_items(pages: list[list[str]]) -> None:
         if width and table_width(first) == width:
             prev[-1] = join_md_tables(last, first)
             page.pop(0)
-        elif (
-            _is_paragraph(last) and _is_paragraph(first)
-            and not _SENTENCE_END_RE.search(last) and _LOWER_START_RE.match(first)
-        ):
-            prev[-1] = last[:-1] + first if last.endswith("-") and last[-2:-1].isalpha() else last + " " + first
-            page.pop(0)
+            continue
+        # Страница на двух языках: хотя бы по два абзаца каждой письменности.
+        scripts = [_script(item) for item in prev]
+        bilingual = scripts.count(_LATIN) >= 2 and scripts.count(_CYRILLIC) >= 2
+        done: set[int] = set()
+        index = 0
+        while index < len(page):
+            first = page[index]
+            script = _script(first)
+            if script in done or (index and (not bilingual or not script)):
+                index += 1
+                continue
+            done.add(script)
+            target = len(prev) - 1
+            if bilingual and script and scripts[-1] != script:
+                target = max((i for i, s in enumerate(scripts) if s == script), default=-1)
+            if target >= 0 and _can_continue(prev[target], first):
+                prev[target] = _glue(prev[target], first)
+                scripts[target] = _script(prev[target])
+                page.pop(index)
+            else:
+                index += 1
+            if not bilingual or done >= {_LATIN, _CYRILLIC}:
+                break
 
 
 def page_items(page) -> list[str]:
@@ -309,6 +524,10 @@ def page_items(page) -> list[str]:
     parts = [part for part in markdown.split("\n\n") if part.strip()]
     tilt = math.tan(math.radians(page.skew or 0.0))
     lines = [(_straighten(line.box, tilt), line.text) for line in page.lines]
+    headings = [_straighten(block["bbox"], tilt) for block in page.blocks if block["label"] == "Section-Header"]
+    columns = two_column_items(lines, headings)
+    if columns is not None:
+        return [fix_mixed_scripts(item) for item in columns if item]
     items: list[str] = []
     # Части Markdown и блоки разметки идут в одном порядке; если число не совпало,
     # блоки не пересобираются.

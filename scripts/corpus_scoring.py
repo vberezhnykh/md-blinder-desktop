@@ -168,11 +168,24 @@ def score_detections(gold_entities: list[dict[str, Any]], detected: list[dict[st
     pairs.sort(key=lambda p: (not p[4], -TIER_RANK[p[2]]))
     gold_taken = [False] * len(gold_entities)
     det_taken = [False] * len(detected)
+    # Одна находка закрывает несколько эталонных значений, если ее вхождения лежат на
+    # каждом из них: имя латиницей и кириллицей в двуязычном договоре — одна сущность.
+    det_anchors: list[list[tuple[int, int]]] = [[] for _ in detected]
+    det_exclusive = [False] * len(detected)
     assignment: list[Optional[tuple]] = [None] * len(gold_entities)
     for type_ok_pass in (True, False):
         for p in pairs:
-            if p[4] != type_ok_pass or gold_taken[p[0]] or det_taken[p[1]]:
+            if p[4] != type_ok_pass or gold_taken[p[0]]:
                 continue
+            anchor = anchors[p[0]]
+            if p[2] == "anchor" and anchor and not det_exclusive[p[1]]:
+                if any(a[0] < anchor[1] and anchor[0] < a[1] for a in det_anchors[p[1]]):
+                    continue
+                det_anchors[p[1]].append(anchor)
+            elif det_taken[p[1]]:
+                continue
+            else:
+                det_exclusive[p[1]] = True
             gold_taken[p[0]] = det_taken[p[1]] = True
             assignment[p[0]] = p
     results = []

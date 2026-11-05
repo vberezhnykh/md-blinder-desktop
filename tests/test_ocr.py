@@ -9,7 +9,15 @@ import pytest
 
 from md_blinder.cancel import Cancelled, CancelToken
 from md_blinder.components import ocr_models
-from md_blinder.convert.ocr import join_page_items, markdown_items, ocr_pdf_pages, prose_columns, table_width
+from md_blinder.convert.ocr import (
+    join_page_items,
+    markdown_items,
+    ocr_pdf_pages,
+    prose_columns,
+    split_by_script,
+    table_width,
+    two_column_items,
+)
 from md_blinder.convert.pdf import analyze_pdf, assemble_markdown
 
 MODELS = Path(os.environ.get("MD_BLINDER_OCR_MODELS") or ocr_models.ocr_models_dir())
@@ -175,3 +183,104 @@ def test_page_items_joins_table_split_into_blocks():
     assert page_items(page) == [
         "| Name | Position |\n| --- | --- |\n| Technical | Lead |\n| Alpha Person | Director |\n| Finance | Lead |"
     ]
+
+
+EN_ROWS = [
+    "1.1. The Contractor shall provide the services",
+    "described in the Annex within the time agreed",
+    "by the Parties in writing.",
+    "1.2. The Customer shall pay for the services",
+    "within ten days after receiving the invoice.",
+]
+UA_ROWS = [
+    "1.1. Виконавець надає послуги, описані у",
+    "Додатку, у строки, погоджені Сторонами в",
+    "письмовій формі.",
+    "1.2. Замовник оплачує послуги протягом десяти",
+    "днів після отримання рахунку.",
+]
+
+
+def _bilingual_lines(merge_row: int | None = None) -> list[tuple[list[float], str]]:
+    """Строки страницы в две колонки: слева английский, справа украинский. Порядок строк
+    перемешан, как у Indra; строка merge_row обеих колонок слита в одну."""
+    lines: list[tuple[list[float], str]] = [([120, 40, 1500, 70], "SERVICES AGREEMENT / ДОГОВІР ПРО НАДАННЯ ПОСЛУГ")]
+    for row, (en, ua) in enumerate(zip(EN_ROWS, UA_ROWS)):
+        y = 120 + row * 40
+        if row == merge_row:
+            lines.append(([120, y, 1500, y + 30], f"{en} {ua}"))
+        else:
+            lines.append(([830, y, 1500, y + 30], ua))
+            lines.append(([120, y, 790, y + 30], en))
+        lines.append(([800, y, 815, y + 30], "|"))
+    lines.append(([120, 400, 600, 430], "Signed by / Підписано: ________"))
+    return lines
+
+
+def test_two_column_page_reads_columns_in_turn():
+    items = two_column_items(_bilingual_lines(merge_row=1), headings=[[120, 40, 1500, 70]])
+    assert items == [
+        "## SERVICES AGREEMENT / ДОГОВІР ПРО НАДАННЯ ПОСЛУГ",
+        " ".join(EN_ROWS[:3]),
+        " ".join(EN_ROWS[3:]),
+        " ".join(UA_ROWS[:3]),
+        " ".join(UA_ROWS[3:]),
+        "Signed by / Підписано: ________",
+    ]
+
+
+def test_two_column_page_keeps_ordinary_pages_and_short_tables():
+    single = [([120, 100 + r * 40, 1500, 130 + r * 40], f"Обычная строка абзаца договора номер {r}") for r in range(14)]
+    assert two_column_items(single) is None
+    table = []
+    for r in range(14):
+        table.append(([120, 100 + r * 40, 500, 130 + r * 40], f"Позиция {r}"))
+        table.append(([900, 100 + r * 40, 1100, 130 + r * 40], f"{r}50.00"))
+    assert two_column_items(table) is None
+
+
+def test_split_by_script():
+    assert split_by_script("the Client agrees «Робочим Продуктом» за умови, що (ii) матеріали") == (
+        "the Client agrees", "«Робочим Продуктом» за умови, що (ii) матеріали",
+    )
+    assert split_by_script("Name: John Smith") is None
+    assert split_by_script("the Client та Клієнт and Customer") is None
+
+
+def test_join_page_items_continues_each_language_of_bilingual_page():
+    pages = [
+        ["1.1. The Contractor shall provide", "1.2. The Customer shall pay for the", "1.1. Виконавець надає",
+         "1.2. Замовник оплачує послуги протягом"],
+        ["services within ten days.", "десяти днів.", "1.3. Next clause."],
+    ]
+    join_page_items(pages)
+    assert pages == [
+        ["1.1. The Contractor shall provide", "1.2. The Customer shall pay for the services within ten days.",
+         "1.1. Виконавець надає", "1.2. Замовник оплачує послуги протягом десяти днів."],
+        ["1.3. Next clause."],
+    ]
+
+
+@needs_models
+def test_ocr_reads_two_column_bilingual_scan(tmp_path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=600, height=800)
+    page.insert_font(fontname="plex", fontfile=str(FONT))
+    en = ["1.1. The Contractor shall provide the", "services described in the Annex within", "the time agreed by the Parties.",
+          "1.2. The Customer shall pay for the", "services within ten days after", "receiving the invoice."]
+    ua = ["1.1. Виконавець надає послуги, описані", "у Додатку, у строки, погоджені", "Сторонами в письмовій формі.",
+          "1.2. Замовник оплачує послуги протягом", "десяти днів після отримання", "рахунку від Виконавця."]
+    page.draw_line((300, 80), (300, 400), color=(0, 0, 0), width=0.8)
+    for row, (left, right) in enumerate(zip(en, ua)):
+        y = 100 + row * 22 + (12 if row >= 3 else 0)
+        page.insert_text((40, y), left, fontsize=10, fontname="plex")
+        page.insert_text((310, y), right, fontsize=10, fontname="plex")
+    pix = page.get_pixmap(dpi=200)
+    scan = pymupdf.open()
+    scan.new_page(width=600, height=800).insert_image(pymupdf.Rect(0, 0, 600, 800), pixmap=pix)
+    scan.save(tmp_path / "b.pdf")
+    text = ocr_pdf_pages(tmp_path / "b.pdf", [1], MODELS)[1]
+    assert "the time agreed by the Parties." in text
+    en_end, ua_start = text.index("receiving the invoice."), text.index("1.1. Виконавець")
+    assert en_end < ua_start
+    assert "погоджені Сторонами" in text

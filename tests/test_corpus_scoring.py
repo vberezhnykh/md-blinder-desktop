@@ -75,3 +75,14 @@ def test_contained_alias_is_one_occurrence():
     gold = [{"type": "COMPANY", "value": "ООО «Альфа»", "aliases": ["Альфа"]}]
     summary = scoring.score_occurrence_coverage(gold, [], TEXT)
     assert summary.total == 2 and summary.missed == 2
+
+
+def test_one_detection_covers_name_in_two_scripts():
+    text = "PE HNATIUK TARAS and ФОП ГНАТЮК ТАРАС, also John Smith."
+    gold = [{"type": "PERSON", "value": "HNATIUK TARAS"}, {"type": "PERSON", "value": "ГНАТЮК ТАРАС"},
+            {"type": "PERSON", "value": "John Smith"}]
+    a, b = text.index("HNATIUK TARAS"), text.index("ГНАТЮК ТАРАС")
+    detected = [det("PERSON", "HNATIUK TARAS", [(a, a + 13), (b, b + 12)])]
+    result = scoring.score_detections(gold, detected, text)
+    assert [r.status for r in result.gold_results] == ["HIT", "HIT", "MISS"]
+    assert result.extras == []

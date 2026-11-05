@@ -15,7 +15,7 @@ from typing import Callable, Optional
 import pymupdf
 
 from ..cancel import CancelToken, check
-from .pdf_classify import PageKind, PdfPageSignals, classify_pdf_pages
+from .pdf_classify import PageKind, PdfPageSignals, classify_pdf_pages, garbled_words
 from .pdf_structure import PdfPageLayout, PdfTextItem, items_to_markdown
 from .pdf_tables import find_page_tables, table_owner
 
@@ -91,6 +91,9 @@ def _page_items(page: pymupdf.Page) -> tuple[list[PdfTextItem], PdfPageLayout, P
             str=span["text"], x=x0, y=height - span["origin"][1], w=x1 - x0, fontSize=float(span["size"]),
             fontName=span.get("font", ""), hasEOL=eol,
         ))
+    words, garbled = garbled_words(" ".join(span["text"] for span, _ in spans))
+    signals.wordCount = words
+    signals.garbledRatio = garbled / words if words else 0.0
     layout = PdfPageLayout(bottom=0, height=height, pageNumber=page.number + 1, totalPages=page.parent.page_count)
     # Плотному текстовому слою дорогая проверка картинок не нужна.
     if signals.nonWsCount >= 8 and (signals.bodyNonWsCount < 80 or signals.textAreaRatio < 0.01):

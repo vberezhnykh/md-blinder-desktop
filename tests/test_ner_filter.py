@@ -507,3 +507,12 @@ def test_keeps_inner_and_dot_punctuation():
     [m] = filter_generic_ner_matches([match("COMPANY", "Acme Holdings Inc.")])
     assert m.value == "Acme Holdings Inc."
     assert filter_generic_ner_matches([match("ADDRESS", " , ;")]) == []
+
+
+def test_drops_defined_party_terms_in_ukrainian_and_russian():
+    for type_, value in [
+        ("PERSON", "Клієнт"), ("PERSON", "Клієнтом"), ("PERSON", "Клиента"),
+        ("COMPANY", "Провайдер Послуг"), ("COMPANY", "Провайдеру Послуг"), ("COMPANY", "Поставщик услуг"),
+    ]:
+        assert filter_generic_ner_matches([match(type_, value)]) == [], value
+    assert filter_generic_ner_matches([match("PERSON", "Клієнтенко Іван")]) != []

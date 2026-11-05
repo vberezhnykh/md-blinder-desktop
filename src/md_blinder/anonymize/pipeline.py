@@ -32,6 +32,16 @@ def _start_then_longer(m: RawMatch) -> tuple[int, int]:
     return (m.start, -(m.end - m.start))
 
 
+def _is_number_as_address(m: RawMatch) -> bool:
+    """Адрес без букв из 7 и более цифр — номер, который модель приняла за адрес
+    («TIN: 9909747220», БИК). Индексы (5–6 цифр) остаются: модель отдает их
+    отдельным куском, и он нужен, чтобы адрес с тем же индексом закрылся целиком.
+    Проверка идет после склейки, когда индекс уже приклеен к остальному адресу."""
+    if m.type != "ADDRESS" or any(ch.isalpha() for ch in m.value):
+        return False
+    return sum(ch.isdigit() for ch in m.value) >= 7
+
+
 def _is_confirmed_level(m: RawMatch) -> bool:
     # У регулярных выражений и ручных добавлений score нет: они всегда подтверждены.
     return not (m.score is not None and m.score < NER_CONFIRM_THRESHOLD)
@@ -99,6 +109,7 @@ def anonymize_markdown(
 
     stitched = stitch_person_runs(stitch_address_runs(filter_generic_ner_matches(ner), markdown), markdown)
     stitched = close_company_quotes(stitched, markdown)
+    stitched = [m for m in stitched if not _is_number_as_address(m)]
     accepted = [
         m for m in resolve_overlaps(structural, stitched)
         if not (m.score is not None and m.score < NER_GRAY_ZONE_LOW)

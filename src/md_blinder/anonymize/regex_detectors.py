@@ -436,7 +436,8 @@ _EN_ADDRESS_SPEC = _AddressLabelSpec(
     # иначе входил в адрес целиком и не получал своей метки URL.
     field_re=JsRegex(
         r"[,;]\s*(?:company\s+(?:registration|reg)\b|registration\s+(?:no|number)\b|reg\.?\s*(?:no|number)\b|CRN\b"
-        r"|VAT\b|represented\s+by\b|acting\b|director\b|tel\b|phone\b|fax\b|e-?mail\b|hereinafter\b"
+        r"|VAT\b|TIN\b|INN\b|KPP\b|OGRN(?:IP)?\b|tax\s+id\b"
+        r"|represented\s+by\b|acting\b|director\b|tel\b|phone\b|fax\b|e-?mail\b|hereinafter\b"
         r"|web-?site\b|web\b|url\b|www\.|https?://)",
         "i",
     ),
@@ -598,18 +599,22 @@ def _detect_reg_number(text: str) -> list[RawMatch]:
 NOT_LETTER_BEFORE = "(?<![А-Яа-яЁёA-Za-z])"
 NOT_LETTER_AFTER = "(?![А-Яа-яЁёA-Za-z])"
 
+# В двуязычных реквизитах метки пишут латиницей: «INN», «KPP», «OGRN».
+RU_INN_LABEL = "(?:ИНН|INN)"
+RU_KPP_LABEL = "(?:КПП|KPP)"
+
 # Совмещенная форма «ИНН / КПП 7736321479 / 773601001» (иногда с табуляцией).
 _RU_INN_KPP_RE = JsRegex(
-    NOT_LETTER_BEFORE + r"ИНН\s*\/\s*КПП" + NOT_LETTER_AFTER + r"[\s:№.]*(\d{12}|\d{10})\s*\/\s*(\d{9})(?!\d)",
+    NOT_LETTER_BEFORE + RU_INN_LABEL + r"\s*\/\s*" + RU_KPP_LABEL + NOT_LETTER_AFTER + r"[\s:№.]*(\d{12}|\d{10})\s*\/\s*(\d{9})(?!\d)",
     "gid",
 )
 # ИНН: 10 цифр (юрлицо) или 12 (физлицо/ИП); 12 раньше 10, иначе обрежется.
-_RU_INN_RE = JsRegex(NOT_LETTER_BEFORE + "ИНН" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{12}|\d{10})(?!\d)", "gi")
+_RU_INN_RE = JsRegex(NOT_LETTER_BEFORE + RU_INN_LABEL + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{12}|\d{10})(?!\d)", "gi")
 # ОГРНИП (15) раньше ОГРН (13, изредка 15), иначе метка «ОГРН» съест префикс «ОГРНИП».
-_RU_OGRNIP_RE = JsRegex(NOT_LETTER_BEFORE + "ОГРНИП" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{15})(?!\d)", "gi")
-_RU_OGRN_RE = JsRegex(NOT_LETTER_BEFORE + "ОГРН" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{15}|\d{13})(?!\d)", "gi")
+_RU_OGRNIP_RE = JsRegex(NOT_LETTER_BEFORE + "(?:ОГРНИП|OGRNIP)" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{15})(?!\d)", "gi")
+_RU_OGRN_RE = JsRegex(NOT_LETTER_BEFORE + "(?:ОГРН|OGRN)" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{15}|\d{13})(?!\d)", "gi")
 # КПП: 9 цифр.
-_RU_KPP_RE = JsRegex(NOT_LETTER_BEFORE + "КПП" + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{9})(?!\d)", "gi")
+_RU_KPP_RE = JsRegex(NOT_LETTER_BEFORE + RU_KPP_LABEL + NOT_LETTER_AFTER + r"[\s:№.\/-]*(\d{9})(?!\d)", "gi")
 
 
 def _detect_russian_ids(text: str) -> list[RawMatch]:
@@ -633,6 +638,26 @@ def _detect_russian_ids(text: str) -> list[RawMatch]:
             matches.append(RawMatch("REG_NUMBER", group, start, end))
             if consumes:
                 consumed.append((start, end))
+    return matches
+
+
+# Налоговый номер с английской меткой: «TIN: 9909747220», «Tax ID 123456789»,
+# «Taxpayer Identification Number: …». Так пишут реквизиты двуязычных договоров и
+# инвойсов; модель без правила путает такой номер с адресом. Аббревиатуры только
+# заглавными («tin», «inn» — обычные слова). Длина у разных стран своя (ИНН 10/12,
+# УНП и ИНН Узбекистана 9, BIN 12), поэтому берем 8–18 цифр с дефисами.
+_TAX_ID_RE = JsRegex(
+    r"\b(?:(?-i:TIN|ITN|INN)|tax(?:payer)?\s+(?:identification\s+|registration\s+)?(?:id|no|number))\b"
+    r"(?:\s*(?:no|number)\b)?[\s:#№.]*(\d[\d-]{6,16}\d)(?![\d-])",
+    "gi",
+)
+
+
+def _detect_tax_id(text: str) -> list[RawMatch]:
+    matches: list[RawMatch] = []
+    for m in _TAX_ID_RE.finditer(text):
+        group, start = _labelled_group(m)
+        matches.append(RawMatch("REG_NUMBER", group, start, start + len(group)))
     return matches
 
 
@@ -901,6 +926,7 @@ def detect_structural(text: str) -> list[RawMatch]:
         *detect_email(text),
         *ibans,
         *_detect_russian_ids(text),
+        *_detect_tax_id(text),
         *_detect_russian_accounts(text),
         *_detect_ukrainian_ids(text),
         *_detect_snils(text),

@@ -168,3 +168,33 @@ def test_address_found_with_commas_is_one_clean_entity():
     ]
     [address] = [e for e in anonymize_markdown(text, ner(matches)).entities if e.type == "ADDRESS"]
     assert [text[p.start:p.end] for p in address.positions] == [value, value]
+
+
+def test_tax_id_wins_over_ner_address():
+    markdown = "LLC Romashka<br>TIN: 9909747220<br>KPP: 774751001"
+    start = markdown.index("9909747220")
+    result = anonymize_markdown(markdown, ner([RawMatch("ADDRESS", "9909747220", start, start + 10, 0.41)]))
+    assert [(e.type, e.value) for e in result.entities] == [("REG_NUMBER", "9909747220"), ("REG_NUMBER", "774751001")]
+
+
+@pytest.mark.parametrize("value, kept", [
+    ("044525225", False),  # БИК без метки, которую знают правила
+    ("12 345 678", False),
+    ("125009", True),  # индекс
+])
+def test_number_without_letters_is_not_an_address(value, kept):
+    markdown = f"Bank code {value} end"
+    start = markdown.index(value)
+    result = anonymize_markdown(markdown, ner([RawMatch("ADDRESS", value, start, start + len(value), 0.6)]))
+    assert [e.value for e in result.entities if e.type == "ADDRESS"] == ([value] if kept else [])
+
+
+def test_postal_code_piece_is_stitched_before_number_check():
+    markdown = "Address: 125009, Moscow, Tverskaya str., 7"
+    zip_start = markdown.index("125009")
+    rest_start = markdown.index("Moscow")
+    result = anonymize_markdown(markdown, ner([
+        RawMatch("ADDRESS", "125009", zip_start, zip_start + 6, 0.6),
+        RawMatch("ADDRESS", markdown[rest_start:], rest_start, len(markdown), 0.6),
+    ]))
+    assert [e.value for e in result.entities if e.type == "ADDRESS"] == ["125009, Moscow, Tverskaya str., 7"]

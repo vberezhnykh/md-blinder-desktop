@@ -124,6 +124,8 @@ class Select(QComboBox):
 
     # Все типы сущностей помещаются без прокрутки.
     MAX_VISIBLE = 16
+    POPUP_GAP = 4  # от поля до списка
+    SCREEN_GAP = 8  # от списка до края экрана
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -144,11 +146,29 @@ class Select(QComboBox):
 
     def showPopup(self) -> None:  # noqa: N802
         super().showPopup()
-        # Список встает под полем, а не поверх него, и не уже поля.
+        # Список встает под полем, а не поверх него, и не уже поля. Если под полем
+        # не хватает места, он открывается над полем, а когда тесно и там, берет
+        # большую сторону и прокручивается: иначе нижние пункты уходят за край экрана.
         popup = self.view().window()
-        width = max(self.width(), self.view().sizeHintForColumn(0) + 28)
-        popup.resize(width, popup.height())
-        popup.move(self.mapToGlobal(QPoint(0, self.height() + 4)))
+        view = self.view()
+        width = max(self.width(), view.sizeHintForColumn(0) + 28)
+        rows = sum(view.sizeHintForRow(i) for i in range(min(self.count(), self.maxVisibleItems())))
+        full = rows + popup.height() - view.viewport().height()
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        screen = QGuiApplication.screenAt(top_left) or self.screen() or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        field_top, field_bottom = top_left.y(), top_left.y() + self.height()
+        below = area.bottom() - self.SCREEN_GAP - (field_bottom + self.POPUP_GAP)
+        above = field_top - self.POPUP_GAP - (area.top() + self.SCREEN_GAP)
+        open_up = full > below and above > below
+        height = max(min(full, above if open_up else below), 1)
+        width = min(width, area.width() - 2 * self.SCREEN_GAP)
+        x = max(min(top_left.x(), area.right() - self.SCREEN_GAP - width), area.left() + self.SCREEN_GAP)
+        y = field_top - self.POPUP_GAP - height if open_up else field_bottom + self.POPUP_GAP
+        popup.setGeometry(x, y, width, height)
+        index = view.currentIndex()
+        if index.isValid():
+            view.scrollTo(index)
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)

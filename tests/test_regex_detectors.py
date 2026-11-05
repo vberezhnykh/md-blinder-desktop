@@ -278,6 +278,16 @@ def test_bounds_a_labeled_address_at_an_underscore_signature_run() -> None:
     assert "12 Baker Street, London" in values(text, "ADDRESS")
 
 
+@pytest.mark.parametrize("text", [
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE; website: acme-trading.com, hereinafter",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE Website: acme-trading.com",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE, https://acme-trading.com",
+])
+def test_stops_a_labeled_address_before_a_website(text: str) -> None:
+    assert values(text, "ADDRESS") == ["Office 32, Al Saqr Tower, Dubai, UAE"]
+    assert [v.removeprefix("https://") for v in values(text, "URL")] == ["acme-trading.com"]
+
+
 def test_recovers_a_multi_line_address_behind_a_doubled_address_label() -> None:
     text = "Address: Address: 11 Hurley Street\n\n--------------------------- Cambridge, MA 02141\n\nTel"
     addrs = values(text, "ADDRESS")
@@ -358,6 +368,19 @@ class TestRussianIdsAndAccounts:
         regs = values("ИНН / КПП 12345678901 / 773601001", "REG_NUMBER")
         assert "12345678901" not in regs
         assert not any(len(v) == 11 for v in regs)
+
+    # Двуязычные реквизиты: метки латиницей.
+    @pytest.mark.parametrize("text, expected", [
+        ("INN 7736324582", "7736324582"),
+        ("KPP: 773601001", "773601001"),
+        ("OGRN 1197746606232", "1197746606232"),
+        ("OGRNIP: 315237500002317", "315237500002317"),
+    ])
+    def test_detects_id_with_latin_label(self, text: str, expected: str) -> None:
+        assert set(values(text, "REG_NUMBER")) == {expected}
+
+    def test_detects_a_combined_inn_kpp_form_with_latin_labels(self) -> None:
+        assert sorted(values("INN/KPP 7736321479/773601001", "REG_NUMBER")) == ["773601001", "7736321479"]
 
     @pytest.mark.parametrize("text, expected", [
         ("р/с 40702810338000246070", "40702810338000246070"),
@@ -454,6 +477,20 @@ class TestRussianAndUkrainianAddressLabels:
     ])
     def test_trims_the_value_at_the_next_requisites_field(self, text: str) -> None:
         assert self.addresses(text) == ["г. Москва, ул. Тверская, д. 1"]
+
+    # Сайт после адреса — отдельное поле: адрес кончается на стране, сайт получает метку URL.
+    @pytest.mark.parametrize("text", [
+        "по адресу офис 032, Бизнес Тауэр, Дубай, ОАЭ; сайт: acme-trading.com, именуемая в дальнейшем",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ, веб-сайт acme-trading.com",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ Сайт: acme-trading.com",
+        "Адрес: офис 032, Бизнес Тауэр, Дубай, ОАЭ, www.acme-trading.com",
+    ])
+    def test_stops_the_value_before_a_website(self, text: str) -> None:
+        assert self.addresses(text) == ["офис 032, Бизнес Тауэр, Дубай, ОАЭ"]
+        assert [v.removeprefix("www.") for v in values(text, "URL")] == ["acme-trading.com"]
+
+    def test_trims_at_a_field_after_a_semicolon(self) -> None:
+        assert self.addresses("Адрес: г. Москва, ул. Тверская, д. 1; ИНН 7712345678") == ["г. Москва, ул. Тверская, д. 1"]
 
     # Без двоеточия именная метка в прозе не превращает полпредложения в адрес.
     def test_ignores_a_noun_label_used_in_prose_without_a_colon(self) -> None:
@@ -688,3 +725,38 @@ def test_no_tails_next_to_placeholder(text: str, expected: str) -> None:
 def test_long_digit_rows_are_not_phones(text: str) -> None:
     assert not has_type(text, "PHONE")
     assert not has_type(text, "ACCOUNT")
+
+# Налоговый номер с английской меткой: модель без правила путала его с адресом.
+class TestTaxIdWithEnglishLabel:
+    @pytest.mark.parametrize("text, expected", [
+        ("TIN: 9909747220<br>KPP: 774751001", "9909747220"),
+        ("TIN 500100732259", "500100732259"),
+        ("Tax ID: 123456789", "123456789"),
+        ("Tax ID No.: 123456789", "123456789"),
+        ("Taxpayer Identification Number: 7707083893", "7707083893"),
+        ("tax registration number 12345678", "12345678"),
+        ("ITN 3012345678", "3012345678"),
+        ("INN 301234567", "301234567"),  # ИНН Узбекистана — 9 цифр
+        ("TIN No. 123-45-6789", "123-45-6789"),
+    ])
+    def test_detects_tax_id(self, text: str, expected: str) -> None:
+        assert expected in values(text, "REG_NUMBER")
+
+    def test_labelled_number_is_reg_number_not_phone(self) -> None:
+        # При одинаковом спане побеждает совпадение, найденное раньше: номер должен идти до телефона.
+        first = detect_structural("TIN: 123-45-6789")[0]
+        assert (first.type, first.value) == ("REG_NUMBER", "123-45-6789")
+
+    @pytest.mark.parametrize("text", [
+        "a tin of 12345678 cans",  # строчное слово, не метка
+        "Holiday Inn 123456789",
+        "TIN: 1234567",  # слишком короткий
+        "TIN 1234567890123456789",  # слишком длинный
+    ])
+    def test_ignores(self, text: str) -> None:
+        assert values(text, "REG_NUMBER") == []
+
+    def test_address_stops_before_tax_id(self) -> None:
+        text = "Address: 125009, Moscow, Tverskaya str., 7, TIN 9909747220"
+        assert values(text, "ADDRESS") == ["125009, Moscow, Tverskaya str., 7"]
+        assert values(text, "REG_NUMBER") == ["9909747220"]

@@ -288,6 +288,15 @@ def test_stops_a_labeled_address_before_a_website(text: str) -> None:
     assert [v.removeprefix("https://") for v in values(text, "URL")] == ["acme-trading.com"]
 
 
+@pytest.mark.parametrize("text", [
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE hereinafter referred to as the Client",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE (hereinafter the Client)",
+    "Address: Office 32, Al Saqr Tower, Dubai, UAE represented by its Director",
+])
+def test_stops_a_labeled_address_before_the_contract_preamble(text: str) -> None:
+    assert values(text, "ADDRESS") == ["Office 32, Al Saqr Tower, Dubai, UAE"]
+
+
 def test_recovers_a_multi_line_address_behind_a_doubled_address_label() -> None:
     text = "Address: Address: 11 Hurley Street\n\n--------------------------- Cambridge, MA 02141\n\nTel"
     addrs = values(text, "ADDRESS")
@@ -488,6 +497,16 @@ class TestRussianAndUkrainianAddressLabels:
     def test_stops_the_value_before_a_website(self, text: str) -> None:
         assert self.addresses(text) == ["офис 032, Бизнес Тауэр, Дубай, ОАЭ"]
         assert [v.removeprefix("www.") for v in values(text, "URL")] == ["acme-trading.com"]
+
+    # Преамбула договора идет за адресом без запятой: адрес кончается перед ней.
+    @pytest.mark.parametrize("text", [
+        "по адресу офис 032, Бизнес Тауэр, Дубай, ОАЭ именуемая в дальнейшем «**Заказчик**», с одной стороны, и",
+        "по адресу офис 032, Бизнес Тауэр, Дубай, ОАЭ (далее «Заказчик»)",
+        "по адресу офис 032, Бизнес Тауэр, Дубай, ОАЭ в лице директора Иванова И. И.",
+        "за адресою офис 032, Бизнес Тауэр, Дубай, ОАЭ надалі «Замовник»",
+    ])
+    def test_stops_the_value_before_the_contract_preamble(self, text: str) -> None:
+        assert self.addresses(text) == ["офис 032, Бизнес Тауэр, Дубай, ОАЭ"]
 
     def test_trims_at_a_field_after_a_semicolon(self) -> None:
         assert self.addresses("Адрес: г. Москва, ул. Тверская, д. 1; ИНН 7712345678") == ["г. Москва, ул. Тверская, д. 1"]

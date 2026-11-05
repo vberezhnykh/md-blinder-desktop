@@ -461,6 +461,9 @@ class _AddressLabelSpec:
     field_re: JsRegex  # ключевое слово следующего поля после запятой — по нему обрезаем
     contact_field_re: JsRegex  # помеченное контактное поле, обрезается и без запятой
     skip_before: Optional[JsRegex] = None  # не-адресная метка по тексту перед ней («email address:»)
+    # Продолжение фразы договора без запятой («…, ОАЭ именуемая в дальнейшем …»):
+    # адрес идет до конца строки, и без этой обрезки забирал половину преамбулы.
+    prose_re: Optional[JsRegex] = None
 
 
 # Граница ячейки таблицы: docx-таблицы склеивают ряд через <br> и |, и без
@@ -488,8 +491,8 @@ def _collect_labelled_addresses(text: str, spec: _AddressLabelSpec) -> list[RawM
             continue
 
         cuts: list[int] = []
-        for cut_re in (spec.field_re, spec.contact_field_re, _ADDRESS_CELL_BOUNDARY_RE):
-            cm = cut_re.search(raw)
+        for cut_re in (spec.field_re, spec.contact_field_re, spec.prose_re, _ADDRESS_CELL_BOUNDARY_RE):
+            cm = cut_re.search(raw) if cut_re is not None else None
             if cm is not None:
                 cuts.append(cm.start())
         if cuts:
@@ -534,6 +537,10 @@ _EN_ADDRESS_SPEC = _AddressLabelSpec(
     # Контактное поле (Phone #:, Tel:, Fax:, Email:, Website:) обрезаем и без запятой:
     # адрес и контакты могут оказаться в одном абзаце.
     contact_field_re=JsRegex(r"\s(?:telephone|tel|phone|fax|e-?mail|mobile|cell|web-?site|url)\b[\s.]*[:#]", "i"),
+    prose_re=JsRegex(
+        r"[\s(]\(?(?:hereinafter|represented\s+by|acting\s+(?:by|through|on\s+behalf)|on\s+the\s+(?:one|other)\s+part)\b",
+        "i",
+    ),
 )
 
 
@@ -578,6 +585,12 @@ _RU_ADDRESS_SPEC = _AddressLabelSpec(
     ),
     contact_field_re=JsRegex(
         r"\s(?:тел(?:ефон)?|факс|e-?mail|эл\.?\s*почт\p{L}*|(?:веб-?|интернет-?)?сайт|web-?site|url)\s*[.:#]", "iu"
+    ),
+    prose_re=JsRegex(
+        r"[\s(](?:именуем\p{L}*|іменован\p{L}*|в\s+дальнейшем|надалі|далее|далі|в\s+лице|в\s+особі|действующ\p{L}*"
+        r"|діюч\p{L}*|с\s+одной\s+стороны|с\s+другой\s+стороны|з\s+одного\s+боку|з\s+іншого\s+боку"
+        r"|з\s+однієї\s+сторони|з\s+іншої\s+сторони)(?!\p{L})",
+        "iu",
     ),
 )
 

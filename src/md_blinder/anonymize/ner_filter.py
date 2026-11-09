@@ -222,6 +222,22 @@ LEADING_REGNUM_GENERIC = re.compile(
     re.I | re.A,
 )
 
+# Номер дома и название улицы с заглавной («365 Agiou Andreou», «12 Baker Street»).
+# Модель иногда отдает такое начало адреса как рег. номер: в спане есть цифры.
+# У настоящего номера за ведущими цифрами не бывает слова вида «Agiou»: суффикс
+# реестра пишут заглавными («123456 RCS Paris»), а строчное слово («12345 dated»)
+# идет уже после номера.
+_STREET_START = re.compile(rf"^[0-9]{{1,5}}[A-Za-z]?{_WS}+([^\W\d_]{{3,}})")
+
+
+def _looks_like_street(value: str) -> bool:
+    m = _STREET_START.match(value)
+    if m is None:
+        return False
+    word = m.group(1)
+    return word[0].isupper() and word[1:].islower()
+
+
 # Мультиязычная NER-модель так же уверенно (0.8-0.95) тегает русские
 # ролевые/родовые термины договора ("Заказчик", "Исполнитель", "Сторона",
 # "третьи лица", "порядковый номер", "адрес электронной почты") как
@@ -599,6 +615,9 @@ def filter_generic_ner_matches(matches: list[RawMatch]) -> list[RawMatch]:
             if t and len(t.group(0)) < len(m.value):
                 cut = len(t.group(0))
                 m = replace(m, value=m.value[cut:], start=m.start + cut)
+
+        if m.type == "REG_NUMBER" and _looks_like_street(m.value):
+            m = replace(m, type="ADDRESS")
 
         words = _strip_leading_determiners(_split_words(m.value))
         if not words:

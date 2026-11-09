@@ -213,3 +213,16 @@ def test_city_is_not_merged_into_address_that_contains_it_as_letters():
     addresses = sorted(e.placeholder for e in result.entities if e.type == "ADDRESS")
     assert addresses == ["[ADDRESS_1]", "[ADDRESS_2]"]
     assert "Місце арбітражу – [ADDRESS_2], Україна." in result.markdown
+
+
+def test_street_mislabeled_as_reg_number_joins_the_address():
+    # Модель отдала начало адреса рег. номером, а индекс с городом — адресом.
+    markdown = "with its registered office at 365 Agiou Andreou, 3035 Limassol, Cyprus, with"
+    street = markdown.index("365 Agiou Andreou")
+    city = markdown.index("3035 Limassol")
+    result = anonymize_markdown(markdown, ner([
+        RawMatch("REG_NUMBER", "365 Agiou Andreou", street, street + 17, 0.8),
+        RawMatch("ADDRESS", "3035 Limassol", city, city + 13, 0.75),
+    ]))
+    assert [(e.type, e.value) for e in result.entities] == [("ADDRESS", "365 Agiou Andreou, 3035 Limassol")]
+    assert result.markdown == "with its registered office at [ADDRESS_1], Cyprus, with"

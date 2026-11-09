@@ -120,6 +120,18 @@ def test_drops_a_uk_postcode_mislabeled_as_reg_number():
     assert len(result) == 0
 
 
+def test_street_mislabeled_as_reg_number_becomes_address():
+    streets = ["365 Agiou Andreou", "12 Baker Street", "12A Main Road", "5 Αγίου Ανδρέου"]
+    result = filter_generic_ner_matches([match("REG_NUMBER", v) for v in streets])
+    assert [(m.type, m.value) for m in result] == [("ADDRESS", v) for v in streets]
+
+
+def test_reg_numbers_with_letters_stay_reg_numbers():
+    numbers = ["HE 412345", "123456 RCS Paris", "12345 dated", "1234567 Agiou", "2024/15"]
+    result = filter_generic_ner_matches([match("REG_NUMBER", v) for v in numbers])
+    assert [m.type for m in result] == ["REG_NUMBER"] * len(numbers)
+
+
 def test_drops_a_person_span_that_carries_a_company_suffix():
     dropped = ["ACME LIMITED GLOBEX LLC", "Acme Ltd", "Foo GmbH"]
     result = filter_generic_ner_matches([match("PERSON", v) for v in dropped])

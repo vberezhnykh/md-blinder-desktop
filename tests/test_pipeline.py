@@ -226,3 +226,14 @@ def test_street_mislabeled_as_reg_number_joins_the_address():
     ]))
     assert [(e.type, e.value) for e in result.entities] == [("ADDRESS", "365 Agiou Andreou, 3035 Limassol")]
     assert result.markdown == "with its registered office at [ADDRESS_1], Cyprus, with"
+
+
+def test_street_before_house_number_mislabeled_as_reg_number_joins_the_address():
+    markdown = "with its registered office at Zorana Žunkovica 21, Belgrade, Serbia"
+    street = markdown.index("Zorana")
+    city = markdown.index("Belgrade")
+    result = anonymize_markdown(markdown, ner([
+        RawMatch("REG_NUMBER", "Zorana Žunkovica 21", street, street + 19, 0.63),
+        RawMatch("ADDRESS", "Belgrade", city, city + 8, 0.74),
+    ]))
+    assert [(e.type, e.value) for e in result.entities] == [("ADDRESS", "Zorana Žunkovica 21, Belgrade")]

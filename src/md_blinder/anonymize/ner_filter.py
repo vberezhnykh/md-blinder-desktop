@@ -222,20 +222,39 @@ LEADING_REGNUM_GENERIC = re.compile(
     re.I | re.A,
 )
 
-# Номер дома и название улицы с заглавной («365 Agiou Andreou», «12 Baker Street»).
-# Модель иногда отдает такое начало адреса как рег. номер: в спане есть цифры.
-# У настоящего номера за ведущими цифрами не бывает слова вида «Agiou»: суффикс
-# реестра пишут заглавными («123456 RCS Paris»), а строчное слово («12345 dated»)
-# идет уже после номера.
+# Номер дома и название улицы с заглавной: номер перед улицей («365 Agiou Andreou»,
+# «12 Baker Street») или после нее («Zorana Žunkovica 21», «Bulevar Mihajla
+# Pupina 10a»). Модель иногда отдает такое начало адреса как рег. номер: в спане
+# есть цифры. У настоящего номера за ведущими цифрами не бывает слова вида
+# «Agiou»: суффикс реестра пишут заглавными («123456 RCS Paris»), а строчное
+# слово («12345 dated») идет уже после номера.
 _STREET_START = re.compile(rf"^[0-9]{{1,5}}[A-Za-z]?{_WS}+([^\W\d_]{{3,}})")
+# Улица, затем номер дома: до 4 цифр с буквой или корпусом («21», «10a», «5/2»).
+# Номер реестра длиннее, а перед коротким номером стоит слово-метка, его
+# отсекает _REGISTRY_WORD.
+_HOUSE_NUMBER_END = re.compile(rf"{_WS}+[0-9]{{1,4}}[A-Za-z]?(?:[/-][0-9]{{1,4}}[A-Za-z]?)?\Z")
+_STREET_WORD = re.compile(r"[^\W\d_][^\W\d_'’.-]*\.?")
+_ROMAN = re.compile(r"[IVX]+")
+_REGISTRY_WORD = re.compile(r"regis|regist|kvk|firmenbuch|matr[ií]c|n[uú]mer|code|c[oó]digo|kod|номер|код", re.I)
 
 
 def _looks_like_street(value: str) -> bool:
     m = _STREET_START.match(value)
+    if m is not None:
+        word = m.group(1)
+        return word[0].isupper() and word[1:].islower()
+    m = _HOUSE_NUMBER_END.search(value)
     if m is None:
         return False
-    word = m.group(1)
-    return word[0].isupper() and word[1:].islower()
+    words = re.split(_WS + "+", value[:m.start()].strip(_JS_TRIM_CHARS))
+    if not 1 <= len(words) <= 5:
+        return False
+    for w in words:
+        if not _STREET_WORD.fullmatch(w) or _REGISTRY_WORD.search(w):
+            return False
+        if w.isupper() and not _ROMAN.fullmatch(w):
+            return False  # «HRB 12345», «KvK 1234» — сокращение реестра
+    return any(len(w) >= 3 and w[0].isupper() and any(c.islower() for c in w) for w in words)
 
 
 # Мультиязычная NER-модель так же уверенно (0.8-0.95) тегает русские

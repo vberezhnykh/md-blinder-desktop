@@ -121,13 +121,21 @@ def test_drops_a_uk_postcode_mislabeled_as_reg_number():
 
 
 def test_street_mislabeled_as_reg_number_becomes_address():
-    streets = ["365 Agiou Andreou", "12 Baker Street", "12A Main Road", "5 Αγίου Ανδρέου"]
+    streets = [
+        "365 Agiou Andreou", "12 Baker Street", "12A Main Road", "5 Αγίου Ανδρέου",
+        # Номер дома после улицы, как пишут в Сербии, Германии, Польше, Испании.
+        "Zorana Žunkovica 21", "Bulevar Mihajla Pupina 10a", "Hauptstraße 5", "ul. Marszałkowska 5/2",
+        "Calle de Alcalá 12",
+    ]
     result = filter_generic_ner_matches([match("REG_NUMBER", v) for v in streets])
     assert [(m.type, m.value) for m in result] == [("ADDRESS", v) for v in streets]
 
 
 def test_reg_numbers_with_letters_stay_reg_numbers():
-    numbers = ["HE 412345", "123456 RCS Paris", "12345 dated", "1234567 Agiou", "2024/15"]
+    numbers = [
+        "HE 412345", "123456 RCS Paris", "12345 dated", "1234567 Agiou", "2024/15",
+        "HRB 12345", "KvK 1234", "Registro 1234", "Firmenbuch 1234", "Agiou Andreou 123456",
+    ]
     result = filter_generic_ner_matches([match("REG_NUMBER", v) for v in numbers])
     assert [m.type for m in result] == ["REG_NUMBER"] * len(numbers)
 

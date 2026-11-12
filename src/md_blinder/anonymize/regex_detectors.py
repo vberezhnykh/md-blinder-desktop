@@ -863,7 +863,16 @@ ID_DOC_FILLER_WORDS = frozenset({
     "гражданина", "гражданки", "громадянина", "громадянки",
     "рф", "рб", "россии", "российской", "федерации", "украины", "україни",
     "казахстана", "республики", "беларусь", "узбекистана", "таджикистана",
+    # Английские формы: «passport of a citizen of the RF No. …».
+    "of", "the", "a", "citizen", "rf", "usa", "us", "uk", "uae", "eu",
 })
+
+# После «of» идет название страны: «passport of Russian Federation No. 76 3679655».
+# Слова с заглавной пропускаются только в этом месте, иначе разбор шел бы через
+# любые имена после метки.
+_ID_DOC_COUNTRY_WORD_RE = JsRegex(r"^\p{Lu}\p{Ll}+$", "u")
+_ID_DOC_COUNTRY_MAX_WORDS = 8
+_ID_DOC_ARTICLES = frozenset({"the", "a", "citizen"})
 
 # Метки соседних полей реквизитов: на них скан останавливается. Они короткие и
 # заглавные, то есть неотличимы от буквенной серии («…, ІПН 123456789012»).
@@ -900,11 +909,13 @@ def _detect_id_document(text: str) -> list[RawMatch]:
             continue
 
         window_start = lm.end()
-        window = text[window_start:window_start + 70]
+        window = text[window_start:window_start + 100]
 
         runs: list[list[int]] = []
         digit_count = 0
         pending_prefix: Optional[tuple[int, int]] = None
+        after_of = False
+        country_words = 0
         for t in _ID_DOC_TOKEN_RE.finditer(window):
             raw = t.group()
             if t.group(2):
@@ -915,18 +926,30 @@ def _detect_id_document(text: str) -> list[RawMatch]:
             has_digit = _count_digits(raw) > 0
             has_letter = _HAS_LETTER_RE.test(raw)
 
-            # Чистые буквы: короткая заглавная серия перед цифрами («АВ 123456»),
-            # служебное слово либо конец разбора.
+            # Чистые буквы: служебное слово, название страны после «of», короткая
+            # заглавная серия перед цифрами («АВ 123456») либо конец разбора.
             if not has_digit:
-                if raw.lower() in ID_DOC_STOP_LABELS:
+                lower = raw.lower()
+                if lower in ID_DOC_STOP_LABELS:
                     break
+                # Служебное слово проверяется раньше серии: «РФ», «USA» тоже короткие
+                # и заглавные, но в номер не входят.
+                if lower in ID_DOC_FILLER_WORDS:
+                    # Внутри названия страны артикль означает новую фразу:
+                    # «passport of the Director and the Agreement No. 1234567».
+                    if country_words and lower in _ID_DOC_ARTICLES:
+                        break
+                    pending_prefix = None
+                    after_of = after_of or lower == "of"
+                    continue
                 # Серия бывает только до номера, иначе метка следующего поля
                 # подхватывалась бы как серия второго номера.
                 if not runs and _ID_DOC_SERIES_RE.test(raw):
                     pending_prefix = (t.start(), t.start() + len(raw))
                     continue
-                if raw.lower() in ID_DOC_FILLER_WORDS:
-                    pending_prefix = None
+                if (after_of and not runs and pending_prefix is None and country_words < _ID_DOC_COUNTRY_MAX_WORDS
+                        and (lower == "and" or _ID_DOC_COUNTRY_WORD_RE.test(raw))):
+                    country_words += 1
                     continue
                 break
 

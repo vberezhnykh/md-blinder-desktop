@@ -586,6 +586,13 @@ class TestIdentityDocuments:
         # Метка соседнего поля коротка и заглавна, то есть неотличима от серии.
         ("Паспорт АВ 123456, ІПН 123456789012", ["АВ 123456"]),
         ("ВНЖ 82 1234567, РВП 1234567", ["82 1234567", "1234567"]),
+        # Страна между меткой и номером не обрывает разбор и в номер не входит.
+        ("holder of a passport of Russian Federation No. 76 3679655, residing at", ["76 3679655"]),
+        ("passport of the Republic of Kazakhstan No. N12345678", ["N12345678"]),
+        ("passport of the United Kingdom of Great Britain and Northern Ireland No. 123456789", ["123456789"]),
+        ("passport of a citizen of the RF No. 4506 123456", ["4506 123456"]),
+        ("паспорт РФ 4506 123456", ["4506 123456"]),
+        ("паспорт гражданина РФ № 4506 123456", ["4506 123456"]),
     ])
     def test_detects(self, text: str, expected: list[str]) -> None:
         assert values(text, "ID_DOC") == expected
@@ -603,6 +610,9 @@ class TestIdentityDocuments:
         "Паспорт предъявлен при подписании",
         # Метка следующего поля не читается как серия, когда номера нет.
         "Паспорт предъявлен, ИНН 771234567890",
+        # Слова с заглавной пропускаются только как название страны после «of».
+        "a copy of the passport of the Director and the Agreement No. 1234567",
+        "passport Director Agreement No. 1234567",
     ])
     def test_ignores(self, text: str) -> None:
         assert values(text, "ID_DOC") == []

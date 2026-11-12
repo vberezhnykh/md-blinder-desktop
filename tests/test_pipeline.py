@@ -134,6 +134,13 @@ def test_passport_beats_phone():
     assert "[ID_DOC_1]" in result.markdown and "4506 123456" not in result.markdown
 
 
+def test_passport_after_country_beats_phone():
+    text = "holder of a passport of Russian Federation No. 76 3679655, residing at"
+    result = anonymize_markdown(text, ner([]))
+    assert [e.type for e in result.entities] == ["ID_DOC"]
+    assert "No. [ID_DOC_1]," in result.markdown
+
+
 def test_snils_passport_website():
     result = anonymize_markdown("СНИЛС 123-456-789 01, паспорт 4506 123456, сайт https://acme-legal.ru", ner([]))
     assert next(e for e in result.entities if e.value == "123-456-789 01").type == "REG_NUMBER"

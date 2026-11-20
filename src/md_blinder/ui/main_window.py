@@ -1,0 +1,2029 @@
+"""Главное окно (порт App.tsx)."""
+
+from __future__ import annotations
+
+import datetime as dt
+import json
+import os
+import time
+import uuid
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Optional
+
+from PySide6.QtCore import QObject, QSettings, QStandardPaths, Qt, QThread, QTimer, Signal
+from PySide6.QtGui import QAction, QCloseEvent, QKeySequence
+from PySide6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFileDialog,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QProgressDialog,
+    QPushButton,
+    QSizePolicy,
+    QStackedWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..anonymize.apply import (
+    MAX_LABEL_LENGTH,
+    accept_all_related,
+    accept_related_candidate,
+    add_entity_from_matches,
+    add_entity_from_selection,
+    add_occurrence_to_entity,
+    build_anonymized_text,
+    build_anonymized_text_with_map,
+    change_entity_type,
+    compact_placeholder_numbers,
+    dedupe_entity_ids,
+    merge_entities,
+    normalize_label,
+    pending_candidates,
+    restore_candidate,
+    swap_placeholders,
+)
+from ..anonymize.batch import (
+    BatchIndex,
+    align_batch,
+    batch_csv_bytes,
+    batch_to_markdown,
+    link_to_batch,
+    merge_batch_labels,
+    reconcile_batch_placeholders,
+    swap_batch_labels,
+)
+from ..anonymize.csv_export import csv_bytes
+from ..anonymize.redacted_docx import RedactedDocxError, docx_export_note, export_redacted_docx
+from ..anonymize.file_name import anonymize_file_name
+from ..anonymize.restore import restore_map
+from ..anonymize.image_safety import find_image_ranges
+from ..anonymize.placeholder_guard import has_placeholder_collision
+from ..anonymize.types import Entity
+from .. import jobs as jobs_module
+from ..cancel import CancelToken
+from ..jobs import DOWNLOAD, SKIP, ProcessingJob, ProcessingResult, start_job
+from ..export_job import PdfExportJob, PdfExportRequest
+from ..folders import collect_files, export_plan
+from .. import shell
+from ..components import ocr_models
+from ..paths import history_db_path
+from ..storage.history import HistoryDoc, HistoryStore, merge_docs, now_ms, parse_history, serialize_history
+from ..editing import resize_occurrence
+from ..text_utils import plural
+from . import theme as t
+from .autosave import Autosave
+from .progress_label import UiProgress, status_hint, status_label
+from .result_preview import ResultPane
+from .session import DocumentSession
+from .side_panel import SidePanel
+from .source_editor import EditorPane
+from .start_screen import StartScreen, dropped_files
+from .header import AppHeader
+from . import dialogs
+from .update_ui import UpdateBar, UpdateController, header_update_actions, settings_footer
+from .batch_overview import BatchOverview
+from .restore_dialog import RestoreDialog
+from .widgets import BATCH_PREFIX, Notice, StatusStrip, Toast
+
+SETTING_EXPLORER_MENU = "explorerMenu"
+SETTING_CONVERT_ONLY = "convertOnly"
+# Где лежит исходный PDF документа из истории: id документа -> путь и режим OCR.
+# Нужен для экспорта обезличенного PDF; хранится только на этом компьютере.
+# Пути к исходным PDF и DOCX для обезличенной выгрузки (имя ключа осталось от PDF).
+SETTING_PDF_SOURCES = "pdfSources"
+PDF_SOURCES_LIMIT = 200
+# Документы, которые не менялись столько дней, удаляются из истории при запуске.
+SETTING_HISTORY_RETENTION = "historyRetention"
+HISTORY_RETENTION_DAYS = 7
+DAY_MS = 24 * 60 * 60 * 1000
+
+WIDE_WINDOW = 1280
+DELETE_UNDO_MS = 8000
+
+
+def base_name(name: str) -> str:
+    stem = Path(name).stem
+    return stem or "document"
+
+
+def shorten(s: str, n: int) -> str:
+    return s if len(s) <= n else s[: n - 1] + "…"
+
+
+# С этого числа документов над списком пакета появляется поиск.
+BATCH_SEARCH_FROM = 8
+
+
+def split_doc_name(name: str, hint: str) -> tuple[str, str]:
+    """Имя документа из папки («Клиент/2024/акт.docx») для пункта меню: заголовок — имя
+    файла, путь к нему уходит в подсказку перед ее текстом."""
+    folder, _, file_name = name.rpartition("/")
+    return file_name, (f"{folder} · {hint}" if folder else hint)
+
+
+class DocumentPage(QWidget):
+    """Экран документа: строка статуса, плашки, исходник, результат и боковая панель.
+
+    Шапка окна общая с другими экранами (AppHeader); ее кнопки и меню доступны и
+    отсюда, через attach_header.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setObjectName("page")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 14, 24, 24)
+        layout.setSpacing(0)
+
+        self.status = StatusStrip()
+        layout.addWidget(self.status)
+        self.convert_only_box = QCheckBox("Только конвертация")
+        self.convert_only_box.setToolTip(
+            "Только конвертация в Markdown: копирование и экспорт без замен, документ выгружается как есть"
+        )
+        self.status.add_option(self.convert_only_box)
+
+        self.notices = QVBoxLayout()
+        self.notices.setContentsMargins(0, 0, 0, 0)
+        self.notices.setSpacing(0)
+        layout.addLayout(self.notices)
+        self.save_error = Notice(error=True)
+        self.retry_save = self.save_error.add_button("Повторить сохранение", lambda: None)
+        self.ocr_retry = Notice(tone="info", closable=True)
+        self.ocr_retry.label.setText("Текст выглядит битым или с ошибками?")
+        self.ocr_retry_hint = QLabel()
+        self.ocr_retry_hint.setObjectName("muted")
+        self.ocr_retry.row.insertWidget(2, self.ocr_retry_hint, 1)
+        self.ocr_retry.row.setStretch(1, 0)
+        self.ocr_retry_button = self.ocr_retry.add_button("Распознать заново через OCR", lambda: None)
+        self.ner_notice = Notice(closable=True)
+        self.ner_retry = self.ner_notice.add_button("Найти имена заново", lambda: None)
+        self.convert_notice = Notice(
+            "Включена только конвертация в Markdown: копирование и экспорт дают текст без замен. Отмеченные "
+            "данные сохраняются и снова заменяются, если снять флажок «Только конвертация».",
+            tone="info",
+        )
+        self.detect_notice = Notice("В документе нет автоматически найденных персональных данных.", tone="info")
+        self.detect_button = self.detect_notice.add_button("Найти персональные данные", lambda: None)
+        self.ocr_notice = Notice(closable=True)
+        self.image_notice = Notice(closable=True)
+        self.collision_notice = Notice(
+            "В документе уже есть текст вида [PERSON_1], похожий на метки замены. В итоговом тексте "
+            "такие фрагменты экранируются, чтобы их нельзя было спутать.",
+            closable=True,
+        )
+        for notice in (
+            self.save_error, self.ocr_retry, self.ner_notice, self.convert_notice, self.detect_notice,
+            self.ocr_notice, self.image_notice, self.collision_notice,
+        ):
+            slot = QWidget()
+            wrap = QVBoxLayout(slot)
+            wrap.setContentsMargins(0, 12, 0, 0)
+            wrap.addWidget(notice)
+            notice.slot = slot
+            notice.hide()
+            self.notices.addWidget(slot)
+
+        # Переключатель «Исходник / Результат» и флажок «Результат рядом» стоят в заголовке
+        # видимой колонки: _apply_layout в MainWindow переносит их туда.
+        self.view_box = QFrame()
+        self.view_box.setObjectName("segmented")
+        # Высота по кнопкам: иначе рамка растягивается на весь заголовок колонки и упирается в ее край.
+        self.view_box.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        view_row = QHBoxLayout(self.view_box)
+        view_row.setContentsMargins(3, 3, 3, 3)
+        view_row.setSpacing(2)
+        self.source_button = QPushButton("Исходник")
+        self.result_button = QPushButton("Результат")
+        for b in (self.source_button, self.result_button):
+            b.setObjectName("segment")
+            b.setCheckable(True)
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            view_row.addWidget(b)
+        self.side_by_side_box = QCheckBox("Результат рядом")
+        self.side_by_side_box.setObjectName("small")
+
+        work = QHBoxLayout()
+        work.setContentsMargins(0, 16, 0, 0)
+        work.setSpacing(16)
+        self.editor_pane = EditorPane()
+        self.result_pane = ResultPane()
+        self.editor = self.editor_pane.editor
+        self.preview = self.result_pane.preview
+        work.addWidget(self.editor_pane, 1)
+        work.addWidget(self.result_pane, 1)
+        self.side = SidePanel()
+        self.side.setFixedWidth(440)
+        work.addWidget(self.side)
+        layout.addLayout(work, 1)
+
+    def attach_header(self, header: AppHeader) -> None:
+        self.topbar = header
+        self.home_button = header.home_button
+        self.new_button = header.new_button
+        self.history_button = header.history_button
+        self.history_menu = header.history_menu
+        self.batch_button = header.batch_button
+        self.batch_menu = header.batch_menu
+        self.file_label = header.file_label
+
+
+@dataclass
+class _Run:
+    """Обработка выбранных файлов: один файл или пакет."""
+
+    paths: list[Path]
+    force_ocr: bool
+    batch_id: Optional[str]
+    members: list[HistoryDoc]  # документы пакета, включая уже обработанные в этом запуске
+    convert_only: bool = False  # только Markdown, без поиска персональных данных
+    # Имена документов в истории: у файлов из папки — путь от этой папки.
+    names: dict[Path, str] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)  # пояснения к итогу, не ошибки
+    created: list[tuple[HistoryDoc, ProcessingResult]] = field(default_factory=list)
+    failures: list[str] = field(default_factory=list)
+    skipped: set[str] = field(default_factory=set)
+
+    @property
+    def index(self) -> int:
+        return len(self.created) + len(self.failures)
+
+
+class _ModelBridge(QObject):
+    """Переносит смену состояния модели NER из фонового потока в главный."""
+
+    changed = Signal(object)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, store: Optional[HistoryStore] = None) -> None:
+        super().__init__()
+        self.setWindowTitle("MD Blinder")
+        self.resize(1360, 860)
+        self.setAcceptDrops(True)
+        self.settings = QSettings("md-blinder", "desktop")
+        self.store = store or HistoryStore(history_db_path())
+        self.autosave = Autosave(self.store, self)
+        self.session = DocumentSession(on_dirty=self.autosave.queue)
+        # Остальные документы пакета открытого документа. Каждая правка согласует
+        # метки с ними: одинаковые значения получают одинаковые метки во всем пакете.
+        self.batch_others: list[HistoryDoc] = []
+        self.session.prepare = self._reconcile_with_batch
+        self.run: Optional[_Run] = None
+        self.overview: Optional[BatchOverview] = None
+
+        self.job: Optional[ProcessingJob] = None
+        self.thread: Optional[QThread] = None
+        self._threads: list[QThread] = []  # QThread нельзя удалять, пока поток не завершился
+        self.job_started = 0.0
+        self.progress: Optional[UiProgress] = None
+        self.elapsed_timer = QTimer(self)
+        self.elapsed_timer.setInterval(1000)
+        self.elapsed_timer.timeout.connect(self._update_loading)
+
+        self.last_pdf: Optional[tuple[Path, str, bool]] = None  # путь, id документа, OCR принудительно
+        self.pdf_job: Optional[PdfExportJob] = None
+        self.pdf_request: Optional[PdfExportRequest] = None
+        self.pdf_dialog: Optional[QProgressDialog] = None
+        self._detect_doc_id: Optional[str] = None  # документ, в котором идет поиск данных
+        self.view = "source"
+        self.pending_delete: Optional[str] = None
+        self.delete_timer = QTimer(self)
+        self.delete_timer.setSingleShot(True)
+        self.delete_timer.timeout.connect(self._commit_delete)
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.setInterval(150)
+        self.render_timer.timeout.connect(self._render_derived)
+        self.anonymized_text = ""
+        self._rendered_text: Optional[str] = None
+
+        self.stack = QStackedWidget()
+        self.start = StartScreen()
+        self.page = DocumentPage()
+        self.header = AppHeader()
+        self.page.attach_header(self.header)
+        self.stack.addWidget(self.start)
+        self.stack.addWidget(self.page)
+        self.stack.currentChanged.connect(self._screen_changed)
+        central = QWidget()
+        column = QVBoxLayout(central)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.header)
+        self.update_bar = UpdateBar()
+        bar_wrap = QWidget()
+        bar_wrap.setObjectName("page")
+        bar_row = QVBoxLayout(bar_wrap)
+        bar_row.setContentsMargins(24, 12, 24, 0)
+        bar_row.addWidget(self.update_bar)
+        self.update_bar.slot = bar_wrap
+        bar_wrap.hide()
+        column.addWidget(bar_wrap)
+        column.addWidget(self.stack, 1)
+        self.setCentralWidget(central)
+        self.toast = Toast(self.stack)
+        self.updates = UpdateController(self.update_bar, self.settings, self)
+        self.updates.toast.connect(lambda text, tone: self.toast.show_message(text, 5000, tone=tone))
+        self.updates.restart_requested.connect(self._restart_for_update)
+        for widget in header_update_actions(self.updates):
+            self.header.start_row.addWidget(widget)
+        footer = settings_footer(self.updates)
+        footer.layout().insertWidget(footer.layout().count() - 1, self._retention_box())
+        if shell.available():
+            footer.layout().insertWidget(footer.layout().count() - 1, self._explorer_menu_box())
+            self._sync_explorer_menu(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
+        self.start.add_footer(footer)
+
+        self._wire()
+        self._purge_old_history()
+        self._refresh_history()
+        self._wire_model_status()
+
+    # ------------------------------------------------------------------ связи
+
+    def _wire(self) -> None:
+        s, p = self.start, self.page
+        s.pick_file.connect(self.pick_file)
+        s.pick_folder.connect(self.pick_folder)
+        s.file_dropped.connect(lambda paths: self.process_files([Path(p) for p in paths]))
+        s.loading.cancel.connect(self.cancel_job)
+        s.history.open_doc.connect(self.open_doc)
+        s.history.delete_doc.connect(self.request_delete)
+        s.history.show_batch.connect(self.show_batch_from_history)
+        s.history.export_history.connect(self.export_history)
+        s.history.import_history.connect(self.import_history)
+        s.history.clear_history.connect(self.clear_history)
+        convert_only = self.settings.value(SETTING_CONVERT_ONLY, False, type=bool)
+        for box in (s.convert_only_box, p.convert_only_box):
+            box.setChecked(convert_only)
+            box.toggled.connect(self.set_convert_only)
+        p.detect_button.clicked.connect(self.find_entities)
+        p.ner_retry.clicked.connect(self.find_entities)
+
+        self.header.home.connect(self.show_all_docs)
+        p.new_button.clicked.connect(self.pick_file)
+        p.retry_save.clicked.connect(self.autosave.flush)
+        p.ocr_retry_button.clicked.connect(self.retry_with_ocr)
+        p.source_button.clicked.connect(lambda: self.set_view("source"))
+        p.result_button.clicked.connect(lambda: self.set_view("result"))
+        p.side_by_side_box.setChecked(self.settings.value("sideBySide", True, type=bool))
+        p.side_by_side_box.toggled.connect(self._side_by_side_changed)
+        p.history_button.clicked.connect(self._open_history_menu)
+        p.batch_button.clicked.connect(self._open_batch_menu)
+
+        p.status.show_candidates.connect(self.show_candidates)
+        p.status.export_md.connect(self.export_md)
+        p.status.copy_text.connect(self.copy_text)
+        p.status.export_csv.connect(self.export_csv)
+        p.status.restore_names.connect(self.open_restore)
+        p.status.export_pdf.connect(self.export_pdf)
+        p.status.export_docx.connect(self.export_docx)
+
+        p.editor.edited.connect(self.session.editor_changed)
+        p.editor.undo_requested.connect(self.session.undo_stack.undo)
+        p.editor.redo_requested.connect(self.session.undo_stack.redo)
+        p.editor.add_requested.connect(self._add_entity)
+        p.editor.attach_requested.connect(self._attach_entity)
+        p.editor.entity_clicked.connect(self._entity_clicked)
+        p.editor.merge_requested.connect(self._merge)
+        p.editor.batch_index = lambda: self.batch_index
+        p.editor.span_changed.connect(self._span_changed)
+        p.editor.hovered.connect(p.side.found.set_highlighted)
+        p.side.found.row_hovered.connect(p.editor.set_outlined)
+
+        review, found = p.side.review, p.side.found
+        review.activate.connect(self.activate_candidate)
+        review.accept.connect(lambda i: self._update(lambda es: compact_placeholder_numbers(accept_related_candidate(es, i)), "Принять кандидата"))
+        review.reject.connect(self._reject)
+        review.accept_all_related.connect(lambda i: self._update(lambda es: compact_placeholder_numbers(accept_all_related(es, i)), "Принять похожие"))
+        review.restore.connect(lambda i: self._update(lambda es: restore_candidate(es, i), "Вернуть кандидата"))
+        review.change_type.connect(self._change_type)
+        review.export.connect(self.export_md)
+        review.next_doc.connect(self.open_next_pending_doc)
+        found.set_anonymize.connect(self._set_anonymize)
+        found.select.connect(self.select_entity)
+        found.change_type.connect(self._change_type)
+        found.merge.connect(self._merge)
+        found.link_batch.connect(self._link_batch)
+        found.relabel.connect(self._relabel)
+        found.delete.connect(lambda i: self._update(lambda es: compact_placeholder_numbers([e for e in es if e.id != i]), "Удалить замену"))
+
+        self.session.doc_replaced.connect(self._doc_replaced)
+        self.session.text_changed.connect(p.editor.apply_change)
+        self.session.entities_changed.connect(self._entities_changed)
+        self.autosave.state_changed.connect(self._save_state_changed)
+        self.autosave.saved.connect(self._refresh_history)
+
+        undo = QAction("Отменить", self)
+        undo.setShortcut(QKeySequence.StandardKey.Undo)
+        undo.triggered.connect(self.session.undo_stack.undo)
+        redo = QAction("Повторить", self)
+        redo.setShortcut(QKeySequence.StandardKey.Redo)
+        redo.triggered.connect(self.session.undo_stack.redo)
+        open_action = QAction("Открыть файл", self)
+        open_action.setShortcut(QKeySequence.StandardKey.Open)
+        open_action.triggered.connect(self.pick_file)
+        folder_action = QAction("Открыть папку", self)
+        folder_action.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        folder_action.triggered.connect(self.pick_folder)
+        find_action = QAction("Найти в тексте", self)
+        find_action.setShortcut(QKeySequence.StandardKey.Find)
+        find_action.triggered.connect(self.open_search)
+        for action in (undo, redo, open_action, folder_action, find_action):
+            self.addAction(action)
+        p.editor_pane.search.replace_all.connect(self._replace_found)
+
+    # ------------------------------------------------------------------ обработка файла
+
+    def _pick_paths(self, title: str) -> list[Path]:
+        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        paths, _ = QFileDialog.getOpenFileNames(self, title, start_dir, "Документы (*.docx *.xlsx *.pdf);;Все файлы (*)")
+        if paths:
+            self.settings.setValue("lastDir", str(Path(paths[0]).parent))
+        return [Path(p) for p in paths]
+
+    def _pick_folder(self, title: str) -> Optional[Path]:
+        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        folder = QFileDialog.getExistingDirectory(self, title, start_dir)
+        if not folder:
+            return None
+        self.settings.setValue("lastDir", str(Path(folder).parent))
+        return Path(folder)
+
+    def pick_file(self) -> None:
+        if self.job is not None:
+            return
+        self.process_files(self._pick_paths("Выберите документы"))
+
+    def pick_folder(self) -> None:
+        """Папка с документами, включая вложенные папки, обрабатывается пакетом."""
+        if self.job is not None:
+            return
+        folder = self._pick_folder("Выберите папку с документами")
+        if folder is not None:
+            self.process_files([folder])
+
+    def process_file(self, path: Path, force_ocr: bool = False) -> None:
+        self.process_files([path], force_ocr=force_ocr)
+
+    def process_files(
+        self, paths: list[Path], force_ocr: bool = False,
+        batch_id: Optional[str] = None, members: Optional[list[HistoryDoc]] = None,
+        names: Optional[dict[Path, str]] = None,
+    ) -> None:
+        """Один файл открывается как отдельный документ. Несколько файлов, а также
+        файлы, добавленные к открытому документу, образуют пакет: одинаковые
+        значения получают одинаковые метки во всех его документах. Папка
+        раскрывается в файлы .docx, .xlsx и .pdf на любой глубине вложенности.
+        Файл, который не удалось обработать, пропускается, остальные обрабатываются."""
+        if self.job is not None or not paths:
+            return
+        collected = collect_files(paths)
+        legacy_note = (
+            f"Файлы .doc и .xls из папки пропущены ({collected.legacy}): сохраните их в Word или Excel "
+            "как .docx или .xlsx." if collected.legacy else ""
+        )
+        if not collected.paths:
+            if self.stack.currentWidget() is self.start:
+                self.start.set_error(" ".join(filter(None, ["В папке нет файлов .docx, .xlsx или .pdf.", legacy_note])))
+            else:
+                self.toast.show_message(
+                    " ".join(filter(None, ["В папке нет файлов .docx, .xlsx или .pdf.", legacy_note])), 8000, tone="warn",
+                )
+            return
+        paths = collected.paths
+        if not self.autosave.flush():
+            self._show_save_error()
+        self.session.replace_doc(None)
+        self.stack.setCurrentWidget(self.start)
+        self.start.set_error("")
+        count = plural(len(paths), ("файл", "файла", "файлов"))
+        if len(collected.folders) == 1 and all("/" in collected.name(p) for p in paths):
+            self.start.set_file_name(f"Папка «{collected.folders[0].resolve().name}»: {count}", plain=True)
+        else:
+            self.start.set_file_name(collected.name(paths[0]) if len(paths) == 1 else count)
+        self.start.dropzone.set_busy(True)
+        if batch_id is None and len(paths) > 1:
+            batch_id = str(uuid.uuid4())
+        self.run = _Run(
+            list(paths), force_ocr, batch_id, list(members or []), convert_only=self.convert_only,
+            names={**collected.names, **(names or {})}, notes=[legacy_note] if legacy_note else [],
+        )
+        self.job_started = time.monotonic()
+        self.start.loading.show()
+        self.elapsed_timer.start()
+        self._start_next_file()
+
+    # ------------------------------------------------------------------ модель NER
+
+    def _wire_model_status(self) -> None:
+        # Holder читается здесь, а не при импорте: тесты подменяют jobs.MODEL.
+        self.model_holder = jobs_module.MODEL
+        self._model_cancel: Optional[CancelToken] = None
+        self._model_bridge = _ModelBridge(self)
+        self._model_bridge.changed.connect(lambda _status: self._show_model_status())
+        self._model_listener = self._model_bridge.changed.emit
+        self.model_holder.subscribe(self._model_listener)
+        bar = self.start.model_status
+        bar.download.connect(self.download_model)
+        bar.choose_file.connect(self.choose_model_file)
+        bar.cancel.connect(self.cancel_model_download)
+        bar.load.connect(self.model_holder.preload)
+        self._show_model_status()
+
+    def _show_model_status(self) -> None:
+        self.start.model_status.set_status(
+            self.model_holder.status(), ocr_models.is_ocr_present(), self.convert_only,
+        )
+
+    def preload_model(self) -> None:
+        """После запуска: скачанная модель загружается в фоне, чтобы первый документ
+        не ждал ее. В режиме только конвертации модель не нужна и память не занимает."""
+        if not self.convert_only:
+            self.model_holder.preload()
+
+    def download_model(self, source: Optional[str] = None) -> None:
+        self._model_cancel = CancelToken()
+        self.model_holder.download_then_preload(self._model_cancel, source)
+
+    def choose_model_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Файл модели", "", "ONNX (*.onnx);;Все файлы (*)")
+        if path:
+            self.download_model(path)
+
+    def cancel_model_download(self) -> None:
+        if self._model_cancel is not None:
+            self._model_cancel.cancel()
+
+    def _start_next_file(self) -> None:
+        run = self.run
+        if run is None:
+            return
+        if run.index >= len(run.paths):
+            self._finish_run()
+            return
+        self.progress = None
+        job = ProcessingJob(run.paths[run.index], run.force_ocr, run.members, run.skipped, run.convert_only)
+        self._launch(job, self._job_finished, self._job_failed, self._job_cancelled)
+
+    def _launch(self, job: ProcessingJob, finished, failed, cancelled) -> None:
+        self.job = job
+        job.progress.connect(self._job_progress)
+        job.ask.connect(self._job_ask)
+        job.finished.connect(finished)
+        job.failed.connect(failed)
+        job.cancelled.connect(cancelled)
+        self._update_loading()
+        self.thread = start_job(job)
+        thread = self.thread
+        self._threads.append(thread)
+        thread.finished.connect(lambda: self._threads.remove(thread) if thread in self._threads else None)
+
+    def cancel_job(self) -> None:
+        if self.job is not None:
+            self.job.cancel()
+
+    def _job_done(self) -> None:
+        self._show_model_status()  # задача могла скачать модели
+        self.elapsed_timer.stop()
+        self.start.loading.hide()
+        self.start.dropzone.set_busy(False)
+        self.job = None
+        self.run = None
+
+    def _job_progress(self, progress: UiProgress) -> None:
+        self.progress = progress
+        self._update_loading()
+
+    def _update_loading(self) -> None:
+        elapsed = time.monotonic() - self.job_started
+        label = status_label(self.progress, elapsed)
+        run = self.run
+        if run is not None and len(run.paths) > 1:
+            label = f"Документ {min(run.index + 1, len(run.paths))} из {len(run.paths)}. {label}"
+        self.start.loading.set_status(label, status_hint(self.progress))
+
+    def _job_ask(self, kind: str, payload) -> None:
+        job = self.job
+        if job is None:
+            return
+        if kind == "ocr-download":
+            pages = int(payload or 0)
+            answer = dialogs.choose(
+                self, "Скачать модель для распознавания сканов?",
+                f"В документе {plural(pages, ('страница-скан', 'страницы-скана', 'страниц-сканов'))}. "
+                "Чтобы распознать текст, нужно один раз скачать модель Indra OCR с Hugging Face, "
+                f"около {ocr_models.TOTAL_MB} МБ.",
+                "Это публичные файлы, текст документа никуда не отправляется.",
+                [("skip", "Продолжить без распознавания", "ghost", True), ("download", "Скачать", "primary", False)],
+            )
+            job.answer(DOWNLOAD if answer == "download" else SKIP)
+        elif kind == "ner-model":
+            answer = dialogs.choose(
+                self, "Скачать модель для поиска имен?",
+                "Чтобы находить имена, компании и адреса, нужна модель GLiNER, около 580 МБ. Она скачивается "
+                "один раз с Hugging Face и хранится на этом компьютере.",
+                "Без модели найдутся только телефоны, email, реквизиты и номера документов. Если сайт закрыт "
+                "в вашей сети, укажите заранее скачанный файл model_fp16.onnx.",
+                [
+                    ("skip", "Продолжить без модели", "ghost", True),
+                    ("file", "Указать файл…", "", False),
+                    ("download", "Скачать", "primary", False),
+                ],
+            )
+            if answer == "download":
+                job.answer(DOWNLOAD)
+            elif answer == "file":
+                path, _ = QFileDialog.getOpenFileName(self, "Файл модели", "", "ONNX (*.onnx);;Все файлы (*)")
+                job.answer(f"file:{path}" if path else SKIP)
+            else:
+                job.answer(SKIP)
+
+    def _job_failed(self, message: str) -> None:
+        run = self.run
+        self.job = None
+        if run is None:
+            return
+        path = run.paths[run.index]
+        name = run.names.get(path, path.name)
+        run.failures.append(message if len(run.paths) == 1 or name in message else f"«{name}»: {message}")
+        self._start_next_file()
+
+    def _job_cancelled(self) -> None:
+        # Документы, обработанные до отмены, уже сохранены в историю.
+        self._job_done()
+        self.start.set_file_name("")
+        self._refresh_history()
+
+    def _job_finished(self, result: ProcessingResult) -> None:
+        run = self.run
+        self.job = None
+        if run is None:
+            return
+        now = now_ms()
+        path = run.paths[run.index]
+        doc = HistoryDoc(
+            id=str(uuid.uuid4()), name=run.names.get(path, result.path.name), format=result.format, created_at=now, updated_at=now,
+            source_text=result.markdown, entities=result.entities, batch_id=run.batch_id,
+            ner_missing=result.ner_failed or result.ner_skipped,
+        )
+        run.created.append((doc, result))
+        if result.format in ("pdf", "docx"):
+            self._remember_source(doc.id, result.path, result.force_ocr)
+        run.members.append(doc)
+        self.autosave.queue(replace(doc, entities=list(doc.entities)))
+        self._start_next_file()
+
+    def _finish_run(self) -> None:
+        run = self.run
+        self._job_done()
+        if run is None:
+            return
+        if not run.created:
+            self.start.set_error(" ".join([*run.failures, *run.notes]))
+            return
+        doc, result = run.created[0]
+        self.batch_others = [d for d in run.members if d.id != doc.id]
+        self.last_pdf = (result.path, doc.id, result.force_ocr) if len(run.paths) == 1 and result.format == "pdf" else None
+        self.page.side.user_tab = None
+        self.page.side.review.active_id = None
+        self.session.replace_doc(doc, dirty=True)
+        self._set_ner_notice(result)
+        if result.ocr_skipped_pages:
+            pages = result.ocr_skipped_pages
+            self.page.ocr_notice.label.setText(
+                f"Страницы-сканы не распознаны ({', '.join(map(str, pages[:10]))}{'…' if len(pages) > 10 else ''}): "
+                "модель распознавания текста не скачана. Текст этих страниц в результат не попал."
+            )
+            self.page.ocr_notice.show()
+        else:
+            self.page.ocr_notice.hide()
+        self.set_view("source")
+        self.stack.setCurrentWidget(self.page)
+        if run.failures or run.notes:
+            lead = "Обработаны не все файлы. " if run.failures else ""
+            self.toast.show_message(f"{lead}{' '.join([*run.failures, *run.notes])}", 12000, tone="warn")
+        elif run.batch_id and len(run.members) > 1:
+            count = plural(len(run.members), ('документ', 'документа', 'документов'))
+            self.toast.show_message(
+                f"В пакете {count}. Остальные документы пакета открываются из меню «Пакет»." if run.convert_only else
+                f"В пакете {count}: одинаковые значения заменены одинаковыми метками во всех. "
+                "Остальные документы пакета открываются из меню «Пакет».",
+                8000,
+            )
+
+    def _set_ner_notice(self, result: Optional[ProcessingResult]) -> None:
+        notice = self.page.ner_notice
+        if result is not None and result.ner_failed:
+            notice.label.setText(
+                "Модель распознавания имен, компаний и адресов не сработала. Найдены только данные, которые "
+                "определяются по шаблону: телефоны, email, реквизиты, номера документов."
+                + (f"<br><span style='color:{t.INK_2}'>Причина: {result.ner_error}</span>" if result.ner_error else "")
+            )
+            notice.show()
+        elif result is not None and result.ner_skipped:
+            notice.label.setText(
+                "Поиск имен, компаний и адресов не выполнялся: модель распознавания не скачана. Найдены только "
+                "данные по шаблонам. Отметьте имена вручную или найдите их заново, скачав модель."
+            )
+            notice.show()
+        elif self.session.doc is not None and self.session.doc.ner_missing:
+            notice.label.setText(
+                "При обработке этого документа имена, компании и адреса не искались: модель распознавания "
+                "не работала. Найдены только данные по шаблонам: телефоны, email, реквизиты, номера документов."
+            )
+            notice.show()
+        else:
+            notice.hide()
+
+    def retry_with_ocr(self) -> None:
+        if self.last_pdf is None:
+            return
+        doc = self.session.doc
+        if doc is not None and doc.id == self.last_pdf[1] and doc.batch_id:
+            # Прежняя версия остается в истории, а ее место в пакете занимает новая.
+            batch_id, members = doc.batch_id, list(self.batch_others)
+            self.session.replace_doc(replace(doc, batch_id=None, entities=list(doc.entities)), dirty=True)
+            self.process_files(
+                [self.last_pdf[0]], force_ocr=True, batch_id=batch_id, members=members, names={self.last_pdf[0]: doc.name},
+            )
+            return
+        names = {self.last_pdf[0]: doc.name} if doc is not None and doc.id == self.last_pdf[1] else None
+        self.process_files([self.last_pdf[0]], force_ocr=True, names=names)
+
+    # ------------------------------------------------------------------ только конвертация
+
+    @property
+    def convert_only(self) -> bool:
+        return self.start.convert_only_box.isChecked()
+
+    def set_convert_only(self, value: bool) -> None:
+        """Один флажок на стартовом экране и на экране документа. Новые файлы
+        открываются без поиска данных, а у открытого документа копирование и
+        экспорт идут без замен; разметка при этом не теряется. Флажок, включенный
+        во время обработки, прерывает поиск данных в текущем файле и пропускает
+        его в остальных файлах пакета."""
+        self.settings.setValue(SETTING_CONVERT_ONLY, value)
+        if self.run is not None:
+            self.run.convert_only = value
+            if self.job is not None:
+                self.job.set_convert_only(value)
+        for box in (self.start.convert_only_box, self.page.convert_only_box):
+            if box.isChecked() != value:
+                box.blockSignals(True)
+                box.setChecked(value)
+                box.blockSignals(False)
+        if not value:
+            self.preload_model()
+        self._show_model_status()
+        self._render_derived()
+
+    def find_entities(self) -> None:
+        """Поиск персональных данных в открытом документе, например открытом в
+        режиме только конвертации. Найденное добавляется к уже отмеченному."""
+        doc = self.session.doc
+        if doc is None or self.job is not None:
+            return
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        self._detect_doc_id = doc.id
+        self.stack.setCurrentWidget(self.start)
+        self.start.set_error("")
+        self.start.set_file_name(doc.name)
+        self.start.dropzone.set_busy(True)
+        self.progress = None
+        self.job_started = time.monotonic()
+        self.start.loading.show()
+        self.elapsed_timer.start()
+        job = ProcessingJob(Path(doc.name), batch_members=self.batch_others, source_text=doc.source_text)
+        self._launch(job, self._detect_finished, self._detect_failed, self._detect_cancelled)
+
+    def _detect_back(self) -> bool:
+        self._job_done()
+        self.start.set_file_name("")
+        doc = self.session.doc
+        if doc is None or doc.id != self._detect_doc_id:
+            return False
+        self.set_view("source")
+        self.stack.setCurrentWidget(self.page)
+        return True
+
+    def _detect_finished(self, result: ProcessingResult) -> None:
+        if not self._detect_back():
+            return
+
+        def merge(entities: list) -> list:
+            taken = [(p.start, p.end) for e in entities for p in e.positions]
+            added = []
+            for e in result.entities:
+                free = [p for p in e.positions if not any(p.start < end and start < p.end for start, end in taken)]
+                if free:
+                    added.append(replace(e, positions=free))
+            return compact_placeholder_numbers(dedupe_entity_ids([*entities, *added]))
+
+        doc = self.session.doc
+        missing = result.ner_failed or result.ner_skipped
+        if doc is not None and doc.ner_missing != missing:
+            doc.ner_missing = missing
+            self.autosave.queue(replace(doc, entities=list(doc.entities)))
+        self._update(merge, "Найти персональные данные")
+        self._set_ner_notice(result)
+        self._render_derived()
+        found = len([e for e in self.session.entities if not e.manual])
+        self.toast.show_message(
+            f"Найдено: {plural(found, ('значение', 'значения', 'значений'))}." if found
+            else "Персональные данные не найдены.", 5000,
+        )
+
+    def _detect_failed(self, message: str) -> None:
+        if self._detect_back():
+            self.toast.show_message(message.replace("сконвертировать файл", "найти персональные данные"), 8000, tone="error")
+
+    def _detect_cancelled(self) -> None:
+        self._detect_back()
+
+    # ------------------------------------------------------------------ пакет
+
+    @property
+    def batch_others(self) -> list[HistoryDoc]:
+        return self._batch_others
+
+    @batch_others.setter
+    def batch_others(self, docs: list[HistoryDoc]) -> None:
+        self._batch_others = docs
+        self._batch_index: Optional[BatchIndex] = None
+
+    @property
+    def batch_index(self) -> Optional[BatchIndex]:
+        """Замены остальных документов пакета: строятся при первом обращении после
+        смены пакета, потому что пакет из сотни документов разбирать заметно."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id or not self._batch_others:
+            return None
+        if self._batch_index is None:
+            self._batch_index = BatchIndex(self._batch_others)
+        return self._batch_index
+
+    def _merge(self, source: str, target: str) -> None:
+        if target.startswith(BATCH_PREFIX):
+            self._link_batch(source, target[len(BATCH_PREFIX):])
+            return
+        self._update(lambda es: compact_placeholder_numbers(merge_entities(es, source, target)), "Объединить")
+
+    def _link_batch(self, entity_id: str, placeholder: str) -> None:
+        """Объединяет находку с заменой из другого документа пакета: находка получает
+        ее метку, и при согласовании пакета метка остается общей."""
+        batch = self.batch_index
+        target = batch.target(placeholder) if batch is not None else None
+        if target is None:
+            return
+        self._update(lambda es: compact_placeholder_numbers(link_to_batch(es, entity_id, target)), "Объединить")
+
+    def _reconcile_with_batch(self, entities: list, text: str) -> list:
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return entities
+        return reconcile_batch_placeholders(entities, text, self.batch_others)
+
+    def _load_batch(self, doc: HistoryDoc) -> tuple[HistoryDoc, list[HistoryDoc]]:
+        """Загружает пакет документа и согласует метки во всех его документах по
+        порядку загрузки. Измененные остальные документы сохраняются сразу; сам
+        документ возвращается вызывающему, чтобы тот открыл или сохранил его."""
+        if not doc.batch_id:
+            return doc, [doc]
+        stored = self.store.load_batch(doc.batch_id)
+        members = [doc if d.id == doc.id else d for d in stored]
+        if not any(d.id == doc.id for d in stored):
+            members.append(doc)
+        aligned = align_batch(members)
+        for before, after in zip(members, aligned):
+            if after is not before and after.id != doc.id:
+                self.store.put_doc(after)
+        current = next(d for d in aligned if d.id == doc.id)
+        return current, aligned
+
+    def _batch_docs(self) -> list[HistoryDoc]:
+        """Документы пакета открытого документа в порядке загрузки."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return []
+        return sorted([*self.batch_others, doc], key=lambda d: (d.created_at, d.id))
+
+    def _pending_batch_docs(self) -> list[HistoryDoc]:
+        """Другие документы пакета с непроверенными кандидатами, начиная со следующего
+        за открытым по порядку загрузки."""
+        doc = self.session.doc
+        docs = self._batch_docs()
+        if doc is None or not docs:
+            return []
+        index = next(i for i, d in enumerate(docs) if d.id == doc.id)
+        ordered = docs[index + 1:] + docs[:index]
+        return [d for d in ordered if pending_candidates(d.entities)]
+
+    def _next_pending_doc(self) -> Optional[tuple[str, int, int]]:
+        pending = self._pending_batch_docs()
+        if not pending:
+            return None
+        return pending[0].name, len(pending), sum(len(pending_candidates(d.entities)) for d in pending)
+
+    def open_next_pending_doc(self) -> None:
+        pending = self._pending_batch_docs()
+        if pending:
+            self.open_doc(pending[0].id)
+
+    def _update_batch_button(self) -> None:
+        docs = self._batch_docs()
+        self.header.set_batch_size(len(docs))
+
+    def _open_batch_menu(self) -> None:
+        menu = self.page.batch_menu
+        menu.clear()
+        doc = self.session.doc
+        docs = self._batch_docs()
+        if docs:
+            menu.add_section(f"Документы пакета · {len(docs)}")
+            menu.add_note("Одинаковые значения получают одинаковые метки во всех документах пакета.")
+            menu.begin_list("Найти документ" if len(docs) >= BATCH_SEARCH_FROM else "")
+        else:
+            menu.add_note(
+                "Добавьте связанные документы, например договоры с теми же сторонами, чтобы одинаковые "
+                "значения получили одинаковые метки во всех файлах."
+            )
+        for i, meta in enumerate(docs):
+            is_current = doc is not None and meta.id == doc.id
+            hint = "Открыт сейчас" if is_current else plural(len(meta.entities), ("находка", "находки", "находок"))
+            file_name, hint = split_doc_name(meta.name, hint)
+            menu.add_item(
+                f"{i + 1}. {file_name}",
+                (lambda: None) if is_current else (lambda i=meta.id: self.open_doc(i)),
+                hint, current=is_current, elide=True, tooltip=meta.name, search_text=meta.name,
+            )
+        if docs:
+            menu.end_list()
+        menu.add_item(
+            "Добавить документы в пакет", self.add_to_batch, "Файлы .docx, .xlsx и .pdf, можно несколько", "plus",
+        )
+        menu.add_item(
+            "Добавить папку в пакет", self.add_folder_to_batch, "Все файлы .docx, .xlsx и .pdf из папки и ее подпапок",
+            "folder",
+        )
+        if docs:
+            menu.add_section("Пакет целиком")
+            menu.add_item(
+                "Все замены пакета", self.show_batch_overview,
+                "Метки всех документов в одном списке; похожие написания можно объединить", "table",
+            )
+            menu.add_item(
+                "Экспортировать пакет одним .md", self.export_batch_md,
+                "Документы под заголовками «Документ 1», «Документ 2» без имен файлов", "download",
+            )
+            menu.add_item(
+                "Экспортировать пакет в папку", self.export_batch_folder,
+                "Отдельный .md на каждый документ, подпапки и имена файлов как в исходной папке", "download",
+            )
+            menu.add_item(
+                "Вернуть настоящие данные…", self.open_restore,
+                "Ответ с метками любого документа пакета превращается в текст с настоящими значениями", "refresh",
+                sensitive=True,
+            )
+            menu.add_item(
+                "Таблица замен пакета (.csv)", self.export_batch_csv,
+                "Содержит исходные данные. Не передавайте ее вместе с обезличенным текстом.", "table", sensitive=True,
+            )
+        menu.show_under(self.page.batch_button)
+
+    def add_to_batch(self, paths: Optional[list[Path]] = None) -> None:
+        """Добавляет файлы в пакет открытого документа; одиночный документ при этом
+        становится первым документом нового пакета."""
+        doc = self.session.doc
+        if doc is None or self.job is not None:
+            return
+        if paths is None:
+            paths = self._pick_paths("Добавить документы в пакет")
+        if not paths:
+            return
+        batch_id = doc.batch_id or str(uuid.uuid4())
+        joined = doc if doc.batch_id else replace(doc, batch_id=batch_id, entities=list(doc.entities))
+        if joined is not doc:
+            self.session.replace_doc(joined, dirty=True)
+        members = sorted([*self.batch_others, joined], key=lambda d: d.created_at)
+        self.process_files(paths, batch_id=batch_id, members=members)
+
+    def add_folder_to_batch(self) -> None:
+        if self.session.doc is None or self.job is not None:
+            return
+        folder = self._pick_folder("Добавить папку в пакет")
+        if folder is not None:
+            self.add_to_batch([folder])
+
+    def show_batch_overview(self) -> None:
+        """Окно со всеми метками пакета и похожими написаниями из разных документов."""
+        members = self._collect_batch()
+        if members is None:
+            return
+        if self.overview is None:
+            self.overview = BatchOverview(self)
+            self.overview.setModal(True)
+            self.overview.merge.connect(self._merge_batch_labels)
+            self.overview.relabel.connect(self._relabel)
+        self.overview.set_docs(members)
+        self.overview.show()
+        self.overview.raise_()
+        self.overview.activateWindow()
+
+    def show_batch_from_history(self, doc_id: str) -> None:
+        """«Все замены пакета» из истории: открывает документ пакета и окно с его метками."""
+        self.open_doc(doc_id)
+        if self.session.doc is not None and self.session.doc.id == doc_id:
+            self.show_batch_overview()
+
+    def _merge_batch_labels(self, keep: str, absorb: str) -> None:
+        """Объединяет две метки во всех документах пакета."""
+        self._change_batch(
+            lambda docs: merge_batch_labels(docs, keep, absorb),
+            "Объединить метки пакета", f"{absorb} теперь {keep} во всем пакете.",
+        )
+
+    def _relabel(self, old: str, text: str) -> None:
+        """Новая метка значения: своя («Поставщик») или другая метка того же типа,
+        тогда метки меняются местами. В пакете — во всех документах."""
+        new = normalize_label(text)
+        if new is None:
+            self.toast.show_message(
+                f"Метка должна быть непустой, без квадратных скобок внутри и не длиннее {MAX_LABEL_LENGTH} знаков.",
+                6000, tone="warn",
+            )
+            return
+        doc = self.session.doc
+        if doc is None or new == old:
+            return
+        docs = self._batch_docs() or [doc]
+        types = {e.type for d in docs for e in d.entities
+                 if not e.candidate and not e.dismissed and e.placeholder in (old, new)}
+        if len(types) > 1:
+            self.toast.show_message(f"Метка {new} уже занята значением другого типа.", 6000, tone="warn")
+            return
+        swapped = any(e.placeholder == new for d in docs for e in d.entities if not e.candidate and not e.dismissed)
+        message = f"{old} и {new} поменялись местами." if swapped else f"{old} теперь {new}."
+        if not doc.batch_id:
+            self._update(lambda es: compact_placeholder_numbers(swap_placeholders(es, old, new)), "Сменить метку")
+            return
+        self._change_batch(lambda ds: align_batch(swap_batch_labels(ds, old, new)), "Сменить метку", message)
+
+    def _change_batch(self, fn, label: str, message: str) -> None:
+        """Меняет разметку всех документов пакета. Остальные документы сохраняются
+        сразу, открытый меняется командой со стеком отмены; во всплывающем
+        сообщении есть отмена всего изменения."""
+        members = self._collect_batch()
+        doc = self.session.doc
+        if members is None or doc is None:
+            return
+        result = fn(members)
+        changed = [(before, after) for before, after in zip(members, result) if after is not before]
+        if not changed:
+            return
+        if not self._put_batch_docs([after for _, after in changed if after.id != doc.id]):
+            return
+        self.batch_others = [d for d in result if d.id != doc.id]
+        current = next(d for d in result if d.id == doc.id)
+        if current.entities != doc.entities:
+            self.session.update_entities(lambda _: current.entities, label)
+        self._render_derived()
+        if self.overview is not None and self.overview.isVisible():
+            self.overview.set_docs(self._batch_docs())
+
+        def undo() -> None:
+            restore = [before for before, _ in changed if before.id != doc.id]
+            if not self._put_batch_docs(restore):
+                return
+            if self.session.doc is None or self.session.doc.id != doc.id:
+                return
+            originals = {d.id: d for d in restore}
+            self.batch_others = [originals.get(d.id, d) for d in self.batch_others]
+            before_current = next((b for b, _ in changed if b.id == doc.id), None)
+            if before_current is not None:
+                self.session.update_entities(lambda _: before_current.entities, f"Отменить: {label.lower()}")
+            self._render_derived()
+            if self.overview is not None and self.overview.isVisible():
+                self.overview.set_docs(self._batch_docs())
+
+        self.toast.show_message(message, DELETE_UNDO_MS, action=("Отменить", undo))
+
+    def _put_batch_docs(self, docs: list[HistoryDoc]) -> bool:
+        try:
+            for d in docs:
+                self.store.put_doc(d)
+        except Exception as exc:  # noqa: BLE001
+            self.toast.show_message(f"Не удалось сохранить документы пакета: {exc}", 8000, tone="warn")
+            return False
+        return True
+
+    def _collect_batch(self) -> Optional[list[HistoryDoc]]:
+        """Документы пакета с согласованными метками, в порядке загрузки."""
+        doc = self.session.doc
+        if doc is None or not doc.batch_id:
+            return None
+        if not self.autosave.flush():
+            self._show_save_error()
+            return None
+        current, members = self._load_batch(replace(doc, entities=list(doc.entities)))
+        self.batch_others = [d for d in members if d.id != current.id]
+        if current.entities != doc.entities:
+            self.session.update_entities(lambda _: current.entities, "Согласовать метки пакета")
+        return members
+
+    def export_batch_md(self) -> None:
+        members = self._collect_batch()
+        if not members:
+            return
+        path = self._save_path("md-blinder-package.md", "Markdown (*.md)")
+        if path is None:
+            return
+        try:
+            exported = [replace(d, entities=[]) for d in members] if self.convert_only else members
+            path.write_text(batch_to_markdown(exported), encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        pending = 0 if self.convert_only else sum(len(pending_candidates(d.entities)) for d in members)
+        done = f"Пакет из {plural(len(members), ('документа', 'документов', 'документов'))} сохранен одним файлом."
+        if pending:
+            self.toast.show_message(
+                f"{done} Не проверено: {plural(pending, ('кандидат', 'кандидата', 'кандидатов'))} — "
+                "в тексте они остались без замены.", 8000, tone="warn",
+            )
+        else:
+            self.toast.show_message(done, 4000)
+
+    def export_batch_folder(self) -> None:
+        """Каждый документ пакета отдельным .md в выбранную папку. Документы из
+        папки ложатся по тем же подпапкам и под теми же именами, что исходники."""
+        members = self._collect_batch()
+        if not members:
+            return
+        target = self._pick_folder("Папка для Markdown-файлов пакета")
+        if target is None:
+            return
+        # Метки пакета согласованы, поэтому имя клиента в папке «Клиент/2024» заменяется
+        # одной и той же меткой у всех документов, и структура папок сохраняется.
+        batch_entities = [] if self.convert_only else [e for d in members for e in d.entities]
+        plan = export_plan([anonymize_file_name(d.name, batch_entities) for d in members])
+        existing = [rel for rel in plan if target.joinpath(*rel.parts).exists()]
+        if existing:
+            if not dialogs.ask(
+                self, "Заменить файлы в папке?",
+                f"В выбранной папке уже есть {plural(len(existing), ('файл', 'файла', 'файлов'))} с такими именами, "
+                f"например «{shorten(str(existing[0]), 60)}». Они будут перезаписаны.",
+                "Заменить", danger=True,
+            ):
+                return
+        try:
+            for doc, rel in zip(members, plan):
+                out = target.joinpath(*rel.parts)
+                out.parent.mkdir(parents=True, exist_ok=True)
+                text = build_anonymized_text(doc.source_text, [] if self.convert_only else doc.entities)
+                out.write_text(text, encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файлы: {exc}", 6000, tone="error")
+            return
+        pending = 0 if self.convert_only else sum(len(pending_candidates(d.entities)) for d in members)
+        done = f"Сохранено {plural(len(members), ('файл', 'файла', 'файлов'))} в папку «{shorten(target.name, 40)}»."
+        if pending:
+            self.toast.show_message(
+                f"{done} Не проверено: {plural(pending, ('кандидат', 'кандидата', 'кандидатов'))} — "
+                "в тексте они остались без замены.", 8000, tone="warn",
+            )
+        else:
+            self.toast.show_message(done, 4000)
+
+    def export_batch_csv(self) -> None:
+        members = self._collect_batch()
+        if not members:
+            return
+        path = self._save_path("md-blinder-package-replacements.csv", "CSV (*.csv)")
+        if path is None:
+            return
+        try:
+            path.write_bytes(batch_csv_bytes(members))
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        self.toast.show_message(
+            "Таблица замен пакета сохранена. Она содержит исходные данные: не передавайте ее вместе с обезличенным "
+            "текстом.", 6000, tone="warn",
+        )
+
+    # ------------------------------------------------------------------ документ
+
+    def _doc_replaced(self) -> None:
+        doc = self.session.doc
+        p = self.page
+        if doc is None:
+            p.editor.set_content("", [])
+            p.editor_pane.search.close_bar()
+            return
+        p.file_label.setText(doc.name)
+        p.file_label.setToolTip(doc.name)
+        p.editor.set_content(doc.source_text, doc.entities)
+        self._update_batch_button()
+        self._render_derived()
+
+    def _entities_changed(self) -> None:
+        self.page.editor.set_entities(self.session.entities, self.page.side.review.current_id())
+        # Действия с разметкой показываем сразу; при наборе текста пересчет откладывается.
+        if self.session.text == self._rendered_text:
+            self.render_timer.stop()
+            self._render_derived()
+        else:
+            self.render_timer.start()
+
+    def _render_derived(self) -> None:
+        doc = self.session.doc
+        if doc is None:
+            return
+        p = self.page
+        text, entities = doc.source_text, doc.entities
+        self._rendered_text = text
+        p.editor_pane.search.set_text(text)
+        # В режиме только конвертации разметка сохраняется, но в результат не попадает.
+        output = [] if self.convert_only else entities
+        anonymized = build_anonymized_text_with_map(text, output)
+        self.anonymized_text = anonymized.text
+        p.preview.render(anonymized.text, text, anonymized.segments, output)
+        p.side.review.next_in_batch = None if self.convert_only else self._next_pending_doc()
+        p.side.render(entities, text, None if self.convert_only else self.batch_index)
+        p.editor.set_current_candidate(p.side.review.current_id() if p.side.currentIndex() == 0 else None)
+        unreviewed = len(pending_candidates(output))
+        active = [e for e in output if e.anonymize]
+        p.status.update_state(
+            unreviewed, len(active), sum(len(e.positions) for e in active), f"{self._export_base(doc.name, output)}.md",
+            pdf=doc.format == "pdf" and not self.convert_only,
+            docx=doc.format == "docx" and not self.convert_only,
+        )
+        # Без обезличивания проверка не нужна: остаются исходник, результат и выгрузка.
+        p.side.setVisible(not self.convert_only)
+        p.status.steps.setVisible(not self.convert_only)
+        if self.convert_only:
+            p.status.pending.hide()
+            p.status.ready.hide()
+            p.status.summary.setText("Только конвертация в Markdown: текст выгружается без замен")
+        p.convert_notice.setVisible(self.convert_only)
+        p.detect_notice.setVisible(
+            not self.convert_only and self.job is None and all(e.manual for e in entities)
+        )
+        images = len(find_image_ranges(text))
+        p.image_notice.label.setText(
+            f"В документе есть изображения ({images}). При копировании и экспорте текста они заменяются отметкой "
+            "об удалении: данные внутри изображений автоматически не обезличиваются."
+        )
+        p.image_notice.setVisible(images > 0)
+        p.collision_notice.setVisible(has_placeholder_collision(text))
+        p.ocr_retry_hint.setText(
+            "Все страницы PDF будут распознаны как изображения. Прежняя версия останется в истории"
+            + (", а в пакете ее заменит новая." if doc.batch_id else ".")
+        )
+        p.ocr_retry.setVisible(
+            self.last_pdf is not None and self.last_pdf[1] == doc.id and not self.last_pdf[2] and self.job is None
+        )
+        self._apply_layout()
+
+    def _update(self, fn, label: str) -> None:
+        self.session.update_entities(fn, label)
+
+    def _reject(self, entity_id: str) -> None:
+        self._update(
+            lambda es: [replace(e, dismissed=True, candidate=False, anonymize=False) if e.id == entity_id else e for e in es],
+            "Отклонить кандидата",
+        )
+
+    def _change_type(self, entity_id: str, type_: str) -> None:
+        self._update(lambda es: change_entity_type(es, entity_id, type_), "Сменить тип")
+
+    def _set_anonymize(self, ids: list, value: bool) -> None:
+        selected = set(ids)
+        self._update(lambda es: [replace(e, anonymize=value) if e.id in selected else e for e in es], "Переключить замену")
+
+    # ------------------------------------------------------------------ поиск по тексту
+
+    def open_search(self) -> None:
+        """Ctrl+F на экране документа: строка поиска над исходником. Выделенный
+        в тексте фрагмент сразу становится запросом."""
+        doc = self.session.doc
+        if doc is None or self.stack.currentWidget() is not self.page:
+            return
+        p = self.page
+        if not p.editor_pane.isVisible():
+            self.set_view("source")
+        selected = p.editor.textCursor().selectedText().replace("\u2029", " ").strip()
+        query = selected if 0 < len(selected) <= 100 else ""
+        p.editor_pane.search.open_with(doc.source_text, query, p.editor.selected_type)
+
+    def _replace_found(self, spans: list, type_: str) -> None:
+        text = self.session.text
+        added = 0
+
+        def apply(entities: list) -> list:
+            nonlocal added
+            result, added = add_entity_from_matches(entities, text, spans, type_)
+            return compact_placeholder_numbers(result)
+
+        self.page.editor.selected_type = type_
+        self._update(apply, "Заменить найденное")
+        skipped = len(spans) - added
+        if added:
+            message = f"В замены добавлено: {plural(added, ('место', 'места', 'мест'))}."
+            if skipped:
+                message += f" Еще {plural(skipped, ('место', 'места', 'мест'))} уже в заменах или ждут проверки."
+            self.toast.show_message(message, 5000)
+        else:
+            self.toast.show_message("Все найденные места уже в заменах или ждут проверки.", 4000)
+
+    def _add_entity(self, start: int, end: int, type_: str) -> None:
+        text = self.session.text
+        self.page.editor.selected_type = type_
+        self._update(lambda es: compact_placeholder_numbers(add_entity_from_selection(es, text, start, end, type_)), "Добавить замену")
+
+    def _attach_entity(self, start: int, end: int, entity_id: str) -> None:
+        text = self.session.text
+        self._update(lambda es: add_occurrence_to_entity(es, text, start, end, entity_id), "Добавить вхождение")
+
+    def _span_changed(self, entity_id: str, old, new) -> None:
+        text = self.session.text
+        self._update(lambda es: resize_occurrence(es, text, entity_id, old, new), "Изменить границы")
+
+    def _entity_clicked(self, entity_id: str) -> None:
+        entity = next((e for e in self.session.entities if e.id == entity_id), None)
+        if entity is None:
+            return
+        if entity.candidate:
+            self.activate_candidate(entity_id)
+        else:
+            self.page.side.user_tab = 1
+            self.page.side.setCurrentIndex(1)
+            self.page.side.found.select_entity(entity_id)
+            if entity.positions:
+                self.page.preview.focus_source_pos(entity.positions[0].start)
+
+    def select_entity(self, entity_id: str) -> None:
+        entity = next((e for e in self.session.entities if e.id == entity_id), None)
+        if entity is None or not entity.positions:
+            return
+        first = entity.positions[0]
+        self.page.editor.reveal(first.start, first.end)
+        self.page.preview.focus_source_pos(first.start)
+
+    def activate_candidate(self, entity_id) -> None:
+        side = self.page.side
+        side.review.active_id = entity_id
+        side.user_tab = 0
+        side.setCurrentIndex(0)
+        self._render_derived()
+        entity = next((e for e in self.session.entities if e.id == entity_id), None)
+        if entity is not None and entity.positions:
+            first = entity.positions[0]
+            self.page.editor.reveal(first.start, first.end)
+            self.page.preview.focus_source_pos(first.start)
+        side.review.focus_card()
+
+    def show_candidates(self) -> None:
+        self.set_view("source")
+        self.page.side.user_tab = 0
+        self.page.side.setCurrentIndex(0)
+        self.page.side.review.focus_card()
+
+    # ------------------------------------------------------------------ вид
+
+    def set_view(self, view: str) -> None:
+        self.view = view
+        self._apply_layout()
+
+    def _side_by_side_changed(self, value: bool) -> None:
+        self.settings.setValue("sideBySide", value)
+        self._apply_layout()
+
+    def _apply_layout(self) -> None:
+        p = self.page
+        wide = self.width() >= WIDE_WINDOW
+        side_by_side = wide and p.side_by_side_box.isChecked()
+        p.source_button.setChecked(self.view == "source")
+        p.result_button.setChecked(self.view == "result")
+        p.editor_pane.setVisible(side_by_side or self.view == "source")
+        p.result_pane.setVisible(side_by_side or self.view == "result")
+        # В одной колонке вид выбирается переключателем в ее заголовке; рядом обе колонки
+        # подписаны, а флажок «Результат рядом» стоит в заголовке исходника.
+        p.view_box.setVisible(not side_by_side)
+        p.editor_pane.title.setVisible(side_by_side)
+        p.result_pane.title.setVisible(side_by_side)
+        visible = p.editor_pane if side_by_side or self.view == "source" else p.result_pane
+        visible.put_view_controls(p.view_box, p.side_by_side_box if wide else None)
+        p.side_by_side_box.setVisible(wide)
+        p.side.setFixedWidth(360 if side_by_side else 440)
+
+    def _screen_changed(self, _index: int) -> None:
+        self.header.set_mode("doc" if self.stack.currentWidget() is self.page else "start")
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._apply_layout()
+        if self.toast.isVisible():
+            self.toast._place()
+
+    # ------------------------------------------------------------------ выдача
+
+    def _notify_done(self, done: str) -> None:
+        doc = self.session.doc
+        if not self.convert_only and doc is not None and doc.ner_missing:
+            self.toast.show_message(
+                f"{done} Имена, компании и адреса в этом документе не искались: проверьте текст "
+                "или найдите их заново.", 10000, action=("Найти заново", self.find_entities), tone="warn",
+            )
+            return
+        unreviewed = 0 if self.convert_only else len(pending_candidates(self.session.entities))
+        if unreviewed == 0:
+            self.toast.show_message(done, 3000)
+            return
+        self.toast.show_message(
+            f"{done} Не проверено: {plural(unreviewed, ('кандидат', 'кандидата', 'кандидатов'))} — "
+            "в тексте они остались без замены.",
+            8000, action=("Показать", self.show_candidates), tone="warn",
+        )
+
+    def _export_base(self, name: str, entities: list[Entity]) -> str:
+        """Имя выгрузки без расширения: найденные в имени исходника данные заменены метками."""
+        return base_name(name if self.convert_only else anonymize_file_name(name, entities))
+
+    def _save_path(self, default_name: str, filter_: str) -> Optional[Path]:
+        start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить", str(Path(start_dir) / default_name), filter_)
+        if not path:
+            return None
+        self.settings.setValue("lastDir", str(Path(path).parent))
+        return Path(path)
+
+    def export_md(self) -> None:
+        doc = self.session.doc
+        if doc is None:
+            return
+        name = f"{self._export_base(doc.name, self.session.entities)}.md"
+        path = self._save_path(name, "Markdown (*.md)")
+        if path is None:
+            return
+        try:
+            path.write_text(self.anonymized_text, encoding="utf-8", newline="\n")
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        self._notify_done(f"Файл «{shorten(path.name, 40)}» сохранен.")
+
+    def copy_text(self) -> None:
+        QApplication.clipboard().setText(self.anonymized_text)
+        self._notify_done("Текст скопирован.")
+
+    def open_restore(self) -> None:
+        """Обратная подстановка по таблице замен открытого документа или всего пакета."""
+        doc = self.session.doc
+        if doc is None:
+            return
+        members = self._collect_batch() if doc.batch_id else None
+        if members:
+            current = self.session.doc
+            docs = [current, *[d for d in members if d.id != current.id]]
+            scope = f"пакета ({plural(len(docs), ('документ', 'документа', 'документов'))})"
+        else:
+            docs = [doc]
+            scope = "этого документа"
+        mapping = restore_map((d.source_text, d.entities) for d in docs)
+        dialog = RestoreDialog(self, mapping, scope, self._save_path)
+        self.restore_dialog = dialog
+        dialog.exec()
+
+    def export_csv(self) -> None:
+        doc = self.session.doc
+        if doc is None:
+            return
+        path = self._save_path(f"{base_name(doc.name)}-replacements.csv", "CSV (*.csv)")
+        if path is None:
+            return
+        try:
+            path.write_bytes(csv_bytes(doc.source_text, doc.entities))
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить файл: {exc}", 6000, tone="error")
+            return
+        self.toast.show_message(
+            "Таблица замен сохранена. Она содержит исходные данные: не передавайте ее вместе с обезличенным текстом.",
+            6000, tone="warn",
+        )
+
+    # ------------------------------------------------------------------ обезличенный PDF
+
+    def _source_files(self) -> dict:
+        try:
+            data = json.loads(self.settings.value(SETTING_PDF_SOURCES, "{}", type=str) or "{}")
+        except (TypeError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _remember_source(self, doc_id: str, path: Path, force_ocr: bool) -> None:
+        sources = self._source_files()
+        sources.pop(doc_id, None)
+        sources[doc_id] = {"path": str(Path(path).resolve()), "forceOcr": bool(force_ocr)}
+        # Словарь хранит порядок добавления: старые записи уходят первыми.
+        while len(sources) > PDF_SOURCES_LIMIT:
+            sources.pop(next(iter(sources)))
+        self.settings.setValue(SETTING_PDF_SOURCES, json.dumps(sources, ensure_ascii=False))
+
+    def export_pdf(self) -> None:
+        doc = self.session.doc
+        if doc is None or doc.format != "pdf" or self.pdf_job is not None:
+            return
+        known = self._source_files().get(doc.id) or {}
+        source = Path(known["path"]) if isinstance(known.get("path"), str) else None
+        force_ocr = bool(known.get("forceOcr", False))
+        if source is None or not source.is_file():
+            start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+            picked, _ = QFileDialog.getOpenFileName(
+                self, f"Где исходный PDF «{shorten(doc.name, 60)}»?", str(Path(start_dir) / doc.name), "PDF (*.pdf)",
+            )
+            if not picked:
+                return
+            source = Path(picked)
+            self._remember_source(doc.id, source, force_ocr)
+        target = self._save_path(f"{self._export_base(doc.name, doc.entities)} (обезличенный).pdf", "PDF (*.pdf)")
+        if target is None:
+            return
+        if target.resolve() == source.resolve():
+            self.toast.show_message("Выберите другое имя: исходный PDF нельзя перезаписать.", 6000, tone="error")
+            return
+        request = PdfExportRequest(
+            source=source, target=target, source_text=doc.source_text, entities=list(doc.entities), force_ocr=force_ocr,
+        )
+        self._start_pdf_job(request)
+
+    def _start_pdf_job(self, request: PdfExportRequest) -> None:
+        job = PdfExportJob(request)
+        self.pdf_job = job
+        dialog = QProgressDialog("Чтение PDF", "Отмена", 0, 0, self)
+        dialog.setWindowTitle("Обезличенный PDF")
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setAutoReset(False)
+        dialog.setMinimumWidth(420)
+        dialog.canceled.connect(job.cancel)
+        self.pdf_dialog = dialog
+        self.pdf_request = request
+        # Обработчики — методы окна: Qt вызывает их в главном потоке. Лямбда
+        # выполнилась бы в потоке задачи.
+        job.progress.connect(dialog.setLabelText)
+        job.need_ocr.connect(self._pdf_need_ocr)
+        job.finished.connect(self._pdf_finished)
+        job.failed.connect(self._pdf_failed)
+        job.cancelled.connect(self._pdf_done)
+        thread = QThread()
+        job.moveToThread(thread)
+        thread.started.connect(job.run)
+        for signal in (job.finished, job.failed, job.cancelled, job.need_ocr):
+            signal.connect(thread.quit)
+        self._threads.append(thread)
+        thread.finished.connect(lambda: self._threads.remove(thread) if thread in self._threads else None)
+        thread.start()
+        dialog.show()
+
+    def _pdf_done(self) -> None:
+        self.pdf_job = None
+        if self.pdf_dialog is not None:
+            self.pdf_dialog.close()
+            self.pdf_dialog.deleteLater()
+            self.pdf_dialog = None
+
+    def _pdf_need_ocr(self) -> None:
+        request = self.pdf_request
+        self._pdf_done()
+        if dialogs.ask(
+            self, "Скачать модель для распознавания сканов?",
+            "В PDF есть страницы-сканы. Чтобы найти на них данные, нужно один раз скачать модель распознавания "
+            f"текста Indra OCR с Hugging Face, около {ocr_models.TOTAL_MB} МБ. Это публичные файлы, текст "
+            "документа никуда не отправляется.",
+            "Скачать",
+        ):
+            self._start_pdf_job(replace(request, download_ocr=True))
+
+    def _pdf_failed(self, message: str) -> None:
+        self._pdf_done()
+        self.toast.show_message(message, 8000, tone="error")
+
+    def _pdf_finished(self, report) -> None:
+        request = self.pdf_request
+        self._pdf_done()
+        name = shorten(request.target.name, 40)
+        if report.unmatched:
+            labels = ", ".join(sorted({placeholder for placeholder, _ in report.unmatched})[:6])
+            self.toast.show_message(
+                f"PDF «{name}» сохранен, но не все замены нашлись на страницах ({labels}). "
+                "Проверьте эти места в PDF перед отправкой.",
+                12000, tone="warn",
+            )
+            return
+        self._notify_done(
+            f"PDF «{name}» сохранен. Просмотрите его перед отправкой: подписи и рукописные пометки остаются на изображении."
+        )
+
+    # ------------------------------------------------------------------ обезличенный DOCX
+
+    def export_docx(self) -> None:
+        """Исходный документ Word с метками вместо данных и прежним оформлением."""
+        doc = self.session.doc
+        if doc is None or doc.format != "docx":
+            return
+        known = self._source_files().get(doc.id) or {}
+        source = Path(known["path"]) if isinstance(known.get("path"), str) else None
+        if source is None or not source.is_file():
+            start_dir = self.settings.value("lastDir", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation))
+            picked, _ = QFileDialog.getOpenFileName(
+                self, f"Где исходный документ «{shorten(doc.name, 60)}»?", str(Path(start_dir) / Path(doc.name).name),
+                "Word (*.docx)",
+            )
+            if not picked:
+                return
+            source = Path(picked)
+            self._remember_source(doc.id, source, False)
+        target = self._save_path(f"{self._export_base(doc.name, doc.entities)} (обезличенный).docx", "Word (*.docx)")
+        if target is None:
+            return
+        if target.resolve() == source.resolve():
+            self.toast.show_message("Выберите другое имя: исходный документ нельзя перезаписать.", 6000, tone="error")
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            report = export_redacted_docx(source, target, doc.source_text, list(doc.entities))
+        except RedactedDocxError as exc:
+            self.toast.show_message(str(exc), 8000, tone="error")
+            return
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось сохранить документ: {exc}", 8000, tone="error")
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.toast.show_message(f"Не удалось собрать документ Word: {exc}", 8000, tone="error")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        name = shorten(target.name, 40)
+        if report.unmatched:
+            labels = ", ".join(label for label, _ in report.unmatched[:6])
+            self.toast.show_message(
+                f"Документ «{name}» сохранен, но не все замены нашлись в его тексте ({labels}). "
+                "Проверьте эти места перед отправкой.",
+                12000, tone="warn",
+            )
+            return
+        self._notify_done(f"Документ «{name}» сохранен. {docx_export_note(report)}".strip())
+
+    # ------------------------------------------------------------------ история
+
+    def _refresh_history(self) -> None:
+        try:
+            docs = [d for d in self.store.load_metadata() if d.id != self.pending_delete]
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"История недоступна: {exc}")
+            return
+        current = self.session.doc.id if self.session.doc else None
+        self.start.history.render(docs, current)
+        self.history_meta = docs
+        if self.session.doc is not None:
+            self._update_batch_button()
+
+    def _open_history_menu(self) -> None:
+        menu = self.page.history_menu
+        menu.clear()
+        current = self.session.doc.id if self.session.doc else None
+        recent = getattr(self, "history_meta", [])[:5]
+        if recent:
+            menu.add_section("Недавние")
+        else:
+            menu.add_note("История пуста.")
+        for meta in recent:
+            is_current = meta.id == current
+            when = dt.datetime.fromtimestamp(meta.updated_at / 1000).strftime("%d.%m.%Y, %H:%M")
+            hint = "Открыт сейчас" if is_current else (
+                f"{when} · {plural(meta.entity_count, ('находка', 'находки', 'находок'))}"
+            )
+            file_name, hint = split_doc_name(meta.name, hint)
+            menu.add_item(
+                file_name, lambda i=meta.id: self.open_doc(i), hint,
+                current=is_current, elide=True, tooltip=meta.name,
+            )
+        menu.add_separator()
+        menu.add_item("Все документы", self._show_full_history, "Стартовый экран со всей историей", "list")
+        if recent:
+            menu.add_item("Экспорт истории…", self.export_history, "Файл .json с исходным текстом документов", "download")
+        menu.add_item("Импорт истории…", self.import_history, "Документы из файла добавятся к этим", "import")
+        if recent:
+            menu.add_item("Удалить все…", self.clear_history, "Все документы вместе с исходным текстом", "trash")
+        menu.add_note(
+            "История хранится на этом компьютере вместе с исходным текстом, без шифрования.", icon_name="lock",
+        )
+        menu.show_under(self.page.history_button)
+
+    def _show_full_history(self) -> None:
+        """«Все документы» из меню истории: стартовый экран с раскрытым списком."""
+        self.start.history.set_expanded(True)
+        self.show_all_docs()
+
+    def show_all_docs(self) -> None:
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        self._refresh_history()
+        self.stack.setCurrentWidget(self.start)
+
+    def open_doc(self, doc_id: str) -> None:
+        if self.job is not None:
+            return
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        doc = self.store.load_doc(doc_id)
+        if doc is None:
+            self.start.history.set_error("Документ не найден в истории.")
+            return
+        loaded = replace(doc, entities=dedupe_entity_ids(doc.entities))
+        try:
+            doc, members = self._load_batch(loaded)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось открыть пакет документа: {exc}")
+            return
+        self.batch_others = [d for d in members if d.id != doc.id]
+        self.page.side.user_tab = None
+        self.page.side.review.active_id = None
+        self.session.replace_doc(doc, dirty=doc is not loaded)
+        self._set_ner_notice(None)
+        self.page.ocr_notice.hide()
+        self.set_view("source")
+        self.stack.setCurrentWidget(self.page)
+        self._refresh_history()
+
+    def request_delete(self, doc_id: str) -> None:
+        if self.pending_delete:
+            self._commit_delete()
+        self.pending_delete = doc_id
+        self._refresh_history()
+        self.toast.show_message("Документ удален из истории.", DELETE_UNDO_MS, action=("Отменить", self._undo_delete))
+        self.delete_timer.start(DELETE_UNDO_MS)
+
+    def _undo_delete(self) -> None:
+        self.delete_timer.stop()
+        self.pending_delete = None
+        self._refresh_history()
+
+    def _commit_delete(self) -> None:
+        doc_id = self.pending_delete
+        if not doc_id:
+            return
+        self.pending_delete = None
+        self.delete_timer.stop()
+        self.autosave.discard(doc_id)
+        self.batch_others = [d for d in self.batch_others if d.id != doc_id]
+        if self.session.doc and self.session.doc.id == doc_id:
+            self.session.replace_doc(None)
+        try:
+            self.store.delete_doc(doc_id)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось удалить документ: {exc}")
+        self._refresh_history()
+
+    # ------------------------------------------------------------------ срок хранения истории
+
+    @property
+    def retention_days(self) -> Optional[int]:
+        enabled = self.settings.value(SETTING_HISTORY_RETENTION, True, type=bool)
+        return HISTORY_RETENTION_DAYS if enabled else None
+
+    def _retention_box(self) -> QCheckBox:
+        box = QCheckBox(f"Удалять документы старше {HISTORY_RETENTION_DAYS} дней")
+        box.setObjectName("small")
+        box.setChecked(self.retention_days is not None)
+        box.setToolTip(
+            f"При запуске программы из истории удаляются документы, которые не менялись {HISTORY_RETENTION_DAYS} "
+            "дней. Пакет удаляется целиком, когда устарели все его документы."
+        )
+        box.toggled.connect(self._retention_toggled)
+        return box
+
+    def _retention_toggled(self, enabled: bool) -> None:
+        self.settings.setValue(SETTING_HISTORY_RETENTION, enabled)
+        if enabled:
+            self._purge_old_history()
+        self._refresh_history()
+
+    def _purge_old_history(self) -> None:
+        days = self.retention_days
+        self.start.history.set_retention(days)
+        if days is None:
+            return
+        keep = {d.id for d in [self.session.doc, *self.batch_others] if d is not None}
+        try:
+            removed = self.store.delete_older_than(now_ms() - days * DAY_MS, keep)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось удалить старые документы: {exc}")
+            return
+        if removed:
+            self._forget_sources(removed)
+            self.toast.show_message(
+                f"Из истории удалено {plural(len(removed), ('документ', 'документа', 'документов'))} "
+                f"старше {days} дней.", 5000,
+            )
+
+    def _forget_sources(self, doc_ids: Optional[list[str]] = None) -> None:
+        """Пути к исходным PDF и DOCX тоже говорят об удаленных документах: убираем и их."""
+        sources = {} if doc_ids is None else {k: v for k, v in self._source_files().items() if k not in set(doc_ids)}
+        self.settings.setValue(SETTING_PDF_SOURCES, json.dumps(sources, ensure_ascii=False))
+
+    def clear_history(self) -> None:
+        if self.job is not None:
+            return
+        count = len(getattr(self, "history_meta", []))
+        if not count or not dialogs.ask(
+            self, "Удалить всю историю?",
+            f"Из истории будут удалены {plural(count, ('документ', 'документа', 'документов'))} вместе с исходным "
+            "текстом и таблицами замен. Отменить удаление нельзя.",
+            "Удалить все", danger=True,
+        ):
+            return
+        self.autosave.flush()
+        if self.session.doc is not None:
+            self.autosave.discard(self.session.doc.id)
+        self.delete_timer.stop()
+        self.pending_delete = None
+        self.session.replace_doc(None)
+        self.batch_others = []
+        self.last_pdf = None
+        try:
+            self.store.delete_all()
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(f"Не удалось очистить историю: {exc}")
+            return
+        self._forget_sources()
+        self.stack.setCurrentWidget(self.start)
+        self._refresh_history()
+        self.toast.show_message("История очищена.", 4000)
+
+    def export_history(self) -> None:
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        path = self._save_path("md-blinder-history.json", "JSON (*.json)")
+        if path is None:
+            return
+        try:
+            path.write_text(serialize_history(self.store.load_all()), encoding="utf-8")
+        except OSError as exc:
+            self.start.history.set_error(f"Не удалось экспортировать историю: {exc}")
+            return
+        self.toast.show_message("История экспортирована. Файл содержит исходный текст документов.", 5000, tone="warn")
+
+    def import_history(self) -> None:
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        path, _ = QFileDialog.getOpenFileName(self, "Импорт истории", "", "JSON (*.json);;Все файлы (*)")
+        if not path:
+            return
+        try:
+            incoming = parse_history(Path(path).read_text(encoding="utf-8"))
+            existing = self.store.load_all()
+            merged = merge_docs(existing, incoming)
+            before = {d.id: d.updated_at for d in existing}
+            for doc in merged:
+                if before.get(doc.id) != doc.updated_at:
+                    doc.entities = dedupe_entity_ids(doc.entities)
+                    self.store.put_doc(doc)
+        except Exception as exc:  # noqa: BLE001
+            self.start.history.set_error(str(exc) or "Не удалось импортировать историю")
+            return
+        self.start.history.set_error("")
+        current = self.session.doc
+        if current is not None:
+            replacement = next((d for d in merged if d.id == current.id), None)
+            if replacement is not None and replacement.updated_at > current.updated_at:
+                self.session.replace_doc(replacement)
+        self._refresh_history()
+        self.toast.show_message(f"Импортировано документов: {len(incoming)}.", 4000)
+
+    # ------------------------------------------------------------------ сохранение и закрытие
+
+    def _save_state_changed(self) -> None:
+        p = self.page
+        if self.autosave.error:
+            self.header.set_save_state("error")
+            self._show_save_error()
+        else:
+            p.save_error.hide()
+            self.header.set_save_state("saving" if self.autosave.saving else "saved")
+
+    def _show_save_error(self) -> None:
+        p = self.page
+        p.save_error.label.setText(self.autosave.error or "Не удалось сохранить изменения.")
+        p.save_error.show()
+        self.start.history.set_error(self.autosave.error)
+
+    def _restart_for_update(self, staged) -> None:
+        from .. import updater
+
+        if self.job is not None:
+            self.toast.show_message("Дождитесь окончания обработки файла или отмените ее.", 5000, tone="warn")
+            return
+        if not self.autosave.flush():
+            self._show_save_error()
+            return
+        try:
+            script = updater.write_script(Path(staged), updater.install_dir(), os.getpid())
+            updater.launch_script(script)
+        except OSError as exc:
+            self.toast.show_message(f"Не удалось запустить обновление: {exc}", 8000, tone="error")
+            return
+        self.close()
+
+    def _explorer_menu_box(self) -> QCheckBox:
+        box = QCheckBox("Пункт в меню проводника")
+        box.setObjectName("small")
+        box.setChecked(self.settings.value(SETTING_EXPLORER_MENU, True, type=bool))
+        box.setToolTip(
+            f"«{shell.LABEL}» в меню файлов .docx, .xlsx, .pdf и папок по правой кнопке мыши. "
+            "В Windows 11 — в разделе «Показать дополнительные параметры»."
+        )
+        box.toggled.connect(self._explorer_menu_toggled)
+        return box
+
+    def _explorer_menu_toggled(self, enabled: bool) -> None:
+        self.settings.setValue(SETTING_EXPLORER_MENU, enabled)
+        self._sync_explorer_menu(enabled)
+
+    def _sync_explorer_menu(self, enabled: bool) -> None:
+        error = shell.sync(enabled)
+        if error:
+            self.toast.show_message(error, 8000, tone="error")
+
+    def open_external(self, path: str) -> None:
+        """Файл или папка из меню проводника или из повторного запуска программы."""
+        if self.isMinimized():
+            self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        if not path:
+            return
+        if self.job is not None:
+            self.toast.show_message(
+                f"Сейчас обрабатывается другой файл. Откройте «{Path(path).name}» после окончания обработки.",
+                8000, tone="warn",
+            )
+            return
+        self.process_file(Path(path))
+
+    def show_startup_notice(self, argv: list[str]) -> None:
+        from .. import __version__
+
+        if "--updated" in argv:
+            self.toast.show_message(f"Программа обновлена до версии {__version__}.", 5000)
+        elif "--update-failed" in argv:
+            self.toast.show_message(
+                "Не удалось заменить файлы программы, осталась прежняя версия. Попробуйте обновить еще раз.",
+                10000, tone="error",
+            )
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self.job is None and dropped_files(event):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        paths = dropped_files(event)
+        if self.job is None and paths:
+            self.process_files([Path(p) for p in paths])
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802
+        if self.job is not None:
+            self.job.cancel()
+        self.cancel_model_download()
+        if self.pdf_job is not None:
+            self.pdf_job.cancel()
+        self._commit_delete()
+        if not self.autosave.flush():
+            if not dialogs.ask(
+                self, "Закрыть без сохранения?",
+                f"{self.autosave.error} Если закрыть программу, несохраненные изменения пропадут.",
+                "Закрыть без сохранения", danger=True, cancel="Не закрывать",
+            ):
+                event.ignore()
+                return
+        for thread in list(self._threads):
+            thread.quit()
+            thread.wait(5000)
+        self.model_holder.unsubscribe(self._model_listener)
+        self.store.close()
+        event.accept()

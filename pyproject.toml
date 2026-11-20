@@ -1,0 +1,79 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "md-blinder-desktop"
+dynamic = ["version"]
+description = "Настольная версия MD Blinder: DOCX/XLSX/PDF в Markdown и обезличивание"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "PySide6>=6.8",
+  "pymupdf>=1.28.2",
+  # Модель разметки страницы для поиска таблиц в PDF; версия совпадает с pymupdf.
+  "pymupdf-layout>=1.28.2",
+  # OCR сканов. Версия закреплена: модели (components/ocr_models.py) скачиваются той
+  # ревизии, под которую собран пакет. Тянет opencv-python-headless и обычный onnxruntime,
+  # на Windows его тоже заменяет onnxruntime-directml.
+  "indra-ocr==1.1.2",
+  "mammoth>=1.9",
+  "openpyxl>=3.1",
+  # Обезличенный DOCX: правка XML документа Word с сохранением префиксов пространств имен.
+  "lxml>=5.3",
+  "markdownify>=1.1",
+  "beautifulsoup4>=4.12",
+  # На Windows — сборка с DirectML: NER считается на видеокарте, если она проходит
+  # калибровку, иначе на CPU (ner/engine.py). Обычный onnxruntime, который тянут
+  # pymupdf-layout и indra-ocr, на Windows убран через [tool.uv] ниже.
+  "onnxruntime>=1.20; sys_platform != 'win32'",
+  "onnxruntime-directml>=1.24; sys_platform == 'win32'",
+  "tokenizers>=0.20",
+  "numpy>=2.0",
+  "regex>=2024.1",
+  "truststore>=0.9",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-qt>=4.4", "pyinstaller>=6.10", "ruff>=0.16"]
+
+[project.gui-scripts]
+md-blinder = "md_blinder.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "md_blinder.__version__"}
+
+[tool.setuptools.package-data]
+md_blinder = ["ui/assets/fonts/*", "ui/assets/icon/*", "anonymize/*.LICENSE"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+  "model: нужен скачанный файл модели GLiNER",
+  "ocr: нужны модели Indra OCR",
+]
+
+[tool.uv]
+# Версии всех зависимостей закреплены в uv.lock: CI и build.bat ставят ровно их
+# (uv export --frozen), обновление — `uv lock --upgrade` отдельным PR.
+# pymupdf-layout и indra-ocr зависят от обычного onnxruntime. На Windows вместо него
+# стоит onnxruntime-directml с теми же модулями, и обычный затер бы его файлы,
+# поэтому на Windows обычный onnxruntime не ставится.
+override-dependencies = ["onnxruntime>=1.20; sys_platform != 'win32'"]
+required-environments = [
+  "sys_platform == 'win32' and platform_machine == 'AMD64'",
+  "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["md_blinder.spec"]
+
+[tool.ruff.lint]
+# Набор правил ruff по умолчанию: синтаксис, неиспользуемые импорты и имена,
+# неопределенные имена. Форматирование не проверяется.
+select = ["E4", "E7", "E9", "F"]

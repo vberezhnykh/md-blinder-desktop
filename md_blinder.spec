@@ -1,0 +1,53 @@
+# -*- mode: python ; coding: utf-8 -*-
+# Сборка onedir: папка с MD Blinder.exe. Модели NER и OCR в сборку не входят,
+# программа скачивает их по запросу в %LOCALAPPDATA%\md-blinder.
+
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
+
+datas = [
+    ("src/md_blinder/anonymize/presidio.LICENSE", "md_blinder/anonymize"),
+    # Шрифты IBM Plex (OFL) — как в веб-версии, без загрузки со сторонних серверов.
+    ("src/md_blinder/ui/assets/fonts", "md_blinder/ui/assets/fonts"),
+    # Иконка окна и панели задач (PNG всех размеров, см. ui/app_icon.py).
+    ("src/md_blinder/ui/assets/icon/*.png", "md_blinder/ui/assets/icon"),
+    # Модели ONNX и настройки pymupdf_layout (около 50 МБ): поиск таблиц в PDF.
+    # Пакет ищет их рядом со своими модулями.
+    *collect_data_files("pymupdf.layout"),
+]
+
+# Модули Qt, которые программа не использует: без них папка сборки заметно меньше.
+# QtNetwork нужен: через QLocalServer новый запуск передает файл открытой программе.
+excludes = [
+    "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineQuick",
+    "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtQuick", "PySide6.QtQml",
+    "PySide6.QtMultimedia", "PySide6.QtCharts", "PySide6.QtDataVisualization", "PySide6.QtPdf",
+    "PySide6.QtBluetooth", "PySide6.QtSql", "PySide6.QtTest",
+    "tkinter", "matplotlib", "pytest",
+    # Indra OCR: программа сама скачивает модели и рендерит страницы через PyMuPDF,
+    # загрузчик Hugging Face, pdfium и просмотрщик пакета не нужны.
+    "huggingface_hub", "hf_xet", "pypdfium2", "pypdfium2_raw", "indra_ocr.viewer", "indra_ocr.cli",
+]
+
+a = Analysis(
+    ["launcher.py"],
+    pathex=["src"],
+    # DirectML.dll лежит в onnxruntime/capi рядом с библиотекой ORT.
+    binaries=collect_dynamic_libs("onnxruntime"),
+    datas=datas,
+    hiddenimports=["md_blinder.ner.engine", *collect_submodules("pymupdf.layout")],
+    excludes=excludes,
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="MD Blinder",
+    console=False,
+    # Иконка exe: ее же показывают ярлыки и пункт в меню проводника.
+    icon="src/md_blinder/ui/assets/icon/app.ico",
+    upx=False,
+)
+coll = COLLECT(exe, a.binaries, a.datas, name="MD Blinder", upx=False)

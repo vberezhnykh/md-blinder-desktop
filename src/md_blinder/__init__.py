@@ -1,0 +1,3 @@
+"""MD Blinder Desktop."""
+
+__version__ = "0.15.0"

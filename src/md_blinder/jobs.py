@@ -1,0 +1,293 @@
+"""Фоновая обработка файла: конвертация, OCR, NER, похожие упоминания.
+
+В режиме «только конвертация» задача останавливается после Markdown: поиск
+персональных данных не запускается и модель NER не нужна. Режим можно включить
+и во время обработки (skip_detection): поиск прерывается, документ остается без
+находок. Задача с готовым
+текстом (source_text) пропускает конвертацию и только ищет данные: так ищутся
+данные в документе, открытом без поиска.
+
+Задача идет в отдельном потоке. Когда нужен выбор пользователя (скачать модели
+OCR или модель NER), поток отправляет сигнал ask и ждет ответа из главного
+потока. Отмена через CancelToken прерывает и ожидание ответа.
+
+Загруженная модель живет в ModelHolder (model_holder.py) и переиспользуется
+следующими задачами: разворачивание графа занимает десятки секунд.
+"""
+
+from __future__ import annotations
+
+import queue
+import zipfile
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+from PySide6.QtCore import QObject, QThread, Signal
+
+from .anonymize.batch import BatchMember, reconcile_batch_placeholders, seed_from_batch
+from .anonymize.pipeline import anonymize_markdown
+from .anonymize.related import find_related_occurrences
+from .anonymize.types import Entity
+from .cancel import AnyToken, CancelToken, Cancelled, check
+from .components import model_asset, ocr_models
+from .convert.docx import docx_to_markdown
+from .convert.file_type import detect_file_kind
+from .convert.ocr import ocr_pdf_pages
+from .convert.pdf import analyze_pdf, assemble_markdown
+from .convert.xlsx import xlsx_to_markdown
+from .model_holder import ModelHolder
+from .ui.progress_label import UiProgress
+
+# Ответы на вопросы задачи.
+DOWNLOAD = "download"
+SKIP = "skip"
+
+
+@dataclass
+class ProcessingResult:
+    path: Path
+    format: str  # docx | xlsx | pdf
+    markdown: str
+    entities: list[Entity]
+    ner_failed: bool = False
+    ner_error: Optional[str] = None
+    ner_skipped: bool = False
+    ocr_skipped_pages: list[int] = field(default_factory=list)
+    force_ocr: bool = False
+    convert_only: bool = False
+
+
+class UserFacingError(Exception):
+    """Ошибка с готовым текстом для пользователя."""
+
+
+MODEL = ModelHolder()  # одна модель на все задачи
+
+
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class ProcessingJob(QObject):
+    progress = Signal(object)  # UiProgress
+    ask = Signal(str, object)  # вид вопроса, данные
+    finished = Signal(object)  # ProcessingResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self, path: Path, force_ocr: bool = False, batch_members: Sequence[BatchMember] = (),
+        skipped: Optional[set[str]] = None, convert_only: bool = False, source_text: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        self.path = Path(path)
+        self.force_ocr = force_ocr
+        self.convert_only = convert_only
+        self.source_text = source_text
+        # Остальные документы пакета: по ним размечаются уже подтвержденные
+        # значения и согласуются метки.
+        self.batch_members = list(batch_members)
+        # Вопросы, на которые пользователь уже ответил «без скачивания» для
+        # предыдущего файла пакета: второй раз они не задаются.
+        self.skipped = skipped if skipped is not None else set()
+        self.cancel_token = CancelToken()
+        self._skip_detection = CancelToken()
+        # Поиск данных прерывается и отменой задачи, и включением режима только конвертации.
+        self._detect_cancel = AnyToken(self.cancel_token, self._skip_detection)
+        self._answers: "queue.Queue[str]" = queue.Queue()
+
+    # --- вызывается из главного потока ---
+
+    def answer(self, value: str) -> None:
+        self._answers.put(value)
+
+    def cancel(self) -> None:
+        self.cancel_token.cancel()
+        self._answers.put(SKIP)
+
+    def set_convert_only(self, value: bool) -> None:
+        """Режим только конвертации, включенный во время обработки, прерывает уже
+        начатый поиск данных. Выключенный — действует, если поиск еще не начался."""
+        self.convert_only = value
+        if value:
+            self._skip_detection.cancel()
+
+    # --- поток задачи ---
+
+    def _ask(self, kind: str, payload: Any = None) -> str:
+        if kind in self.skipped:
+            return SKIP
+        self.ask.emit(kind, payload)
+        while True:
+            check(self.cancel_token)
+            try:
+                value = self._answers.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            check(self.cancel_token)
+            if value == SKIP:
+                self.skipped.add(kind)
+            return value
+
+    def _emit(self, **kwargs: Any) -> None:
+        if not self.cancel_token.cancelled:
+            self.progress.emit(UiProgress(**kwargs))
+
+    def run(self) -> None:
+        try:
+            result = self._run()
+        except Cancelled:
+            self.cancelled.emit()
+        except UserFacingError as exc:
+            self.failed.emit(str(exc))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"Не удалось сконвертировать файл: {exc}")
+        else:
+            if self.cancel_token.cancelled:
+                self.cancelled.emit()
+            else:
+                self.finished.emit(result)
+
+    def _run(self) -> ProcessingResult:
+        if self.source_text is not None:
+            return self._detect(self.source_text, "docx", [])
+        cancel = self.cancel_token
+        name = self.path.name
+        kind = detect_file_kind(self.path)
+        if kind == "legacy-doc":
+            raise UserFacingError(
+                f'Формат .doc не поддерживается. Откройте файл "{name}" в Word и сохраните как .docx, '
+                "затем загрузите заново."
+            )
+        if kind == "legacy-xls":
+            raise UserFacingError(
+                f'Формат .xls не поддерживается. Откройте файл "{name}" в Excel и сохраните как .xlsx, '
+                "затем загрузите заново."
+            )
+        if kind == "unknown":
+            raise UserFacingError(
+                f'Файл "{name}" не поддерживается. Поддерживаются .docx, .xlsx и .pdf (включая сканы).'
+            )
+
+        ocr_skipped: list[int] = []
+        if kind == "docx":
+            md = docx_to_markdown(self.path)
+        elif kind == "xlsx":
+            try:
+                md = xlsx_to_markdown(self.path)
+            except zipfile.BadZipFile:
+                raise UserFacingError(
+                    f'Файл "{name}" не открылся как книга Excel. Если он защищен паролем, '
+                    "снимите защиту в Excel и загрузите заново."
+                ) from None
+            if not md.strip():
+                raise UserFacingError(f'В файле "{name}" нет заполненных ячеек.')
+        else:
+            analysis = analyze_pdf(
+                self.path, force_ocr=self.force_ocr,
+                on_progress=lambda page, total: self._emit(phase="pdf", page=page, total=total), cancel=cancel,
+            )
+            recognized: dict[int, str] = {}
+            pages = analysis.ocr_page_numbers
+            if pages:
+                if not ocr_models.is_ocr_present() and self._ask("ocr-download", len(pages)) == DOWNLOAD:
+                    ocr_models.download_ocr_models(
+                        on_progress=lambda got, total: self._emit(phase="ocr-download", pct=int(got * 100 / max(1, total))),
+                        cancel=cancel,
+                    )
+                if ocr_models.is_ocr_present():
+                    recognized = ocr_pdf_pages(
+                        self.path, pages, ocr_models.ocr_models_dir(),
+                        on_progress=lambda p: self._emit(phase="ocr", page=p.page, total=p.total), cancel=cancel,
+                    )
+                else:
+                    ocr_skipped = pages
+            md = assemble_markdown(analysis, recognized)
+        check(cancel)
+        md = _normalize_newlines(md)
+        converted = ProcessingResult(
+            path=self.path, format=kind, markdown=md, entities=[],
+            ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr, convert_only=True,
+        )
+        if self.convert_only:
+            return converted
+        try:
+            return self._detect(md, kind, ocr_skipped)
+        except Cancelled:
+            if self.cancel_token.cancelled:
+                raise
+            return converted
+
+    def _detect(self, md: str, kind: str, ocr_skipped: list[int]) -> ProcessingResult:
+        cancel = self._detect_cancel
+        ner_detect = None
+        ner_skipped = False
+        if MODEL.loaded or model_asset.is_model_present():
+            ner_detect = self._ner_detect
+        elif MODEL.downloading:
+            # Модель уже качается по кнопке на стартовом экране: ждем ее, не спрашивая.
+            ner_detect = self._download_then_detect
+        else:
+            choice = self._ask("ner-model")
+            if choice == DOWNLOAD:
+                ner_detect = self._download_then_detect
+            elif choice.startswith("file:"):
+                # Файлы копируются с проверкой, недостающие (токенизатор, ~16 МБ) докачиваются.
+                MODEL.download(cancel=cancel, source=choice[5:])
+                ner_detect = self._ner_detect
+            else:
+                ner_skipped = True
+
+        self._emit(phase="regex")
+        result = anonymize_markdown(md, ner_detect, cancel)
+        check(cancel)
+        self._emit(phase="related")
+        seeded = seed_from_batch(md, result.entities, self.batch_members)
+        related = find_related_occurrences(md, seeded)
+        entities = reconcile_batch_placeholders(seeded + related, md, self.batch_members)
+        return ProcessingResult(
+            path=self.path, format=kind, markdown=md, entities=entities,
+            ner_failed=result.ner_failed, ner_error=result.ner_error, ner_skipped=ner_skipped,
+            ocr_skipped_pages=ocr_skipped, force_ocr=self.force_ocr,
+        )
+
+    def _download_then_detect(self, md: str):
+        MODEL.download(
+            on_progress=lambda got, total: self._emit(phase="ner-download", pct=int(got * 100 / max(1, total))),
+            cancel=self._detect_cancel,
+        )
+        return self._ner_detect(md)
+
+    def _ner_detect(self, md: str):
+        from .ner.engine import detect_entities_ner
+
+        def detect(model: Any):
+            check(self._detect_cancel)
+            return detect_entities_ner(md, model, on_progress=self._on_ner_progress, cancel=self._detect_cancel)
+
+        return MODEL.run(detect, self._on_ner_progress, self._detect_cancel)
+
+    def _on_ner_progress(self, p: Any) -> None:
+        stage = getattr(p, "stage", None) or getattr(p, "phase", None) or "detect"
+        phase = stage if str(stage).startswith("ner-") else f"ner-{stage}"
+        if phase not in ("ner-download", "ner-init", "ner-warmup", "ner-detect"):
+            phase = "ner-detect"
+        self._emit(
+            phase=phase,
+            chunk=getattr(p, "chunk", None), chunks=getattr(p, "chunks", None),
+            batch=getattr(p, "batch", None), batches=getattr(p, "batches", None),
+            pct=getattr(p, "pct", None), ep=getattr(p, "ep", None),
+        )
+
+
+def start_job(job: ProcessingJob) -> QThread:
+    # Сборщик мусора в рабочем потоке выключен (ui/gc_guard.py): иначе он мог бы
+    # удалить здесь Qt-объекты интерфейса, а это падение на Windows.
+    thread = QThread()
+    job.moveToThread(thread)
+    thread.started.connect(job.run)
+    for signal in (job.finished, job.failed, job.cancelled):
+        signal.connect(thread.quit)
+    thread.start()
+    return thread

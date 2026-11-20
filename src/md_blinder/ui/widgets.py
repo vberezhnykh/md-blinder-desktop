@@ -1,0 +1,953 @@
+"""Общие виджеты: кнопки, меню, шаги, строка статуса, плашки, всплывающее уведомление."""
+
+from __future__ import annotations
+
+from typing import Callable, Optional
+
+from PySide6.QtCore import QPoint, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen, QTextDocument
+from PySide6.QtWidgets import (
+    QLayout,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QSizePolicy,
+    QStyledItemDelegate,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ..text_utils import plural
+from . import theme as t
+from .icons import icon, pixmap
+
+# Цель объединения из другого документа пакета в списках выбора: префикс и метка замены.
+BATCH_PREFIX = "batch:"
+
+
+def icon_label(name: str, color: str, size: int = 16) -> QLabel:
+    label = QLabel()
+    label.setPixmap(pixmap(name, color, size))
+    label.setFixedSize(size, size)
+    return label
+
+
+def set_prop(widget: QWidget, name: str, value) -> None:
+    """Меняет свойство для QSS и перерисовывает стиль."""
+    widget.setProperty(name, value)
+    widget.style().unpolish(widget)
+    widget.style().polish(widget)
+    widget.update()
+
+
+def make_button(
+    text: str = "", kind: str = "", small: bool = False, icon_name: Optional[str] = None,
+    tooltip: str = "", parent: Optional[QWidget] = None,
+) -> QPushButton:
+    """Кнопка одного из видов темы: обычная (kind=""), primary, ghost, danger, dangerPrimary,
+    iconButton. small — высота 26 px вместо 32 для строк списков и плашек."""
+    button = QPushButton(text, parent)
+    if kind:
+        button.setObjectName(kind)
+    if small:
+        button.setProperty("small", "true")
+    if icon_name:
+        on_accent = kind in ("primary", "dangerPrimary")
+        color = t.ACCENT_INK if on_accent else t.INK_2
+        size = 14 if small else 16
+        button.setIcon(icon(icon_name, color, size, None if on_accent else t.ACCENT))
+        button.setIconSize(QSize(size, size))
+    if tooltip:
+        button.setToolTip(tooltip)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    return button
+
+
+def make_label(text: str = "", role: str = "", wrap: bool = False) -> QLabel:
+    """Подпись с ролью из темы: screenTitle, sectionTitle, subtitle, secondary, muted, hint…"""
+    label = QLabel(text)
+    if role:
+        label.setObjectName(role)
+    if wrap:
+        label.setWordWrap(True)
+    return label
+
+
+def replaced_summary(values: int, places: int) -> str:
+    if values == 0:
+        return "Замен пока нет"
+    return (
+        f"Заменено {plural(values, ('значение', 'значения', 'значений'))} "
+        f"в {plural(places, ('месте', 'местах', 'местах'))}"
+    )
+
+
+def html_to_plain(text: str) -> str:
+    doc = QTextDocument()
+    doc.setHtml(text)
+    return _plain_lines(doc.toPlainText())
+
+
+def label_plain_text(label: QLabel) -> str:
+    """Текст надписи без разметки: так он попадает в буфер обмена."""
+    text = label.text()
+    if label.textFormat() == Qt.TextFormat.PlainText or (
+        label.textFormat() == Qt.TextFormat.AutoText and not Qt.mightBeRichText(text)
+    ):
+        return text
+    return html_to_plain(text)
+
+
+def _plain_lines(text: str) -> str:
+    # QLabel и QTextDocument отдают переводы строк <br> и абзацев как U+2028/U+2029.
+    return text.replace("\u2029", "\n").replace("\u2028", "\n").strip()
+
+
+def make_selectable(label: QLabel, full_text: Optional[Callable[[], str]] = None) -> QLabel:
+    """Текст сообщения выделяется мышью и копируется: Ctrl+C или «Копировать» по
+    правой кнопке. Без выделения «Копировать» берет весь текст, а если надпись
+    сокращена, то full_text — полный."""
+    label.setTextInteractionFlags(
+        Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.LinksAccessibleByMouse
+    )
+    label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+    label.customContextMenuRequested.connect(lambda pos: _show_copy_menu(label, pos, full_text))
+    return label
+
+
+def copy_label_text(
+    label: QLabel, selected_only: bool = True, full_text: Optional[Callable[[], str]] = None,
+) -> str:
+    selected = _plain_lines(label.selectedText()) if selected_only and label.hasSelectedText() else ""
+    text = selected or (full_text() if full_text else label_plain_text(label))
+    QGuiApplication.clipboard().setText(text)
+    return text
+
+
+def _show_copy_menu(label: QLabel, pos: QPoint, full_text: Optional[Callable[[], str]]) -> None:
+    menu = PopupMenu(label, 220)
+    menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    if label.hasSelectedText():
+        menu.add_item("Копировать", lambda: copy_label_text(label), shortcut="Ctrl+C")
+        menu.add_item("Копировать весь текст", lambda: copy_label_text(label, False, full_text))
+    else:
+        menu.add_item("Копировать", lambda: copy_label_text(label, False, full_text), shortcut="Ctrl+C")
+    menu.show_at(label.mapToGlobal(pos))
+    label.copy_menu = menu  # type: ignore[attr-defined]  # для тестов
+
+
+class ElidedLabel(QLabel):
+    """Однострочная подпись, которая не раздвигает панель: что не влезает по ширине,
+    заменяется многоточием (text-overflow: ellipsis в вебе)."""
+
+    def __init__(self, text: str = "", mode: Qt.TextElideMode = Qt.TextElideMode.ElideRight) -> None:
+        super().__init__(text)
+        self._mode = mode
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Минимум QLabel — вся строка целиком. С политикой Preferred (подпись занимает свою
+        # ширину, пока есть место) длинное имя файла раздвигало бы окно шире экрана.
+        hint = super().minimumSizeHint()
+        margins = self.contentsMargins()
+        return QSize(self.fontMetrics().horizontalAdvance("…") + margins.left() + margins.right(), hint.height())
+
+    def elided_text(self) -> str:
+        return self.fontMetrics().elidedText(self.text(), self._mode, self.contentsRect().width())
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        self.style().drawItemText(
+            painter, self.contentsRect(), int(self.alignment()), self.palette(), self.isEnabled(),
+            self.elided_text(), self.foregroundRole(),
+        )
+
+
+class Select(QComboBox):
+    """Выпадающий список в стиле меню программы.
+
+    У QComboBox в стиле Fusion список открывается поверх поля, со стрелками
+    прокрутки и системной рамкой. Здесь список раскрывается под полем как
+    PopupMenu: та же рамка, скругление и подсветка пункта. Пункты рисует
+    QStyledItemDelegate, иначе таблица стилей к ним не применяется.
+    """
+
+    # Все типы сущностей помещаются без прокрутки.
+    MAX_VISIBLE = 16
+    POPUP_GAP = 4  # от поля до списка
+    SCREEN_GAP = 8  # от списка до края экрана
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setItemDelegate(QStyledItemDelegate(self))
+        self.setMaxVisibleItems(self.MAX_VISIBLE)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        view = self.view()
+        view.setObjectName("selectList")
+        view.setVerticalScrollMode(view.ScrollMode.ScrollPerPixel)
+        view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        popup = view.window()
+        popup.setWindowFlags(popup.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        # Рамку рисует сам список (QListView#selectList в теме): контейнер — внутренний
+        # класс Qt и рамку из таблицы стилей не рисует.
+        if popup.layout() is not None:
+            popup.layout().setContentsMargins(0, 0, 0, 0)
+
+    def showPopup(self) -> None:  # noqa: N802
+        super().showPopup()
+        # Список встает под полем, а не поверх него, и не уже поля. Если под полем
+        # не хватает места, он открывается над полем, а когда тесно и там, берет
+        # большую сторону и прокручивается: иначе нижние пункты уходят за край экрана.
+        popup = self.view().window()
+        view = self.view()
+        width = max(self.width(), view.sizeHintForColumn(0) + 28)
+        rows = sum(view.sizeHintForRow(i) for i in range(min(self.count(), self.maxVisibleItems())))
+        full = rows + popup.height() - view.viewport().height()
+        top_left = self.mapToGlobal(QPoint(0, 0))
+        screen = QGuiApplication.screenAt(top_left) or self.screen() or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        field_top, field_bottom = top_left.y(), top_left.y() + self.height()
+        below = area.bottom() - self.SCREEN_GAP - (field_bottom + self.POPUP_GAP)
+        above = field_top - self.POPUP_GAP - (area.top() + self.SCREEN_GAP)
+        open_up = full > below and above > below
+        height = max(min(full, above if open_up else below), 1)
+        width = min(width, area.width() - 2 * self.SCREEN_GAP)
+        x = max(min(top_left.x(), area.right() - self.SCREEN_GAP - width), area.left() + self.SCREEN_GAP)
+        y = field_top - self.POPUP_GAP - height if open_up else field_bottom + self.POPUP_GAP
+        popup.setGeometry(x, y, width, height)
+        index = view.currentIndex()
+        if index.isValid():
+            view.scrollTo(index)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        super().paintEvent(event)
+        painter = QPainter(self)
+        arrow = pixmap("chevron-down", t.INK_3 if self.isEnabled() else t.LINE_2, 14)
+        size = arrow.deviceIndependentSize()
+        x = self.width() - size.width() - 8
+        y = (self.height() - size.height()) / 2
+        painter.drawPixmap(QPoint(round(x), round(y)), arrow)
+        painter.end()
+
+
+
+class LabelEditor(QWidget):
+    """Поле метки значения: другая метка того же типа из списка (метки меняются
+    местами) или свое название. chosen(текст) — после «Применить» или Enter."""
+
+    chosen = Signal(str)
+
+    def __init__(self, current: str, labels: list[str], parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        self.box = Select()
+        self.box.setObjectName("mono")
+        self.box.setEditable(True)
+        self.box.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.box.addItems(labels if current in labels else [current, *labels])
+        self.box.setCurrentText(current)
+        self.box.lineEdit().setCursorPosition(0)  # начало метки видно и в узком поле
+        self.box.setToolTip(
+            "Выберите другую метку, чтобы поменять их местами, или впишите свою, например «Поставщик»"
+        )
+        self.box.setMinimumContentsLength(6)
+        self.box.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.apply = QPushButton("Применить")
+        self.apply.setObjectName("small")
+        self.apply.setEnabled(False)
+        self._current = current
+        self._sent = False  # Enter в поле дает и returnPressed, и activated: выбор уходит один раз
+        self.box.currentTextChanged.connect(lambda text: self.apply.setEnabled(text.strip() not in ("", current)))
+        self.box.activated.connect(lambda _i: self._emit())
+        self.box.lineEdit().returnPressed.connect(self._emit)
+        self.apply.clicked.connect(self._emit)
+        row.addWidget(self.box, 1)
+        row.addWidget(self.apply)
+
+    def _emit(self) -> None:
+        text = self.box.currentText().strip()
+        if text and text != self._current and not self._sent:
+            self._sent = True
+            self.chosen.emit(text)
+
+class MenuItem(QPushButton):
+    """Пункт меню: подпись и подсказка лежат во вложенной раскладке.
+
+    QPushButton считает размер по своему тексту, которого у пункта нет, и по
+    вертикали держит высоту строго по sizeHint. Без этих переопределений пункт
+    получает высоту пустой кнопки, а заголовок и подсказка обрезаются почти
+    целиком. Высота считается по ширине, потому что подсказка переносится.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        return self.layout().sizeHint() if self.layout() is not None else super().sizeHint()
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802
+        # Минимальная высота подписи с переносом считается для самой узкой ширины и
+        # оставляла бы пустую строку под короткой подсказкой; высоту дает heightForWidth.
+        if self.layout() is None:
+            return super().minimumSizeHint()
+        return QSize(self.layout().minimumSize().width(), 0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802
+        return self.layout() is not None and self.layout().hasHeightForWidth()
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802
+        if self.layout() is None:
+            return super().heightForWidth(width)
+        return self.layout().totalHeightForWidth(width)
+
+
+class PopupMenu(QFrame):
+    """Раскрывающееся меню как Menu.tsx: пункты с заголовком и подсказкой, заметки, разделители.
+
+    Пункты между begin_list и end_list лежат в прокручиваемом списке: его высота
+    ограничивается местом на экране, остальные пункты меню всегда видны.
+    """
+
+    MIN_LIST_HEIGHT = 120
+    SCREEN_GAP = 8
+
+    def __init__(self, parent: QWidget, width: int = 340) -> None:
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint)
+        self.setObjectName("menuPanel")
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setFixedWidth(width)
+        self.box = QVBoxLayout(self)
+        # Высоту задает _fit_height. Иначе раскладка окна держит минимум, посчитанный для
+        # самой узкой ширины, и под короткими подсказками остается пустое место.
+        self.box.setSizeConstraint(QLayout.SizeConstraint.SetNoConstraint)
+        self.box.setContentsMargins(6, 6, 6, 6)
+        self.box.setSpacing(0)
+        self._reset_list()
+
+    def _reset_list(self) -> None:
+        self._target = self.box
+        self.list_area: Optional[QScrollArea] = None
+        self.search: Optional[QLineEdit] = None
+        self._list_box: Optional[QVBoxLayout] = None
+        self._list_items: list[tuple[QPushButton, str]] = []
+        self._list_current: Optional[QPushButton] = None
+        self._list_empty: Optional[QLabel] = None
+        self._list_max = 0
+
+    def clear(self) -> None:
+        while self.box.count():
+            item = self.box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                while item.layout().count():
+                    sub = item.layout().takeAt(0)
+                    if sub.widget():
+                        sub.widget().deleteLater()
+        self._reset_list()
+
+    def begin_list(self, search_placeholder: str = "") -> None:
+        """Следующие пункты попадают в прокручиваемый список; с подсказкой в поле
+        над списком появляется поиск по пунктам."""
+        if search_placeholder:
+            self.search = QLineEdit()
+            self.search.setObjectName("search")
+            self.search.addAction(icon("search", t.INK_3, 16), QLineEdit.ActionPosition.LeadingPosition)
+            self.search.setPlaceholderText(search_placeholder)
+            self.search.setClearButtonEnabled(True)
+            self.search.textChanged.connect(self._filter_list)
+            self.search.returnPressed.connect(self._open_first_match)
+            wrap = QVBoxLayout()
+            wrap.setContentsMargins(4, 0, 4, 6)
+            wrap.addWidget(self.search)
+            self.box.addLayout(wrap)
+        self.list_area = QScrollArea()
+        self.list_area.setObjectName("menuList")
+        self.list_area.setWidgetResizable(True)
+        self.list_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.list_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        body = QWidget()
+        body.setObjectName("menuListBody")
+        self._list_box = QVBoxLayout(body)
+        self._list_box.setContentsMargins(0, 0, 0, 0)
+        self._list_box.setSpacing(0)
+        self._list_box.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._list_empty = QLabel("Ничего не найдено.")
+        self._list_empty.setObjectName("menuHint")
+        self._list_empty.setContentsMargins(10, 8, 10, 8)
+        self._list_empty.hide()
+        self._list_box.addWidget(self._list_empty)
+        self.list_area.setWidget(body)
+        self.box.addWidget(self.list_area)
+        self._target = self._list_box
+
+    def end_list(self) -> None:
+        self._target = self.box
+
+    def add_item(
+        self, title: str, handler: Callable[[], None], hint: str = "", icon_name: Optional[str] = None,
+        current: bool = False, sensitive: bool = False, enabled: bool = True,
+        elide: bool = False, tooltip: str = "", search_text: str = "", shortcut: str = "",
+    ) -> QPushButton:
+        """Пункт меню. С elide заголовок и подсказка занимают по строке: у заголовка
+        многоточие ставится в середине (видно расширение файла), у подсказки в начале."""
+        button = MenuItem()
+        button.setObjectName("menuItem")
+        button.setProperty("current", "true" if current else "false")
+        button.setEnabled(enabled)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        if tooltip:
+            button.setToolTip(tooltip)
+        row = QHBoxLayout(button)
+        row.setContentsMargins(10, 7, 10, 7)
+        row.setSpacing(10)
+        if icon_name:
+            ic = icon_label("warn" if sensitive else icon_name, t.WARN if sensitive else t.INK_2)
+            col_icon = QVBoxLayout()
+            col_icon.setContentsMargins(0, 2, 0, 0)
+            col_icon.addWidget(ic)
+            col_icon.addStretch(1)
+            row.addLayout(col_icon)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        title_label = ElidedLabel(title, Qt.TextElideMode.ElideMiddle) if elide else QLabel(title)
+        title_label.setObjectName("menuTitle")
+        col.addWidget(title_label)
+        if hint:
+            if elide:
+                hint_label = ElidedLabel(hint, Qt.TextElideMode.ElideLeft)
+            else:
+                hint_label = QLabel(hint)
+                hint_label.setWordWrap(True)
+            hint_label.setObjectName("menuHintWarn" if sensitive else "menuHint")
+            col.addWidget(hint_label)
+        row.addLayout(col, 1)
+        if shortcut:
+            keys = QLabel(shortcut)
+            keys.setObjectName("menuShortcut")
+            row.addWidget(keys, 0, Qt.AlignmentFlag.AlignTop)
+        for child in button.findChildren(QLabel):
+            child.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+
+        def run() -> None:
+            self.hide()
+            handler()
+
+        button.clicked.connect(run)
+        self._target.addWidget(button)
+        if self._target is self._list_box:
+            self._list_items.append((button, (search_text or title).casefold()))
+            if current:
+                self._list_current = button
+        return button
+
+    def add_separator(self) -> None:
+        line = QFrame()
+        line.setObjectName("divider")
+        line.setFixedHeight(1)
+        wrap = QVBoxLayout()
+        wrap.setContentsMargins(6, 4, 6, 4)
+        wrap.addWidget(line)
+        self._target.addLayout(wrap)
+
+    def add_section(self, title: str) -> None:
+        """Заголовок раздела меню прописными буквами."""
+        label = QLabel(title.upper())
+        label.setObjectName("menuSection")
+        label.setContentsMargins(10, 8, 10, 4)
+        self._target.addWidget(label)
+
+    def add_note(self, text: str, warn: bool = False, icon_name: Optional[str] = None) -> None:
+        """Пояснение без действия; со значком — как примечание внизу меню."""
+        label = QLabel(text)
+        label.setObjectName("menuHintWarn" if warn else "menuHint")
+        label.setWordWrap(True)
+        if icon_name is None:
+            label.setContentsMargins(10, 6, 10, 6)
+            self._target.addWidget(label)
+            return
+        row = QHBoxLayout()
+        row.setContentsMargins(10, 6, 10, 8)
+        row.setSpacing(8)
+        col = QVBoxLayout()
+        col.setContentsMargins(0, 1, 0, 0)
+        col.addWidget(icon_label(icon_name, t.WARN if warn else t.INK_3, 14))
+        col.addStretch(1)
+        row.addLayout(col)
+        row.addWidget(label, 1)
+        self._target.addLayout(row)
+
+    def visible_list_items(self) -> list[QPushButton]:
+        return [button for button, _key in self._list_items if not button.isHidden()]
+
+    def _filter_list(self, text: str) -> None:
+        words = text.casefold().split()
+        for button, key in self._list_items:
+            button.setHidden(not all(w in key for w in words))
+        if self._list_empty is not None:
+            self._list_empty.setHidden(bool(self.visible_list_items()))
+        if self.isVisible():
+            self._fit_list()
+            self.adjustSize()
+
+    def _open_first_match(self) -> None:
+        items = self.visible_list_items()
+        if items and items[0].isEnabled():
+            items[0].click()
+
+    def _list_content_height(self) -> int:
+        assert self.list_area is not None and self._list_box is not None
+        scrollbar = self.list_area.verticalScrollBar().sizeHint().width()
+        width = self.width() - self.box.contentsMargins().left() - self.box.contentsMargins().right() - scrollbar
+        self._list_box.activate()
+        if self._list_box.hasHeightForWidth():
+            return self._list_box.totalHeightForWidth(width)
+        return self._list_box.totalSizeHint().height()
+
+    def _fit_list(self) -> None:
+        """Список во всю высоту содержимого, но не ниже нижнего края экрана."""
+        if self.list_area is None:
+            return
+        height = self._list_content_height()
+        if self._list_max:
+            height = min(height, self._list_max)
+        self.list_area.setFixedHeight(max(height, 1))
+
+    def _fit_height(self) -> None:
+        """Высота по содержимому при заданной ширине. adjustSize берет sizeHint, а у подсказок
+        с переносом он рассчитан на узкую строку: под короткой подсказкой оставалось пусто."""
+        self.adjustSize()
+        layout = self.layout()
+        if layout is not None and layout.hasHeightForWidth():
+            self.resize(self.width(), layout.totalHeightForWidth(self.width()))
+
+    def show_at(self, pos: QPoint) -> None:
+        """Меню у курсора (контекстное), в пределах экрана."""
+        for child in self.findChildren(QWidget):
+            child.ensurePolished()
+        self._fit_height()
+        screen = QGuiApplication.screenAt(pos) or QGuiApplication.primaryScreen()
+        area = screen.availableGeometry()
+        x = max(area.left(), min(pos.x(), area.right() - self.width()))
+        y = max(area.top(), min(pos.y(), area.bottom() - self.height()))
+        self.move(QPoint(x, y))
+        self.show()
+
+    def show_under(self, anchor: QWidget, align_right: bool = True) -> None:
+        # Размеры пунктов считаются по шрифтам из темы: до первого показа их еще нет.
+        for child in self.findChildren(QWidget):
+            child.ensurePolished()
+        self._list_max = 0
+        self._fit_list()
+        self._fit_height()
+        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 6))
+        if align_right:
+            pos.setX(pos.x() + anchor.width() - self.width())
+        if self.list_area is not None:
+            screen = QGuiApplication.screenAt(pos) or anchor.screen() or QGuiApplication.primaryScreen()
+            bottom = screen.availableGeometry().bottom() - self.SCREEN_GAP
+            top = screen.availableGeometry().top() + self.SCREEN_GAP
+            rest = self.height() - self.list_area.height()
+            below = bottom - pos.y() - rest
+            # Если под кнопкой места меньше минимума, список берет минимум (или сколько
+            # есть на всем экране), а меню поднимается, чтобы не уйти за нижний край.
+            self._list_max = below if below >= self.MIN_LIST_HEIGHT else max(
+                min(self.MIN_LIST_HEIGHT, bottom - top - rest), 1,
+            )
+            self._fit_list()
+            self._fit_height()
+            pos.setY(max(min(pos.y(), bottom - self.height()), top))
+        self.move(pos)
+        self.show()
+        if self.search is not None:
+            self.search.setFocus()
+        if self._list_current is not None and self.list_area is not None:
+            area, current = self.list_area, self._list_current
+            QTimer.singleShot(0, area, lambda: area.ensureWidgetVisible(current, 0, 40))
+
+
+class StepIndicator(QWidget):
+    """Шаги «Загрузка → Проверка → Выдача» с кружками и линиями (.status-steps)."""
+
+    LABELS = ("Загрузка", "Проверка", "Выдача")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.states = ["done", "active", "todo"]
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._normal = t.font(t.SANS, t.FS_SMALL)
+        self._bold = t.font(t.SANS, t.FS_SMALL, 600)
+        self._mark = t.font(t.SANS, 11, 600)
+
+    def set_states(self, states: list[str]) -> None:
+        self.states = states
+        self.updateGeometry()
+        self.update()
+
+    def _layout(self) -> list[tuple[int, int, int]]:
+        from PySide6.QtGui import QFontMetrics
+
+        x = 0
+        out = []
+        for i, label in enumerate(self.LABELS):
+            if i > 0:
+                x += 8 + 20 + 8  # промежуток и линия между шагами
+            fm = QFontMetrics(self._bold if self.states[i] == "active" else self._normal)
+            width = 18 + 6 + fm.horizontalAdvance(label)
+            out.append((x, width, fm.horizontalAdvance(label)))
+            x += width
+        return out
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        parts = self._layout()
+        last = parts[-1]
+        return QSize(last[0] + last[1] + 2, 26)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cy = self.height() / 2
+        parts = self._layout()
+        for i, (x, _width, _tw) in enumerate(parts):
+            state = self.states[i]
+            if i > 0:
+                painter.setPen(QPen(QColor(t.LINE_2), 1))
+                painter.drawLine(int(x - 28), int(cy), int(x - 8), int(cy))
+            circle = QRectF(x + 0.75, cy - 8.25, 16.5, 16.5)
+            if state == "done":
+                painter.setPen(QPen(QColor(t.READY), 1.5))
+                painter.setBrush(QColor(t.READY))
+                painter.drawEllipse(circle)
+                painter.drawPixmap(int(x + 4), int(cy - 5), pixmap("check", "#ffffff", 10))
+            elif state == "active":
+                painter.setPen(QPen(QColor(t.ACCENT), 1.5))
+                painter.setBrush(QColor(t.ACCENT))
+                painter.drawEllipse(circle)
+                painter.setPen(QColor(t.ACCENT_INK))
+                painter.setFont(self._mark)
+                painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, str(i + 1))
+            else:
+                painter.setPen(QPen(QColor(t.LINE_2), 1.5))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(circle)
+                painter.setPen(QColor(t.INK_3))
+                painter.setFont(self._mark)
+                painter.drawText(circle, Qt.AlignmentFlag.AlignCenter, str(i + 1))
+            painter.setFont(self._bold if state == "active" else self._normal)
+            painter.setPen(QColor(t.INK if state == "active" else t.INK_2 if state == "done" else t.INK_3))
+            painter.drawText(QRectF(x + 24, 0, 200, self.height()), Qt.AlignmentFlag.AlignVCenter, self.LABELS[i])
+        painter.end()
+
+
+class StatusStrip(QWidget):
+    """Где пользователь в работе с документом и как получить результат: шаги, чипы,
+    сводка замен, переключатели режима и кнопка выгрузки с меню."""
+
+    show_candidates = Signal()
+    export_md = Signal()
+    copy_text = Signal()
+    export_csv = Signal()
+    export_pdf = Signal()
+    export_docx = Signal()
+    restore_names = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(16)
+        self.steps = StepIndicator()
+        layout.addWidget(self.steps)
+        info = QHBoxLayout()
+        info.setSpacing(12)
+        self.pending = QPushButton()
+        self.pending.setObjectName("chipPending")
+        self.pending.setIcon(icon("alert", t.WARN, 14))
+        self.pending.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.pending.setToolTip("Показать непроверенных кандидатов")
+        self.pending.clicked.connect(self.show_candidates)
+        self.ready = QLabel("Готово к выдаче")
+        self.ready.setObjectName("chipReady")
+        info.addWidget(self.pending)
+        info.addWidget(self.ready)
+        self.summary = ElidedLabel()
+        self.summary.setObjectName("muted")
+        self.summary.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        info.addWidget(self.summary)
+        info.addStretch(1)
+        layout.addLayout(info, 1)
+        self.options = QHBoxLayout()
+        self.options.setSpacing(16)
+        layout.addLayout(self.options)
+
+        split = QHBoxLayout()
+        split.setSpacing(0)
+        self.export_button = make_button("Экспортировать .md", kind="splitMain", icon_name="download")
+        self.export_button.setIcon(icon("download", t.ACCENT_INK, 16))
+        self.export_button.clicked.connect(self.export_md)
+        self.toggle = make_button(kind="splitToggle", tooltip="Другие способы выгрузки")
+        self.toggle.setIcon(icon("chevron-down", t.ACCENT_INK, 14))
+        self.toggle.clicked.connect(self._open_menu)
+        split.addWidget(self.export_button)
+        split.addWidget(self.toggle)
+        layout.addLayout(split)
+        self.menu = PopupMenu(self, 340)
+        self._export_name = "document.md"
+        self._pdf = False
+        self._docx = False
+
+    def add_option(self, widget: QWidget) -> None:
+        """Переключатель режима слева от кнопки выгрузки."""
+        self.options.addWidget(widget)
+
+    def _open_menu(self) -> None:
+        m = self.menu
+        m.clear()
+        m.add_item("Экспортировать .md", self.export_md.emit, f"Файл «{self._export_name}»", "download")
+        m.add_item("Копировать текст", self.copy_text.emit, "Обезличенный Markdown в буфер обмена", "copy")
+        if self._pdf:
+            m.add_item(
+                "Обезличенный PDF", self.export_pdf.emit,
+                "Страницы картинками: данные закрыты плашками с теми же метками, текстовый слой как в Markdown",
+                "file",
+            )
+        if self._docx:
+            m.add_item(
+                "Обезличенный Word (.docx)", self.export_docx.emit,
+                "Исходный документ с теми же метками: оформление, таблицы, нумерация и колонтитулы сохраняются",
+                "file",
+            )
+        m.add_separator()
+        m.add_item(
+            "Вернуть настоящие данные…", self.restore_names.emit,
+            "Вставьте ответ нейросети или юриста с метками и получите текст с настоящими значениями", "refresh",
+            sensitive=True,
+        )
+        m.add_item(
+            "Таблица замен (.csv)", self.export_csv.emit,
+            "Содержит исходные данные, не передавайте ее вместе с обезличенным текстом", "table", sensitive=True,
+        )
+        m.show_under(self.toggle)
+
+    def update_state(
+        self, unreviewed: int, values: int, places: int, export_name: str, pdf: bool = False, docx: bool = False,
+    ) -> None:
+        ready = unreviewed == 0
+        self.steps.set_states(["done", "done" if ready else "active", "active" if ready else "todo"])
+        self.pending.setVisible(not ready)
+        self.ready.setVisible(ready)
+        self.pending.setText(f"Не проверено: {plural(unreviewed, ('кандидат', 'кандидата', 'кандидатов'))}")
+        self.summary.setText(replaced_summary(values, places))
+        self.summary.setToolTip(self.summary.text())
+        self._export_name = export_name
+        self._pdf = pdf
+        self._docx = docx
+
+
+class Notice(QFrame):
+    """Плашка: значок, текст, действия справа и, если можно скрыть, крестик.
+
+    Один вид на всех экранах, отличается только тоном: info, warn, success, danger.
+    """
+
+    def __init__(
+        self, text: str = "", error: bool = False, plain: bool = False, parent: Optional[QWidget] = None,
+        tone: Optional[str] = None, closable: bool = False,
+    ) -> None:
+        super().__init__(parent)
+        self.setObjectName("notice")
+        self.tone = tone or ("danger" if error else "info" if plain else "warn")
+        self.setProperty("tone", self.tone)
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(10)
+        self.row = layout
+        self.icon = QLabel()
+        self.icon.setFixedSize(16, 16)
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.label = make_selectable(QLabel(text))
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setMinimumHeight(24)
+        layout.addWidget(self.label, 1)
+        self.button: Optional[QPushButton] = None
+        self.close_button: Optional[QPushButton] = None
+        self.slot: Optional[QWidget] = None  # обертка с отступом сверху, скрывается вместе с плашкой
+        if closable:
+            self.close_button = make_button(kind="iconButton", small=True, tooltip="Скрыть")
+            self.close_button.clicked.connect(self.hide)
+            layout.addWidget(self.close_button)
+        self.set_tone(self.tone)
+
+    def set_tone(self, tone: str) -> None:
+        self.tone = tone
+        _bg, _line, ink, icon_name = t.TONES[tone]
+        self.icon.setPixmap(pixmap(icon_name, ink, 16))
+        if self.close_button is not None:
+            self.close_button.setIcon(icon("x", ink, 14))
+        set_prop(self, "tone", tone)
+        for child in self.findChildren(QWidget):
+            child.style().unpolish(child)
+            child.style().polish(child)
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802
+        super().setVisible(visible)
+        if self.slot is not None:
+            self.slot.setVisible(visible)
+
+    def add_button(
+        self, text: str, handler: Callable[[], None], link: bool = False, primary: bool = False,
+    ) -> QPushButton:
+        """Действие справа: небольшая кнопка (link — без рамки, primary — основная)."""
+        button = make_button(text, kind="primary" if primary else "ghost" if link else "", small=True)
+        button.clicked.connect(handler)
+        index = self.row.indexOf(self.close_button) if self.close_button is not None else self.row.count()
+        self.row.insertWidget(index, button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.button = button
+        return button
+
+
+class Toast(QFrame):
+    """Одно уведомление внизу окна поверх содержимого. Тон warn или error добавляет значок."""
+
+    TONE_ICONS = {"warn": ("warn", "#f0b35a"), "error": ("error", "#f08a93"), "success": ("check", "#7fd3a1")}
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setObjectName("toast")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 10, 10)
+        layout.setSpacing(12)
+        self.tone_icon = QLabel()
+        self.tone_icon.setFixedSize(16, 16)
+        layout.addWidget(self.tone_icon)
+        self.label = make_selectable(QLabel())
+        self.label.setWordWrap(True)
+        self.label.setMaximumWidth(520)
+        layout.addWidget(self.label, 1)
+        self.action = QPushButton()
+        self.action.setCursor(Qt.CursorShape.PointingHandCursor)
+        layout.addWidget(self.action)
+        self.close_button = make_button(kind="iconButton", small=True, tooltip="Закрыть")
+        self.close_button.setIcon(icon("x", "#b9bcc4", 14, t.PAPER))
+        self.close_button.clicked.connect(self.hide)
+        layout.addWidget(self.close_button)
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(self.hide)
+        self._handler: Optional[Callable[[], None]] = None
+        self._paused = False
+        self.action.clicked.connect(self._run_action)
+        t.add_shadow(self, pop=True)
+        self.hide()
+
+    def show_message(
+        self, text: str, duration_ms: int = 4000, action: Optional[tuple[str, Callable[[], None]]] = None,
+        tone: str = "info",
+    ) -> None:
+        tone_icon = self.TONE_ICONS.get(tone)
+        if tone_icon:
+            self.tone_icon.setPixmap(pixmap(tone_icon[0], tone_icon[1], 16))
+        self.tone_icon.setVisible(tone_icon is not None)
+        self.label.setText(text)
+        if action:
+            self.action.setText(action[0])
+            self._handler = action[1]
+            self.action.show()
+        else:
+            self._handler = None
+            self.action.hide()
+        self._place()
+        self.show()
+        self.raise_()
+        self._timer.start(duration_ms)
+
+    # Пока курсор над уведомлением, оно не закрывается: текст успевают выделить и скопировать.
+    def enterEvent(self, event) -> None:  # noqa: N802
+        if self._timer.isActive():
+            self._timer.stop()
+            self._paused = True
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if self._paused and self.isVisible():
+            self._timer.start(3000)
+        self._paused = False
+        super().leaveEvent(event)
+
+    def _place(self) -> None:
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        self.adjustSize()
+        x = (parent.width() - self.width()) // 2
+        y = parent.height() - self.height() - 24
+        self.move(max(8, x), max(8, y))
+
+    def _run_action(self) -> None:
+        handler = self._handler
+        self.hide()
+        if handler:
+            handler()
+
+
+class Pane(QFrame):
+    """Колонка с текстом документа: карточка с заголовком высотой 48 px.
+
+    В заголовке слева место для переключателя вида, затем название колонки и ее
+    подсказка; справа место для флажка «Результат рядом». Переключатель и флажок
+    общие для двух колонок и переезжают в заголовок той, что видна (put_view_controls).
+    """
+
+    HEAD_H = 48
+
+    def __init__(self, title: str) -> None:
+        super().__init__()
+        self.setObjectName("pane")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 0, 1, 1)
+        layout.setSpacing(0)
+        self.head = QFrame()
+        self.head.setObjectName("paneHead")
+        self.head.setFixedHeight(self.HEAD_H)
+        self.head_row = QHBoxLayout(self.head)
+        self.head_row.setContentsMargins(12, 0, 12, 0)
+        self.head_row.setSpacing(10)
+        self.view_slot = QHBoxLayout()
+        self.view_slot.setContentsMargins(0, 0, 0, 0)
+        self.head_row.addLayout(self.view_slot)
+        self.title = QLabel(title)
+        self.title.setObjectName("paneTitle")
+        self.head_row.addWidget(self.title)
+        self.head_row.addStretch(1)
+        self.extra = QHBoxLayout()
+        self.extra.setContentsMargins(0, 0, 0, 0)
+        self.extra.setSpacing(10)
+        self.head_row.addLayout(self.extra)
+        self.option_slot = QHBoxLayout()
+        self.option_slot.setContentsMargins(0, 0, 0, 0)
+        self.head_row.addLayout(self.option_slot)
+        layout.addWidget(self.head)
+        self.body = QVBoxLayout()
+        self.body.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self.body, 1)
+
+    def add_head_widget(self, widget: QWidget) -> None:
+        self.extra.addWidget(widget)
+
+    def put_view_controls(self, view: QWidget, option: Optional[QWidget]) -> None:
+        if view.parentWidget() is not self.head:
+            self.view_slot.addWidget(view)
+        if option is not None and option.parentWidget() is not self.head:
+            self.option_slot.addWidget(option)

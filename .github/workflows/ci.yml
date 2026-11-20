@@ -108,6 +108,26 @@ jobs:
         if: runner.os == 'Linux'
         run: ruff check .
 
+      # Значения из настоящих документов (эталон корпуса, присланные файлы) хранятся только в секрете
+      # PRIVATE_VALUES, по одному на строку. Скрипт печатает место совпадения, но не само значение.
+      # Без секрета шаг пропускается.
+      - name: No values from real documents
+        if: runner.os == 'Linux'
+        env:
+          PRIVATE_VALUES: ${{ secrets.PRIVATE_VALUES }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if [ -z "$PRIVATE_VALUES" ]; then echo "Секрет PRIVATE_VALUES не задан, проверка пропущена"; exit 0; fi
+          printf '%s\n' "$PRIVATE_VALUES" > "$RUNNER_TEMP/values.txt"
+          printf '%s\n%s\n' "$PR_TITLE" "$PR_BODY" > "$RUNNER_TEMP/pr.txt"
+          status=0
+          python scripts/check_private_values.py --root "$RUNNER_TEMP/none" --values-file "$RUNNER_TEMP/values.txt" || status=1
+          python scripts/check_private_values.py --root "$RUNNER_TEMP/none" --values-file "$RUNNER_TEMP/values.txt" \
+            --text "$RUNNER_TEMP/pr.txt" || status=1
+          rm -f "$RUNNER_TEMP/values.txt"
+          exit $status
+
       - name: DirectML build of onnxruntime
         if: runner.os == 'Windows'
         run: python -c "import onnxruntime as o; p = o.get_available_providers(); print(o.__version__, p); assert 'DmlExecutionProvider' in p"

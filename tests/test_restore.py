@@ -38,5 +38,20 @@ def test_map_uses_current_values_and_skips_inactive_entities() -> None:
     ]
     other = [entity("p2", "PERSON", "[PERSON_1]", 0, 4), entity("x", "PERSON", "[PERSON_4]", 26, 30)]
     mapping = restore_map([(text, first), (text, other)])
-    # Значение берется из первого документа, пробелы внутри схлопываются.
-    assert mapping == {"[PERSON_1]": "Иван Петров", "[COMPANY_1]": "Acme", "[PERSON_4]": "Carl"}
+    # Первым идет написание из первого документа, пробелы внутри схлопываются.
+    assert mapping == {"[PERSON_1]": ["Иван Петров", "Иван"], "[COMPANY_1]": ["Acme"], "[PERSON_4]": ["Carl"]}
+
+
+def test_bilingual_label_gets_spelling_of_surrounding_text() -> None:
+    text = "Адрес: г. Минск, ул. Лесная, 5. Address: 5 Lesnaya St, Minsk."
+    address = Entity(
+        id="a", type="ADDRESS", value="", placeholder="[ADDRESS_1]", anonymize=True,
+        positions=[Position(text.index("г. Минск"), text.index(". Address")),
+                   Position(text.index("5 Lesnaya"), len(text) - 1)],
+    )
+    mapping = restore_map([(text, [address])])
+    answer = "| Адрес: [ADDRESS_1] | Address: [ADDRESS_1] |\nСм. [ADDRESS_1].\nSee [ADDRESS_1].\n[ADDRESS_1]"
+    assert restore_text(answer, mapping).text == (
+        "| Адрес: г. Минск, ул. Лесная, 5 | Address: 5 Lesnaya St, Minsk |\n"
+        "См. г. Минск, ул. Лесная, 5.\nSee 5 Lesnaya St, Minsk.\nг. Минск, ул. Лесная, 5"
+    )

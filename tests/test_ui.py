@@ -1112,6 +1112,37 @@ def test_restore_dialog_returns_real_values(qtbot, window, tmp_path, monkeypatch
 
     assert QApplication.clipboard().text() == dialog.output.toPlainText()
 
+
+def test_restore_dialog_returns_real_values_into_word_file(qtbot, window, tmp_path, monkeypatch):
+    """Поправленный Word с метками открывается файлом, копия сохраняется с настоящими данными."""
+    import zipfile
+
+    from md_blinder.ui.restore_dialog import RestoreDialog
+
+    monkeypatch.setattr(RestoreDialog, "exec", lambda self: 0)
+    open_docx(qtbot, window, tmp_path, para(TEXT))
+    email = next(e for e in window.session.entities if e.type == "EMAIL")
+    window.open_restore()
+    dialog = window.restore_dialog
+    qtbot.addWidget(dialog)
+    edited = make_docx(tmp_path / "ответ.docx", para(f"Пишите на {email.placeholder} или [EMAIL_99]."))
+    target = tmp_path / "результат.docx"
+    asked: list[str] = []
+    monkeypatch.setattr(dialog, "_pick_file", lambda: edited)
+    monkeypatch.setattr(dialog, "_save_path", lambda name, _filter: asked.append(name) or target)
+    dialog.open_file()
+    assert asked == [str(tmp_path / "ответ (с настоящими данными).docx")]
+    with zipfile.ZipFile(target) as archive:
+        body = archive.read("word/document.xml").decode("utf-8")
+    assert "Пишите на ivan@example.com или [EMAIL_99]." in body
+    assert "сохранен" in dialog.status.text() and "[EMAIL_99]" in dialog.status.text()
+
+    answer = tmp_path / "ответ.md"
+    answer.write_text(f"Почта {email.placeholder}", encoding="utf-8")
+    monkeypatch.setattr(dialog, "_pick_file", lambda: answer)
+    dialog.open_file()
+    assert dialog.output.toPlainText() == "Почта ivan@example.com"
+
 @pytest.mark.parametrize("field_y", [700, 120, 400])
 def test_type_list_stays_on_screen(qtbot, window, tmp_path, field_y):
     """Список типов на карточке кандидата не уходит за край маленького экрана: внизу

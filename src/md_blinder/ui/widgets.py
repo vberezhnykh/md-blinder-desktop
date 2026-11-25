@@ -728,7 +728,7 @@ class StatusStrip(QWidget):
         m.add_separator()
         m.add_item(
             "Вернуть настоящие данные…", self.restore_names.emit,
-            "Вставьте ответ нейросети или юриста с метками и получите текст с настоящими значениями", "refresh",
+            "Ответ нейросети или юриста с метками, текстом или файлом Word, получает настоящие значения", "refresh",
             sensitive=True,
         )
         m.add_item(
